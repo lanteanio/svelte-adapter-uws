@@ -9,6 +9,22 @@
 // Shared by svelte.config.js (which config to build) and the test harness
 // (where the output lands), so the two cannot drift apart.
 
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * Where the posture-export variant listens. Exported so the suite connects to
+ * the same path the build baked in - the option is a build-time constant, so a
+ * second spelling in the test would be a second source of truth.
+ *
+ * A Windows named pipe never touches the filesystem and disappears with its
+ * owner; elsewhere a socket file under the temp directory, which the export
+ * unlinks on close.
+ */
+export const POSTURE_EXPORT_PATH = process.platform === 'win32'
+	? '\\\\.\\pipe\\svelte-adapter-uws-fixture-posture'
+	: join(tmpdir(), 'svelte-adapter-uws-fixture-posture.sock');
+
 export const FIXTURE_VARIANTS = {
 	// The long-standing default. Several suites already boot `build/`, so this
 	// entry must keep both its output directory and its options unchanged.
@@ -119,6 +135,22 @@ export const FIXTURE_VARIANTS = {
 		websocket: {
 			allowedOrigins: '*',
 			upgradeRateLimit: 100
+		}
+	},
+
+	// The posture push-export ARMED, on the worker-crash handler. Both halves
+	// are needed by the same suite: the export's owner under `workers` is what
+	// is under test, and a worker exiting is what used to remove the live
+	// socket out from under a reader. Its own output directory because a bound
+	// export in every ordinary fixture build would have every suite racing for
+	// one path.
+	posture: {
+		out: 'build-posture',
+		handler: './src/hooks.ws.workercrash.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			postureExport: POSTURE_EXPORT_PATH
 		}
 	},
 

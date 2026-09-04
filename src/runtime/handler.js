@@ -56,6 +56,7 @@ import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
+import { hasMultipleWorkers } from './handler/cluster-sequence-policy.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
 import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
 import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
@@ -1199,16 +1200,37 @@ if (WS_ENABLED) {
 		if (typeof exportPath !== 'string' || exportPath.length === 0) {
 			throw new Error("websocket.postureExport must be a socket path string or { path } (or omitted)");
 		}
-		const exporter = startPostureExport(exportPath, () => ({
+		const postureLine = () => ({
 			v: 1,
 			posture: postureLevel(),
 			reason: pressureSnapshot.reason,
 			value: pressureSnapshot.value,
 			psi: pressureSnapshot.psi ?? null,
 			cpuThrottle: pressureSnapshot.cpuThrottle ?? null
-		}));
-		counters.postureExporter = exporter;
-		counters.postureExportHook = () => exporter.broadcast();
+		});
+		if (parentPort && hasMultipleWorkers()) {
+			// One path, N workers: whoever binds last owns it and everyone
+			// else is listening on an orphaned inode, so a consumer would read
+			// one bind-order-chosen thread's posture and believe it was the
+			// server's. The primary binds instead (see posture-collector.js)
+			// and this worker reports inward on the same two occasions it
+			// would have pushed locally - every transition and every sample.
+			// The path travels with the first report rather than through the
+			// environment, so the option stays the one place it is configured.
+			counters.postureExporter = null;
+			counters.postureExportHook = () => {
+				try {
+					parentPort.postMessage({ type: 'posture', threadId, path: exportPath, line: postureLine() });
+				} catch { /* the primary is gone; the cadence stopping IS the signal */ }
+			};
+			// One report before the first sample, so a consumer that connects
+			// during boot is not answered with silence for up to a second.
+			counters.postureExportHook();
+		} else {
+			const exporter = startPostureExport(exportPath, postureLine);
+			counters.postureExporter = exporter;
+			counters.postureExportHook = () => exporter.broadcast();
+		}
 	} else {
 		counters.postureExporter = null;
 		counters.postureExportHook = null;

@@ -1549,6 +1549,13 @@ export interface WebSocketOptions {
 	 * for an external edge-defense daemon or watchdog that wants the app's
 	 * load state without speaking its protocol. Local-only and payload-free.
 	 *
+	 * With `workers` configured the line describes the DEPLOYMENT: one socket
+	 * cannot have several owners, so each worker reports inward and the primary
+	 * serves the highest posture any worker is in, carrying that worker's own
+	 * `reason` and pressure numbers, plus a `workers` count of the threads it
+	 * summarizes. A worker that exits is dropped rather than remembered. A
+	 * single-process deployment is unchanged and carries no `workers` field.
+	 *
 	 * @example
 	 * ```js
 	 * adapter({ websocket: { postureExport: '/run/app/posture.sock' } });

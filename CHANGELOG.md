@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. What genuinely needs a ceiling is the auto step INTO `'siege'`, which compares over-capacity rejects against that ceiling's admit rate; a pinned `'elevated'` or `'siege'` needs no ceiling either.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the posture export describes the whole deployment under `workers`.** One socket path cannot have several owners, so every worker unlinked the previous one's socket and bound its own: a consumer read one bind-order-chosen thread's posture and believed it was the server's, and any worker's shutdown removed the live socket.
+  - **Affects:** Deployments setting both `postureExport` and `workers`. Single-process deployments are untouched.
+  - **Action:** None. The documented path is the same path.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The primary owns the socket and serves the highest posture any worker is in, carrying that worker's own reason and pressure numbers. The line gains an additive `workers` count of the threads it summarizes; single-process lines do not carry it. The 1 Hz cadence and its liveness meaning are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: `publishWire` no longer treats an application's options as a relayed frame.** The cross-worker relay marked its re-entry with two ordinary option keys, so an app that set them was handled as a sibling worker's relay: it named the topic's seq itself, uncounted, past an armed egress ceiling, and out over the relay.
   - **Affects:** Apps calling `platform.publishWire` directly, including through a plugin codec. No documented option changes and no ordinary call behaves differently.
   - **Action:** None.
@@ -242,6 +248,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **The posture export describes the deployment when `workers` is set.** It is
+  one socket path and the option is a build-time constant, so every worker
+  evaluated the same install: each unlinked the previous owner's socket and
+  bound its own, leaving only the last to bind reachable while the rest
+  listened on orphaned inodes, and the first worker to shut down removed
+  whichever socket was live at that moment. A consumer read one
+  bind-order-chosen thread's posture and believed it was the server's - worse
+  than reading none, since the export exists so an edge-defense daemon can act
+  on it, and it would have acted on a quiet worker while a sibling was under
+  siege.
+  The primary owns the socket now. Each worker reports its posture inward on
+  the same two occasions it used to push locally - every transition and every
+  1 Hz sample - and the primary serves the aggregate: the highest posture any
+  worker is in, carrying THAT worker's own `reason` and pressure numbers so
+  the line stays internally consistent, plus a `workers` count of the threads
+  it summarizes. The kernel readings are host-wide, so which worker they come
+  from does not change them. A worker that exits is dropped rather than
+  remembered - the aggregate is the worst worker, and a thread that died in
+  siege would otherwise pin the deployment there for as long as the primary
+  ran. The 1 Hz cadence is driven by the primary at a fixed rate rather than
+  by the workers' samples, which would have made it a function of the worker
+  count; when no worker has reported, the cadence stops, which is what the
+  contract already means by silence. Single-process deployments are untouched:
+  the worker still binds its own socket and its line carries no `workers`
+  field. The path travels to the primary with the first report rather than
+  through the environment, so the option stays the one place it is configured.
 
 - **A publish can no longer claim to be a relayed frame.** `publishWire` has an
   origin side and a relay receive side, and one boolean picks between them: the

@@ -42,7 +42,11 @@ const MAX_CLIENT_BUFFER = 64 * 1024;
  * Start the export server.
  *
  * @param {string} path unix socket path (or `\\\\.\\pipe\\...` on Windows)
- * @param {() => Record<string, any>} getLine builds the current posture line object
+ * @param {() => (Record<string, any> | null)} getLine builds the current posture
+ *   line object, or returns null when there is nothing to report yet - a
+ *   clustered export has no line until its first worker has reported one, and
+ *   writing a placeholder would hand a connecting consumer a posture nothing is
+ *   in. Silence is already what the contract means by "not serving".
  * @returns {{ broadcast: () => void, close: () => void, clientCount: () => number }}
  */
 export function startPostureExport(path, getLine) {
@@ -65,7 +69,8 @@ export function startPostureExport(path, getLine) {
 		// Consumers are read-only; drain and ignore anything they send.
 		socket.on('data', () => {});
 		try {
-			socket.write(JSON.stringify(getLine()) + '\n');
+			const line = getLine();
+			if (line !== null) socket.write(JSON.stringify(line) + '\n');
 		} catch { /* raced a disconnect */ }
 	});
 	// The one failure line covers two shapes with opposite operator stories: a
@@ -101,7 +106,9 @@ export function startPostureExport(path, getLine) {
 			if (closed || clients.size === 0) return;
 			let line;
 			try {
-				line = JSON.stringify(getLine()) + '\n';
+				const snapshot = getLine();
+				if (snapshot === null) return;
+				line = JSON.stringify(snapshot) + '\n';
 			} catch {
 				return; // a non-serializable snapshot must not break the sampler
 			}
