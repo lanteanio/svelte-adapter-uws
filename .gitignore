@@ -1,5 +1,10 @@
 node_modules
-build
+# Anchored to the repository root. Unanchored, `build` matches a directory of
+# that name at ANY depth, so a hand-written module under one is invisible to
+# git while npm still packs it from the `files` allowlist - the published
+# tarball works and a fresh clone does not, which is the pairing that hides.
+# Source belongs at src/ root beside build-config.js, never under a build/.
+/build
 coverage
 bench/_tmp_static
 .env
@@ -15,6 +20,8 @@ source
 test/fixture/node_modules
 test/fixture/build
 test/fixture/build-*
+# The plural directory is a different tree with the same generated output.
+test/fixtures/*/build
 test/fixture/.build-lock
 test-results
 playwright-report

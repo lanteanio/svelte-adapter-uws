@@ -19,7 +19,7 @@ import {
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
-import { writeAndCloseRollupBundle } from './build/rollup-lifecycle.js';
+import { writeAndCloseRollupBundle } from './build-rollup-lifecycle.js';
 import { compileAccessibleWaitingRoomTemplate } from './runtime/utils/waiting-room-template.js';
 import { normalizeMessageAdmission } from './runtime/utils/message-admission.js';
 

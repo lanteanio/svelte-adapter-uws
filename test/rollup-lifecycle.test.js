@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { rollup } from 'rollup';
-import { writeAndCloseRollupBundle } from '../src/build/rollup-lifecycle.js';
+import { writeAndCloseRollupBundle } from '../src/build-rollup-lifecycle.js';
 
 const dirs = [];
 
