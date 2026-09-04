@@ -83,8 +83,16 @@ const ADMIT_TOKEN = Symbol('adapter-uws.egress-admit-token');
 /**
  * Mark an options object this runtime built as already admitted.
  *
- * A plain assignment, so the property is own and enumerable and a spread
- * carries it. The batch lanes COPY these objects per entry
+ * `defineProperty` rather than an assignment, and that is not a style choice.
+ * A plain `[[Set]]` walks the prototype chain: an accessor installed on
+ * `Object.prototype` for this key intercepts the write, so the token is handed
+ * to whoever installed it AND no own property is created - every entry then
+ * re-decides. An application does not have to be hostile to cause the second
+ * half; any accessor on that key breaks batch atomicity silently. Defining the
+ * property consults no prototype and both problems go away.
+ *
+ * Own, writable, enumerable and configurable, because a spread carries own
+ * enumerable properties and the batch lanes COPY these objects per entry
  * (`{ ...admitOpts, excludeWs }` when an entry overrides an exclusion or a
  * seq), and an entry whose copy lost the marker re-takes a decision its batch
  * has already made.
@@ -103,7 +111,12 @@ const ADMIT_TOKEN = Symbol('adapter-uws.egress-admit-token');
  * @returns {T}
  */
 export function markAdmitted(options) {
-	options[EGRESS_ADMITTED] = ADMIT_TOKEN;
+	Object.defineProperty(options, EGRESS_ADMITTED, {
+		value: ADMIT_TOKEN,
+		writable: true,
+		enumerable: true,
+		configurable: true
+	});
 	return options;
 }
 

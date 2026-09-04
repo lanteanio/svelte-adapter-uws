@@ -315,6 +315,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair of helpers. The value is a second symbol that is never used as a key,
   which is what a `get` trap cannot answer: such a trap is handed the key it is
   asked for, so a marker whose value is its own key is echoed straight back.
+  The write defines the property rather than assigning it, because a plain
+  assignment walks the prototype chain: an accessor installed for that key on
+  `Object.prototype` both receives the token and stops the own property being
+  created. That second half needed no attacker - any application with an
+  accessor on that key made every batch entry re-decide, so a batch delivered a
+  prefix and dropped its tail.
   `createTestServer` and the dev plugin take the same decision. The forgery
   case that already existed listed five spellings of the key; it now also
   carries the shapes that name nothing, including the echo.

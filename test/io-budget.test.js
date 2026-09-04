@@ -1549,10 +1549,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// lanes reach them through `markAdmitted` and `admittedByBatch` - the value
 	// is a second symbol that is never a key, because a `get` trap is handed
 	// the key it is asked for and can echo it back. A property read becomes a
-	// comparison, and calls replace two inline expressions. No statement
-	// executes differently on any frame path, no byte is read, allocated or
-	// copied, and no copy primitive entered.
-	platform: 'f04f979ad7afdca6b487436afe64f934ad8039f471b01538a1f2b330951d452c',
+	// comparison, and calls replace two inline expressions. The write is a
+	// `defineProperty` rather than an assignment, because a plain `[[Set]]`
+	// walks the prototype chain: an accessor on that key takes the token and
+	// writes no own property, which re-decides every batch entry. One
+	// descriptor object per marked options object, on the batch lanes only. No
+	// statement executes differently on any frame path, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: '6528859410579a0532f5e303d3c8c957706acfd095285a95a6fff2d9098b9c0c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -467,6 +467,55 @@ describe('a batch is admitted whole or not at all', () => {
 		expect(server.platform.pressure.egress.refusedTopic, 'an entry re-took a decision its batch had made').toBe(0);
 	});
 
+	it('marks the batch decision without consulting the prototype chain', async () => {
+		// A plain `obj[key] = value` walks the prototype chain. With an accessor
+		// installed on Object.prototype for that key, the write is intercepted:
+		// the value goes to whoever installed it and NO own property is
+		// created. The second half needs no attacker at all - any application
+		// that puts an accessor on that key makes every batch entry re-decide,
+		// so a batch delivers a prefix and drops its tail, silently.
+		//
+		// The key is reachable: a `get` trap is handed the key it is asked for.
+		// So the test obtains it the way an application would, rather than
+		// importing it - importing it would prove nothing about reachability.
+		const cap = 'egress-proto-setter';
+		const wire = { capability: cap, schemaVersion: 1, encode: () => Uint8Array.of(1) };
+		const server = await boot({ egress: { windowMs: 60000, topic: { bytes: 1 } } });
+		server.platform.registerWireCodec(wire);
+		const client = await connect(server.wsUrl, 'feed');
+
+		/** @type {symbol | null} */
+		let key = null;
+		server.platform.publish('capture', 'e', { n: 0 }, new Proxy({}, {
+			get: (_t, k) => { if (typeof k === 'symbol' && key === null) key = k; return undefined; }
+		}));
+		expect(key, 'the admission marker key was never read off the options object').not.toBe(null);
+
+		/** @type {unknown} */
+		let stolen = null;
+		Object.defineProperty(Object.prototype, /** @type {symbol} */ (key), {
+			set(v) { stolen = v; },
+			get() { return undefined; },
+			configurable: true
+		});
+		try {
+			const entries = [
+				{ data: { n: 1 } },
+				{ data: { n: 2 } },
+				{ data: { n: 3 }, seq: 7 }
+			];
+			expect(server.platform.publishWireBatch('feed', 'e', entries, wire, { seq: false })).toBe(true);
+			await sleep(150);
+
+			expect(stolen, 'the admission token was handed to an inherited setter').toBe(null);
+			const seen = client.frames.filter((f) => f.topic === 'feed' && f.event === 'e');
+			expect(seen.length, 'the batch delivered a prefix').toBe(3);
+		} finally {
+			// @ts-expect-error - deleting a symbol-keyed property off the prototype
+			delete Object.prototype[key];
+		}
+	});
+
 	it('a mixed-topic batch pools its tenant share across the topics it spans', async () => {
 		// One tenant's ceiling covers all of its topics at once. Asking per
 		// topic against a window nothing has charged yet let a batch of N
