@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
+import { expectStatement } from './helpers/source-pins.js';
 import {
 	GAME_LANE_CLUSTER_ERROR,
 	assertGameLaneClusterSafe,
@@ -70,8 +71,8 @@ describe('game lane cluster topology guard', () => {
 		};
 		const grant = carve('grantPublish', '\tgrantPublish(', '\n\trevokePublish(');
 		const publish = carve('publishGame', '\tpublishGame(', '\n\t/**\n\t * Unsubscribe');
-		expect(grant).toContain('assertGameLaneClusterSafe()');
-		expect(publish).toContain('assertGameLaneClusterSafe()');
-		expect(handlerSource).toContain('const clusterSafe = gameLaneClusterSafe(workerData);');
+		expectStatement(grant, 'assertGameLaneClusterSafe();', 'grantPublish refuses a forked game lane');
+		expectStatement(publish, 'assertGameLaneClusterSafe();', 'publishGame refuses a forked game lane');
+		expectStatement(handlerSource, 'const clusterSafe = gameLaneClusterSafe(workerData);', 'the handler resolves game-lane cluster safety once');
 	});
 });

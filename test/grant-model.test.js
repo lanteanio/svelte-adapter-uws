@@ -16,6 +16,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { hasUWS } from './helpers/real-runtime.js';
+import { expectStatement } from './helpers/source-pins.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -266,22 +267,25 @@ describe('grant-model wiring - source guards', () => {
 	// of these instead of silently reopening the hole.
 
 	it('platform.subscribe tracks the in-flight subscribe and discards a revoked grant', () => {
-		expect(platformSrc).toContain('beginPendingSubscribe(ud, topic, held)');
+		expectStatement(platformSrc, 'const pendingToken = beginPendingSubscribe(ud, topic, held);', 'platform.subscribe opens the in-flight record');
 		expect(/!settlePendingSubscribe\(ud, topic, pendingToken, true\)\) return 'FORBIDDEN'/.test(platformSrc)).toBe(true);
 		// The held-at-landing branch reads the membership's provenance: a revoked
 		// attempt whose own hook installed it must not ack it.
-		expect(platformSrc).toContain('settleHeldSubscribe(ud, topic, pendingToken)');
+		expectStatement(platformSrc, 'const heldVerdict = settleHeldSubscribe(ud, topic, pendingToken);', 'platform.subscribe reads the membership provenance at landing');
 	});
 
 	it('platform.unsubscribe tombstones the pending subscribe and returns it truthfully', () => {
-		expect(platformSrc).toContain('tombstonePendingSubscribe(ud, topic)');
+		expectStatement(platformSrc, 'const cancelledPending = tombstonePendingSubscribe(ud, topic);', 'platform.unsubscribe tombstones the pending subscribe');
 		expect(platformSrc).toContain('if (!subs.has(topic)) return cancelledPending;');
 	});
 
 	it('the wire subscribe landing checks the revocation tombstone before ws.subscribe', () => {
-		expect(handlerSrc).toContain('beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic))');
+		expectStatement(handlerSrc, 'const pendingToken = beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic));', 'the wire subscribe opens the in-flight record');
 		expect(handlerSrc).toContain('if (!settlePendingSubscribe(pendingUd, msg.topic, pendingToken, true)) {');
-		expect(handlerSrc).toContain('settleHeldSubscribe(pendingUd, msg.topic, pendingToken)');
+		// Both landings: the subscribe lane and the recover lane each read the
+		// provenance, and neutralizing either one alone has to fail this.
+		expectStatement(handlerSrc, 'const heldVerdict = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);', 'the wire subscribe landing reads the membership provenance');
+		expectStatement(handlerSrc, 'const heldVerdictR = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);', 'the recover landing reads the membership provenance');
 	});
 
 	it('checkSubscribe passes requireGrant only from the observer lanes', () => {
@@ -289,8 +293,8 @@ describe('grant-model wiring - source guards', () => {
 		// passing it, that caller is asking for the stricter gate on purpose.
 		const presenceSrc = readFileSync(path.join(ROOT, 'src/plugins/presence/server.js'), 'utf8');
 		const cursorSrc = readFileSync(path.join(ROOT, 'src/plugins/cursor/server.js'), 'utf8');
-		expect(presenceSrc).toContain('checkSubscribe(ws, topic, { requireGrant: true })');
-		expect(cursorSrc).toContain('checkSubscribe(ws, topic, { requireGrant: true })');
+		expectStatement(presenceSrc, 'platform.checkSubscribe(ws, topic, { requireGrant: true })', 'presence asks for the stricter gate');
+		expectStatement(cursorSrc, 'platform.checkSubscribe(ws, topic, { requireGrant: true })', 'cursor asks for the stricter gate');
 		expect(platformSrc).toContain('const requireGrant = Boolean(options && options.requireGrant)');
 	});
 
