@@ -66,6 +66,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	CLUSTER_CONFIG_COMPUTE: 'ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE',
 	CLUSTER_CONFIG_MODE: 'ADAPTER-ERR-CLUSTER-CONFIG-MODE',
 	CLUSTER_CONFIG_REUSEPORT: 'ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT',
+	CLUSTER_CONFIG_PORT: 'ADAPTER-ERR-CLUSTER-CONFIG-PORT',
 	TLS_PRIMARY_BOOT_READ: 'ADAPTER-ERR-TLS-PRIMARY-BOOT-READ',
 	TLS_PRIMARY_RELOAD_READ: 'ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ',
 	TLS_PRIMARY_WATCH: 'ADAPTER-ERR-TLS-PRIMARY-WATCH',
@@ -841,6 +842,24 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-cluster-config-mode',
 		help: 'docs/errors.md#adapter-err-cluster-config-mode'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_PORT,
+		code: null,
+		event: 'cluster.config.ephemeral-port',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] PORT=0 cannot be combined with CLUSTER_MODE=reuseport (each worker would bind its own kernel-assigned port, so the workers do not share one: ',
+		cause: 'PORT=0 asks the kernel for an ephemeral port, and reuseport clustering has every I/O worker call listen() for itself. Each worker is then assigned a DIFFERENT port, so the one thing reuseport exists to provide - many workers behind a single shared port - does not happen.',
+		consequence: 'The fleet boots green and serves on ports nobody knows. Nothing routes to it: a load balancer, a health check and the startup log all name the configured port, which is 0, while each worker answers somewhere else. Acceptor mode is unaffected, because there the primary binds once and hands descriptors to the workers.',
+		automaticRecovery: 'None. The primary exits with status 1 before spawning any worker, the way every other capacity misconfiguration in this block does.',
+		nextAction: 'Set PORT to a real port when clustering with reuseport. If an ephemeral port is what you want - a test harness, a sandbox - either drop CLUSTER_WORKERS to run single-process, or use CLUSTER_MODE=acceptor, where one bind in the primary makes an ephemeral port meaningful again.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-cluster-config-port',
+		help: 'docs/errors.md#adapter-err-cluster-config-port',
+		link: 'https://svti.me/cluster-mode'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_REUSEPORT,

@@ -901,7 +901,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// entry that names it. A boolean return, one branch at module evaluation and
 	// frozen literal data. No statement executes differently on any frame path,
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	ingress: '176c0164c561689e4bbb74b431f7b644819f0abee297b68d7d9cf2bf97641fda',
+	//
+	// Re-pinned for the ephemeral-port cluster refusal: a stable error id and its
+	// registry entry, which every sealed graph reaches through the error registry.
+	// Frozen literal data plus one boot-time comparison in the primary, before any
+	// worker spawns. No statement executes differently on any frame path, no byte
+	// is read, allocated or copied, and no copy primitive entered.
+	ingress: '8cd946b19b3ba92238e6d9bedc2d010f334fd685ab1ce49745a85b0166913ae9',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1606,7 +1612,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// walked past every guard. One coercion on a value the parser already
 	// computed; no statement executes differently on any frame path, no byte is
 	// read, allocated or copied, and no copy primitive entered.
-	platform: 'f49bbac9b1cbb00131406a045be3d3e7a2dfe76ca56a1d69f2d6ace13835ff57',
+	//
+	// Re-pinned for the ephemeral-port cluster refusal: a stable error id and its
+	// registry entry, which every sealed graph reaches through the error registry.
+	// Frozen literal data plus one boot-time comparison in the primary, before any
+	// worker spawns. No statement executes differently on any frame path, no byte
+	// is read, allocated or copied, and no copy primitive entered.
+	platform: '9ff69dcdc36c0a5bcd2853021d3c1454d96df1950f5ef1aedb99621b491161e6',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1852,7 +1864,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// entry that names it. A boolean return, one branch at module evaluation and
 	// frozen literal data. No statement executes differently on any frame path,
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	'wire-fanout': '9962c58b1f2580d101b1d67967a7f8cdf7fc08930cb276a1b87f78e443bc5cd9',
+	//
+	// Re-pinned for the ephemeral-port cluster refusal: a stable error id and its
+	// registry entry, which every sealed graph reaches through the error registry.
+	// Frozen literal data plus one boot-time comparison in the primary, before any
+	// worker spawns. No statement executes differently on any frame path, no byte
+	// is read, allocated or copied, and no copy primitive entered.
+	'wire-fanout': '852f8fe0845279c7673ec93a8e468a6acbcf7dbd3f4d5d0dfc4d324a29378ad3',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

@@ -256,6 +256,19 @@ if (is_primary) {
 		process.exit(1);
 	}
 
+	// Ephemeral ports and a shared listening port are mutually exclusive by
+	// construction. Under reuseport every I/O worker calls listen() itself, so
+	// PORT=0 hands each of them a different kernel-assigned port and the fleet
+	// boots green serving where nothing routes. Acceptor mode is fine: the
+	// primary binds once and distributes descriptors, so one ephemeral port is
+	// still one port. Refused here rather than at bind time, with the rest of
+	// the capacity misconfigurations, so it costs no worker spawn.
+	if (cluster_mode === 'reuseport' && port === 0) {
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_PORT,
+			`${num} worker(s) would each bind a different one). Set PORT to a real port, or use CLUSTER_MODE=acceptor.`));
+		process.exit(1);
+	}
+
 	if (cluster_mode !== 'reuseport' && cluster_mode !== 'acceptor') {
 		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_MODE,
 			`${cluster_mode}'. Use 'reuseport' or 'acceptor'.`));

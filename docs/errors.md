@@ -4,7 +4,7 @@ Search this page with the exact stable ID, code, event, or beginning of the mess
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
 for traffic, whether anything recovers on its own, and what to do next: 40 entries
 against the 43 distinct diagnostic events emitted from the scanned sources, plus
-33 entries indexing consequential plain console lines that never enter the diagnostic
+34 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
@@ -68,6 +68,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-CLUSTER-CONFIG-WORKERS](#adapter-err-cluster-config-workers) | `cluster.config.invalid-workers` | `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE](#adapter-err-cluster-config-compute) | `cluster.config.invalid-compute-count` | `[svelte-adapter-uws] websocket.workers.compute (` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-MODE](#adapter-err-cluster-config-mode) | `cluster.config.invalid-mode` | `[svelte-adapter-uws] Invalid CLUSTER_MODE: '` |
+| [ADAPTER-ERR-CLUSTER-CONFIG-PORT](#adapter-err-cluster-config-port) | `cluster.config.ephemeral-port` | `[svelte-adapter-uws] PORT=0 cannot be combined with CLUSTER_MODE=reuseport (each worker would bind its own kernel-assigned port, so the workers do not share one: ` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT](#adapter-err-cluster-config-reuseport) | `cluster.config.reuseport-unsupported` | `[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ` |
 | [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read) | `tls.primary.boot-read-failed` | `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` |
 | [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read) | `tls.primary.reload-read-failed` | `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` |
@@ -157,6 +158,7 @@ the stable ID tag on the line):
 - `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '` - [ADAPTER-ERR-CLUSTER-CONFIG-WORKERS](#adapter-err-cluster-config-workers)
 - `[svelte-adapter-uws] websocket.workers.compute (` - [ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE](#adapter-err-cluster-config-compute)
 - `[svelte-adapter-uws] Invalid CLUSTER_MODE: '` - [ADAPTER-ERR-CLUSTER-CONFIG-MODE](#adapter-err-cluster-config-mode)
+- `[svelte-adapter-uws] PORT=0 cannot be combined with CLUSTER_MODE=reuseport (each worker would bind its own kernel-assigned port, so the workers do not share one: ` - [ADAPTER-ERR-CLUSTER-CONFIG-PORT](#adapter-err-cluster-config-port)
 - `[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ` - [ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT](#adapter-err-cluster-config-reuseport)
 - `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` - [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read)
 - `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` - [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read)
@@ -722,6 +724,19 @@ searchable log prefix is:
 - **Automatic recovery:** None. Startup configuration is validated once, at boot.
 - **Next action:** Use 'reuseport' (Linux only) or 'acceptor', or unset CLUSTER_MODE for the platform default.
 - **Runtime help:** `docs/errors.md#adapter-err-cluster-config-mode`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-cluster-config-port"></a>
+## `ADAPTER-ERR-CLUSTER-CONFIG-PORT`
+
+- **Code/event:** `cluster.config.ephemeral-port`
+- **Message prefix:** `[svelte-adapter-uws] PORT=0 cannot be combined with CLUSTER_MODE=reuseport (each worker would bind its own kernel-assigned port, so the workers do not share one: `
+- **Cause:** PORT=0 asks the kernel for an ephemeral port, and reuseport clustering has every I/O worker call listen() for itself. Each worker is then assigned a DIFFERENT port, so the one thing reuseport exists to provide - many workers behind a single shared port - does not happen.
+- **Consequence:** The fleet boots green and serves on ports nobody knows. Nothing routes to it: a load balancer, a health check and the startup log all name the configured port, which is 0, while each worker answers somewhere else. Acceptor mode is unaffected, because there the primary binds once and hands descriptors to the workers.
+- **Automatic recovery:** None. The primary exits with status 1 before spawning any worker, the way every other capacity misconfiguration in this block does.
+- **Next action:** Set PORT to a real port when clustering with reuseport. If an ephemeral port is what you want - a test harness, a sandbox - either drop CLUSTER_WORKERS to run single-process, or use CLUSTER_MODE=acceptor, where one bind in the primary makes an ephemeral port meaningful again.
+- **Operator shortlink:** `https://svti.me/cluster-mode`
+- **Runtime help:** `docs/errors.md#adapter-err-cluster-config-port`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
 
 <a id="adapter-err-cluster-config-reuseport"></a>

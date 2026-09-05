@@ -67,6 +67,53 @@ function refusalOf(value) {
 	});
 }
 
+// ADAPTER-ERR-CLUSTER-CONFIG-PORT, driven from its condition.
+//
+// LINUX ONLY, and not because the refusal is: reuseport itself is refused off
+// Linux by ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT, which fires first and exits
+// with its own id. So on any other platform this condition cannot be reached
+// at all, and a case that ran there would be asserting the wrong refusal.
+const describeLinux = process.platform === 'linux' ? describeUWS : describe.skip;
+
+describeLinux('ADAPTER-ERR-CLUSTER-CONFIG-PORT', () => {
+	it('refuses an ephemeral port under reuseport, before any worker spawns', async () => {
+		// Each I/O worker calls listen() for itself under reuseport, so PORT=0
+		// gives each of them a DIFFERENT kernel-assigned port - the one thing
+		// reuseport exists to provide does not happen, and the fleet boots green
+		// serving where nothing routes.
+		const env = { ...process.env };
+		for (const key of EVAL_TIME_ENV) delete env[key];
+		env.HOST = '127.0.0.1';
+		env.PORT = '0';
+		env.CLUSTER_WORKERS = '2';
+		env.CLUSTER_MODE = 'reuseport';
+
+		const proc = spawn(process.execPath, [builtEntry], { cwd: fixtureDir, stdio: ['ignore', 'pipe', 'pipe'], env });
+		child = proc;
+		const { code, output } = await new Promise((resolve) => {
+			let out = '';
+			proc.stdout.on('data', (c) => { out += c.toString(); });
+			proc.stderr.on('data', (c) => { out += c.toString(); });
+			const deadline = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} resolve({ code: null, output: out }); }, 20000);
+			proc.on('exit', (c) => { clearTimeout(deadline); resolve({ code: c, output: out }); });
+		});
+
+		expect(code, `PORT=0 under reuseport must exit 1: ${output.slice(0, 400)}`).toBe(1);
+		expect(output).toContain('ADAPTER-ERR-CLUSTER-CONFIG-PORT');
+		// And it must be THIS refusal, not the platform one it sits beside.
+		expect(output).not.toContain('ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT');
+	});
+
+	it('permits an ephemeral port under acceptor, where one bind serves the fleet', async () => {
+		// The control. Acceptor mode binds once in the primary and hands
+		// descriptors to the workers, so an ephemeral port is still one port and
+		// refusing it would be wrong.
+		const { code, output } = await refusalOf('2');
+		expect(output).not.toContain('ADAPTER-ERR-CLUSTER-CONFIG-PORT');
+		expect(code, 'an acceptor fleet on an ephemeral port must not be refused').not.toBe(1);
+	});
+});
+
 describeUWS('ADAPTER-ERR-CLUSTER-CONFIG-WORKERS', () => {
 	beforeAll(() => {
 		expect(buildFixtureOnce()).toBe(true);
