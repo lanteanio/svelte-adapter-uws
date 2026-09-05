@@ -918,7 +918,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// error-registry.js to its previous content restores all three moved digests
 	// and this whole file passes. No statement executes differently on any frame path, no
 	// byte is read, allocated or copied, and no copy primitive entered.
-	ingress: '39d180781e715221e545d3bb809e622046c8618f6539d9147e572650a3651117',
+	//
+	// Re-pinned for the control-egress budget, whose drift in THIS graph is one
+	// module and one kind of change: utils/ws-symbols.js, reached through
+	// utils.js, declares a `WS_CONTROL_BUDGET` symbol and lists it in
+	// CONNECTION_SLOTS. A symbol and an array entry. The budget itself and the
+	// send it guards are in handler/control-egress.js, which this graph does not
+	// reach - measured, by reverting only ws-symbols.js to HEAD, which leaves
+	// this digest at its previous value while the platform one still moves. The
+	// budget's own error id and registry entry ride the same change and reach
+	// every graph the way every id does, through utils/metrics.js - frozen
+	// literal data. No statement executes differently on any frame path, no byte
+	// is read, allocated or copied, and no copy primitive entered.
+	ingress: '33925d6ced81069a1d0658bfdb474d47d5e48de048a24682379c2823db397be1',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1635,7 +1647,26 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// entries through utils.js -> utils/metrics.js -> error-registry.js, frozen
 	// literal data, and nothing from the watcher or ledger code inside any
 	// sealed graph. Reverting only error-registry.js restores all three.
-	platform: 'a02e48f11820591d6b1cd5fb47e3f5f944a3da2bbc3c124550aa8b8af83f63a3',
+	//
+	// Re-pinned for the control-egress budget, which reaches this graph through
+	// handler/subscribe-hooks.js: the two ack senders now call `sendControl`
+	// instead of writing `ws.send` + `bumpOut` inline, so handler/control-egress.js
+	// and utils/byte-budget.js enter the graph with them. What actually executes
+	// on a send is the SAME `ws.send(payload, false, false)` that was there
+	// before, moved behind one function, preceded by a two-number window check
+	// (a comparison and an addition on a per-connection closure). The frame path
+	// gains nothing: no byte is read, allocated or copied, no buffer is
+	// constructed, and no copy primitive entered - `payload.length` is a string
+	// length, not a measurement of bytes anyone made. The rest of the drift is
+	// the `WS_CONTROL_BUDGET` symbol with its CONNECTION_SLOTS entry - which is
+	// what moves the ingress digest above and nothing more here - and the
+	// budget's error id and registry entry, frozen literal data reaching every
+	// graph through utils/metrics.js. Re-pinned once more when the ceiling, the
+	// window and the close code moved OUT of the sender and into
+	// utils/byte-budget.js so the test server and the dev plugin could read the
+	// same three numbers: three frozen constants changing file, reached only by
+	// this graph. Nothing executes differently.
+	platform: '71bd895918b03472e4f94455b52b7f8f0b4828aea646425533857cca07cf886b',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1893,7 +1924,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// registry entries through utils.js -> utils/metrics.js -> error-registry.js,
 	// frozen literal data, and nothing from the watcher or ledger code inside any
 	// sealed graph. Reverting only error-registry.js restores all three digests.
-	'wire-fanout': '4023cc831c0c0a5ee8ecabef41cbbb14656ca6f0c86461594708d93a0b309632',
+	//
+	// Re-pinned for the control-egress budget. This graph reaches exactly the
+	// one module the ingress digest does - utils/ws-symbols.js through utils.js,
+	// for a `WS_CONTROL_BUDGET` symbol and its CONNECTION_SLOTS entry - and
+	// nothing else: wire-fanout.js imports only wire.js and utils.js, so neither
+	// handler/control-egress.js nor handler/subscribe-hooks.js is reachable from
+	// here. A symbol and an array entry. No statement executes differently on
+	// any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered. The budget's error id and registry entry ride the same
+	// change, reaching this graph as frozen literal data through utils/metrics.js.
+	'wire-fanout': '7c700c1c84527ee565c3c9d3582321dd1235277c65b3ce6cdc84ce3df4fe4ad1',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

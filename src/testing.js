@@ -1,8 +1,9 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
+import { createByteBudget, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
@@ -391,7 +392,7 @@ export async function createTestServer(options = {}) {
 	};
 	const rejectApplicationMessageT = (ws, rejection) => {
 		mMessageAdmissionRejectedT?.inc({ reason: rejection.reason, scope: rejection.scope });
-		sendOutboundT(ws, messageOverloadedFrame(rejection));
+		sendControlT(ws, messageOverloadedFrame(rejection));
 	};
 	const runIngressApplicationWorkT = (ws, context) =>
 		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
@@ -404,7 +405,7 @@ export async function createTestServer(options = {}) {
 			const denied = msg.id === undefined
 				? JSON.stringify({ type: 'game-denied', reason })
 				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-			sendOutboundT(ws, denied);
+			sendControlT(ws, denied);
 			return;
 		}
 		context.platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
@@ -573,13 +574,13 @@ export async function createTestServer(options = {}) {
 			if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
 		} catch { epoch = processEpoch(); }
 		const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
-		sendOutboundT(ws, payload);
+		sendControlT(ws, payload);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref @param {string} reason */
 	function sendDeniedT(ws, topic, ref, reason) {
 		if (ref === null) return;
 		const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
-		sendOutboundT(ws, payload);
+		sendControlT(ws, payload);
 	}
 
 	// The simulator injects an in-memory app + a uWS helper bundle via the
@@ -705,6 +706,44 @@ export async function createTestServer(options = {}) {
 		catch { closedWsAbortsT++; return 2; }
 		bumpOutT(ws, payload);
 		return result;
+	}
+
+	/**
+	 * Send a control frame against this connection's egress budget, mirroring
+	 * handler/control-egress.js.
+	 *
+	 * The control channel amplifies - a client names a topic in a few bytes and
+	 * is answered with a whole frame - so it is bounded per connection and a
+	 * connection over the bound is cut with the same 4429 production uses. The
+	 * ceiling and the code come from the shared module rather than being spelled
+	 * again here, because two spellings of one ceiling is how these surfaces
+	 * drift.
+	 *
+	 * Only frames the server sends BECAUSE the client asked reach this: acks,
+	 * denials, protocol errors, the open and capability frames. Application
+	 * publishes and sends go through `sendOutboundT` directly and are never
+	 * charged here, exactly as in production.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} payload
+	 */
+	function sendControlT(ws, payload) {
+		let ud;
+		try { ud = ws.getUserData(); }
+		catch { return sendOutboundT(ws, payload); }
+		let budget = ud[WS_CONTROL_BUDGET];
+		if (budget === null) return 2;
+		if (budget === undefined) {
+			budget = createByteBudget(MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, monotonicNow);
+			ud[WS_CONTROL_BUDGET] = budget;
+		}
+		if (!budget(payload.length)) {
+			ud[WS_CONTROL_BUDGET] = null;
+			try { ws.end(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted'); }
+			catch { closedWsAbortsT++; }
+			return 2;
+		}
+		return sendOutboundT(ws, payload);
 	}
 
 	/**
@@ -2773,7 +2812,7 @@ export async function createTestServer(options = {}) {
 				};
 			}
 			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
-			sendOutboundT(ws, welcome);
+			sendControlT(ws, welcome);
 			wsConnections.add(ws);
 			handler.open?.(ws, { platform: userData[WS_PLATFORM] });
 			for (const resolve of connectionWaiters) resolve(undefined);
@@ -2801,9 +2840,7 @@ export async function createTestServer(options = {}) {
 				// Count the reject bytes into the connection's outbound total, matching
 				// handler.js so the mock and the real handler agree on a close hook's
 				// byte accounting.
-				const rejectFrame = controlFrameTooLargeFrame(message.byteLength);
-				ws.send(rejectFrame, false, false);
-				bumpOutT(ws, rejectFrame);
+				sendControlT(ws, controlFrameTooLargeFrame(message.byteLength));
 				return;
 			}
 			// Handle subscribe/unsubscribe from client store.
@@ -2834,7 +2871,7 @@ export async function createTestServer(options = {}) {
 							// path, the topic checks included, is silent without a
 							// ref, and a history request must not die silently.
 							if (deniesRefLessRecover({ hasResumeHook: handler.resume, recover: msg.recover, ref })) {
-								sendOutboundT(ws, recoverRequiresRefFrame(msg.topic));
+								sendControlT(ws, recoverRequiresRefFrame(msg.topic));
 								return;
 							}
 							if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_T)) {
@@ -3043,12 +3080,12 @@ export async function createTestServer(options = {}) {
 								const window = createLeaseState({ requestCount: DEFAULT_GRANT.requestCount, ttlMs: DEFAULT_GRANT.ttlMs });
 								window.grant();
 								helloUd[WS_LEASE] = { gate: window, saturation: 0 };
-								sendOutboundT(ws, '{"type":"lease-ok"}');
-								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
+								sendControlT(ws, '{"type":"lease-ok"}');
+								sendControlT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
 							}
 							// Opt-in confirm for binary ingress (mirror of lease-ok).
 							if (caps.has(WIRE_INGRESS_CAP)) {
-								sendOutboundT(ws, ingressOkFrame());
+								sendControlT(ws, ingressOkFrame());
 							}
 							return;
 						}
@@ -3306,7 +3343,7 @@ export async function createTestServer(options = {}) {
 									console.error('[adapter-uws/testing] resume hook threw:', err);
 								}
 							}
-							sendOutboundT(ws, '{"type":"resumed"}');
+							sendControlT(ws, '{"type":"resumed"}');
 							return;
 						}
 						if (msg.type === 'request-n') {
@@ -3318,7 +3355,7 @@ export async function createTestServer(options = {}) {
 								// always say 0.
 								slot.saturation = leaseReportedSaturation(msg.queued);
 								slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
-								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
+								sendControlT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
 							}
 							return;
 						}
@@ -3328,7 +3365,7 @@ export async function createTestServer(options = {}) {
 							// handler). Unknown kind -> no bind, no ack, JSON fallback.
 							const bindUd = ws.getUserData();
 							if (bindIngress(bindUd, ws, msg.id, msg.kind, msg.target)) {
-								sendOutboundT(ws, ingressBoundFrame(msg.id));
+								sendControlT(ws, ingressBoundFrame(msg.id));
 							}
 							return;
 						}

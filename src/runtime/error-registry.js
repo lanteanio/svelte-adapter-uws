@@ -63,6 +63,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH',
 	TLS_WATCH_LOST: 'ADAPTER-ERR-TLS-WATCH-LOST',
 	SUBSCRIPTION_SINK_DISPLACED: 'ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED',
+	CONTROL_EGRESS_EXHAUSTED: 'ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED',
 	CLUSTER_CONFIG_WORKERS: 'ADAPTER-ERR-CLUSTER-CONFIG-WORKERS',
 	CLUSTER_CONFIG_COMPUTE: 'ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE',
 	CLUSTER_CONFIG_MODE: 'ADAPTER-ERR-CLUSTER-CONFIG-MODE',
@@ -674,6 +675,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler.js']),
 		anchor: 'adapter-err-subscription-sink-displaced',
 		help: 'docs/errors.md#adapter-err-subscription-sink-displaced'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CONTROL_EGRESS_EXHAUSTED,
+		code: null,
+		event: 'control-egress.exhausted',
+		component: 'runtime.control-egress',
+		severity: 'warn',
+		emission: 'direct',
+		problemPrefix: 'A connection exhausted its control-frame egress budget and was closed.',
+		messagePrefix: direct('runtime.control-egress', 'control-egress.exhausted', 'warn', 'A connection exhausted its control-frame egress budget and was closed.'),
+		cause: 'The control channel answers what a client asks for - an ack per subscribe, a denial per refused topic - so it amplifies: a few inbound bytes buy a whole frame. One connection drove more control-frame bytes than its window allows. Usually a client in a resubscribe loop, or one sending oversized batches whose topics past the cap are each answered with a denial; occasionally a deliberate amplification attempt.',
+		consequence: 'That one connection was closed with 4429, which the bundled client and its siblings classify as throttling: they reconnect on an accelerated backoff rather than treating it as terminal. No other connection is affected, and nothing the application published was dropped - the budget covers protocol frames the adapter emits, never application publishes or sends.',
+		automaticRecovery: 'The client reconnects on its own throttle curve. A client whose behavior is unchanged will reach the budget again and be closed again, backing off further each time.',
+		nextAction: 'Identify the client. A repeating cycle from one page is usually a resubscribe loop - a store that re-subscribes on every render, or a reconnect handler that restores topics it never released - and fixing that removes the condition. The budget is a fixed ceiling with no option to raise it, so a connection that legitimately needs more control traffic than this has to spread it: subscribe in fewer, larger batches, or hold fewer topics on one connection. A single connection restoring more than roughly seventy thousand topics inside the window is the one legitimate shape that reaches it.',
+		sources: Object.freeze(['src/runtime/handler/control-egress.js']),
+		anchor: 'adapter-err-control-egress-exhausted',
+		help: 'docs/errors.md#adapter-err-control-egress-exhausted'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.ATTRIBUTION_HOOK,

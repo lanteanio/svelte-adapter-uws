@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Clearing the slot to `null` and reinstalling the same function are not displacements, so releasing the slot stays ordinary. This names the topology; it does not change how subscriptions are counted.
   - **Detail:** [Added engineering detail](#added).
+- **Added: the control/ack channel is bounded per connection.** It amplifies - a client names a topic in a few bytes and is answered with a whole frame - so a connection may now be sent 4 MiB of protocol frames per 10-second window, and one that exceeds it is closed with 4429 rather than served.
+  - **Affects:** Every deployment. Measured at the worst legal shape, one 8 KB `subscribe-batch` is answered with about 97 KB across 1,345 frames, and nothing rate-limited the repetition: every `messageAdmission` ceiling is disabled unless configured.
+  - **Action:** None. A reconnecting client restoring 256 topics spends about 15 KB of the window and a 5,000-topic restore about 300 KB, so a healthy burst is orders of magnitude clear of it.
+  - **Requires:** No new dependency or option. The ceiling is fixed rather than configurable.
+  - **Compatibility:** Only frames the adapter emits in answer to a client are charged - acks, denials, protocol errors, `welcome`, `lease-ok`, window grants. Application `send` and `publish` are never charged here and the tenant egress budgets are unchanged. The close is 4429, which the bundled client already classes as throttling and reconnects on; nothing new goes on the wire, because the protocol is frozen at revision 1, and the operator is told through `ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED` instead.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: a subscription-drift report now says how many connections it summed and how many a close had already settled.** A membership counted twice and a closed connection still in the live set produce the same sum, so the two quantities that separate them now ride on the report instead of being reconstructed by whoever reads it.
   - **Affects:** Anyone reading `subs.total-mismatch` diagnostics; the two existing fields are unchanged and two more are added beside them.
   - **Action:** None. A reader keying on `totalSubscriptions` and `summed` keeps working.
@@ -270,6 +276,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a second sink and reads the displacement back, and holds the half that
   matters downstream: after a takeover the displaced counter stops moving at
   all, which is what strands a total.
+
+- **The control/ack channel is bounded per connection.** Everything on it
+  shares a property ordinary fan-out does not: the client asked for it. A
+  subscribe buys an ack, a bad frame buys a refusal, an oversized batch buys a
+  denial for every topic past the cap. So the channel amplifies, and measured
+  at the worst legal shape it amplifies twelvefold - one 8,121-byte
+  `subscribe-batch` of 1,344 shortest-legal topics is answered with 97,484
+  bytes across 1,345 frames.
+  Nothing covered it. The control-frame limit bounds one frame, which bounds
+  the frame count per inbound frame but not the rate; every `messageAdmission`
+  ceiling normalizes to zero when the option is absent, so out of the box there
+  is no inbound rate at all; the publish-egress ceilings meter application
+  publishes and never see an ack; and `maxBackpressure` bounds the queue in
+  MEMORY, which is why this was a CPU and bandwidth problem rather than an
+  out-of-memory one.
+  Each connection now carries a 4 MiB budget over a 10-second window, and one
+  that exceeds it is closed rather than served. Every control frame the runtime
+  emits goes through one `sendControl`, so there is no longer a raw `ws.send`
+  on that path to forget to charge.
+
+- **What that ceiling is worth, and why it closes.** The number is derived
+  rather than picked: a reconnecting client restores in batches of at most 256
+  topics and is answered with about 15 KB, a 5,000-topic restore costs about
+  300 KB, and the budget sits roughly 270 times above the first - while the
+  amplifier reaches it from about 34 KB/s of sustained inbound, a rate no real
+  client produces on a channel that is bursty at reconnect and quiet after.
+  Closed rather than shed, because an ack the client never receives is a
+  subscription it believes did not take - the exact failure the loud per-topic
+  denial exists to prevent, so shedding would trade an amplifier for a
+  correctness bug.
+  NOTHING NEW GOES ON THE WIRE. The close is 4429, already this client's
+  THROTTLE class, so it reconnects on the accelerated curve; an explanatory
+  `error` frame would have meant a new `code` value and a field the documented
+  error shape does not carry, which is a wire change and the protocol is frozen
+  at revision 1. The operator is told through
+  `ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED` instead, and
+  `test/control-egress.test.js` pins the silence so a later helpful frame is
+  caught as the wire change it would be. It drives the real runtime from both
+  ends: the amplifier is cut, and a twenty-batch resubscribe is not.
 
 ### Changed
 

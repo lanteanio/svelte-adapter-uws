@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 41 entries
-against the 44 distinct diagnostic events emitted from the scanned sources, plus
+for traffic, whether anything recovers on its own, and what to do next: 42 entries
+against the 45 distinct diagnostic events emitted from the scanned sources, plus
 35 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
@@ -58,6 +58,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-SSR](#adapter-err-ssr) | `runtime.ssr.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.ssr event=runtime.ssr.failed severity=error] SvelteKit request handling failed.` |
 | [ADAPTER-ERR-UPGRADE-HOOK](#adapter-err-upgrade-hook) | `runtime.websocket-upgrade.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.websocket-upgrade event=runtime.websocket-upgrade.failed severity=error] The WebSocket upgrade hook failed.` |
 | [ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED](#adapter-err-subscription-sink-displaced) | `runtime.subscription-accounting.sink-displaced` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscription-accounting event=runtime.subscription-accounting.sink-displaced severity=warn] A second adapter runtime in this worker took over the subscription accounting sink. One subscription total is now frozen and the other is charged releases it never matched.` |
+| [ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED](#adapter-err-control-egress-exhausted) | `control-egress.exhausted` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.control-egress event=control-egress.exhausted severity=warn] A connection exhausted its control-frame egress budget and was closed.` |
 | [ADAPTER-ERR-ATTRIBUTION](#adapter-err-attribution) | `runtime.websocket-attribution.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.websocket-attribution event=runtime.websocket-attribution.failed severity=error] The WebSocket attribution hook failed; the connection was refused at open.` |
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook) | `subscribe.batch-hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-hook-failed severity=error] The subscribeBatch hook threw; every topic in the batch was denied INTERNAL_ERROR.` |
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result) | `subscribe.batch-result-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-result-read-failed severity=error] Reading the subscribeBatch result threw; every topic in the batch was denied INTERNAL_ERROR.` |
@@ -105,8 +106,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 44 distinct events.
-The 41 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 45 distinct events.
+The 42 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -146,6 +147,7 @@ Indexed events:
 - `runtime.ssr.failed` - [ADAPTER-ERR-SSR](#adapter-err-ssr)
 - `runtime.websocket-upgrade.failed` - [ADAPTER-ERR-UPGRADE-HOOK](#adapter-err-upgrade-hook)
 - `runtime.subscription-accounting.sink-displaced` - [ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED](#adapter-err-subscription-sink-displaced)
+- `control-egress.exhausted` - [ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED](#adapter-err-control-egress-exhausted)
 - `runtime.websocket-attribution.failed` - [ADAPTER-ERR-ATTRIBUTION](#adapter-err-attribution)
 - `subscribe.batch-hook-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook)
 - `subscribe.batch-result-read-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result)
@@ -609,6 +611,18 @@ searchable log prefix is:
 - **Next action:** Make the worker load ONE runtime. Check whether the application bundles the adapter while a plugin or companion package imports it from node_modules, and deduplicate that - a single resolved copy removes the condition. Until then, treat this worker's subscription totals and any alert built on them as unreliable, and read the auditor's mismatch and negative reports as consequences of this line rather than as separate defects.
 - **Runtime help:** `docs/errors.md#adapter-err-subscription-sink-displaced`
 - **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js)
+
+<a id="adapter-err-control-egress-exhausted"></a>
+## `ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED`
+
+- **Code/event:** `control-egress.exhausted`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.control-egress event=control-egress.exhausted severity=warn] A connection exhausted its control-frame egress budget and was closed.`
+- **Cause:** The control channel answers what a client asks for - an ack per subscribe, a denial per refused topic - so it amplifies: a few inbound bytes buy a whole frame. One connection drove more control-frame bytes than its window allows. Usually a client in a resubscribe loop, or one sending oversized batches whose topics past the cap are each answered with a denial; occasionally a deliberate amplification attempt.
+- **Consequence:** That one connection was closed with 4429, which the bundled client and its siblings classify as throttling: they reconnect on an accelerated backoff rather than treating it as terminal. No other connection is affected, and nothing the application published was dropped - the budget covers protocol frames the adapter emits, never application publishes or sends.
+- **Automatic recovery:** The client reconnects on its own throttle curve. A client whose behavior is unchanged will reach the budget again and be closed again, backing off further each time.
+- **Next action:** Identify the client. A repeating cycle from one page is usually a resubscribe loop - a store that re-subscribes on every render, or a reconnect handler that restores topics it never released - and fixing that removes the condition. The budget is a fixed ceiling with no option to raise it, so a connection that legitimately needs more control traffic than this has to spread it: subscribe in fewer, larger batches, or hold fewer topics on one connection. A single connection restoring more than roughly seventy thousand topics inside the window is the one legitimate shape that reaches it.
+- **Runtime help:** `docs/errors.md#adapter-err-control-egress-exhausted`
+- **Runtime sources:** [src/runtime/handler/control-egress.js](../src/runtime/handler/control-egress.js)
 
 <a id="adapter-err-attribution"></a>
 ## `ADAPTER-ERR-ATTRIBUTION`

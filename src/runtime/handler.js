@@ -48,6 +48,7 @@ import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_head
 import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CACHE_MAX, tryPrerendered } from './handler/static-assets.js';
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
+import { sendControl } from './handler/control-egress.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
@@ -607,8 +608,7 @@ if (WS_ENABLED) {
 	configureEgress(wsOptions.egress, wsModule.egressTenantOf);
 	const rejectApplicationMessage = (ws, rejection) => {
 		mMessageAdmissionRejected?.inc({ reason: rejection.reason, scope: rejection.scope });
-		const frame = messageOverloadedFrame(rejection);
-		try { ws.send(frame, false, false); bumpOut(ws, frame); } catch { counters.closedWsAborts++; }
+		sendControl(ws, messageOverloadedFrame(rejection));
 	};
 	const runIngressApplicationWork = (ws, context) =>
 		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
@@ -622,7 +622,7 @@ if (WS_ENABLED) {
 			const denied = msg.id === undefined
 				? JSON.stringify({ type: 'game-denied', reason })
 				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-			try { ws.send(denied, false, false); bumpOut(ws, denied); } catch { counters.closedWsAborts++; }
+			sendControl(ws, denied);
 			return;
 		}
 		context.platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
@@ -2262,9 +2262,7 @@ if (WS_ENABLED) {
 					bytesOut: 0
 				};
 			}
-			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
-			ws.send(welcome, false, false);
-			bumpOut(ws, welcome);
+			sendControl(ws, '{"type":"welcome","sessionId":"' + sessionId + '"}');
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
 			wsModule.open?.(ws, { platform: userData[WS_PLATFORM] });
@@ -2300,14 +2298,13 @@ if (WS_ENABLED) {
 			// frames are not control-shaped and fall through unchanged.
 			if (!isBinary && message.byteLength >= 8192 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
-				// Count this reject's bytes into the connection's outbound total,
-				// symmetric with every other control-demux send (welcome, lease-ok,
-				// resumed, ingress-ok, subscribe-denied), each of which pairs ws.send
-				// with bumpOut. An error frame is outbound traffic like any other; a
-				// close hook's byte accounting must not silently drop it.
-				const rejectFrame = controlFrameTooLargeFrame(message.byteLength);
-				ws.send(rejectFrame, false, false);
-				bumpOut(ws, rejectFrame);
+				// Charged and counted like every other control-demux send
+				// (welcome, lease-ok, resumed, ingress-ok, subscribe-denied). An
+				// error frame is outbound traffic like any other: a close hook's
+				// byte accounting must not silently drop it, and a client that
+				// provokes refusals is spending the same channel as one that
+				// provokes acks.
+				sendControl(ws, controlFrameTooLargeFrame(message.byteLength));
 				return;
 			}
 			// Built-in: handle subscribe/unsubscribe from the client store.
@@ -2352,9 +2349,7 @@ if (WS_ENABLED) {
 					// Refused first, before anything can swallow it, with the
 					// uncorrelatable-error shape.
 					if (deniesRefLessRecover({ hasResumeHook: wsModule.resume, recover: msg.recover, ref })) {
-						const payload = recoverRequiresRefFrame(msg.topic);
-						try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
-						bumpOut(ws, payload);
+						sendControl(ws, recoverRequiresRefFrame(msg.topic));
 						return;
 					}
 					if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS)) {
@@ -2623,9 +2618,7 @@ if (WS_ENABLED) {
 					// refused whole, before any entry is inspected, like the
 					// batch's other contract refusals.
 					if (deniesRefLessRecoverBatch({ hasResumeHook: wsModule.resume, recover: msg.recover, ref })) {
-						const payload = recoverRequiresRefFrame(null);
-						try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
-						bumpOut(ws, payload);
+						sendControl(ws, recoverRequiresRefFrame(null));
 						return;
 					}
 					for (let i = 256; i < msg.topics.length; i++) {
@@ -2969,21 +2962,15 @@ if (WS_ENABLED) {
 						// Echo that the capability is honoured, then hand out
 						// the first window. Additive: old clients never sent the
 						// cap so never receive these.
-						const echo = '{"type":"lease-ok"}';
-						ws.send(echo, false, false);
-						bumpOut(ws, echo);
-						const frame = leaseGrantFrame(g.count, g.ttlMs);
-						ws.send(frame, false, false);
-						bumpOut(ws, frame);
+						sendControl(ws, '{"type":"lease-ok"}');
+						sendControl(ws, leaseGrantFrame(g.count, g.ttlMs));
 					}
 					// Opt-in confirm for binary ingress. When the client advertised
 					// the ingress cap, echo `ingress-ok` (mirror of lease-ok) so it
 					// knows this server understands ingress and may announce
 					// bindings. Old clients never send the cap, so never receive it.
 					if (caps.has(WIRE_INGRESS_CAP)) {
-						const okFrame = ingressOkFrame();
-						ws.send(okFrame, false, false);
-						bumpOut(ws, okFrame);
+						sendControl(ws, ingressOkFrame());
 					}
 					if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
 					return;
@@ -3082,8 +3069,7 @@ if (WS_ENABLED) {
 					// subscribes has an unprotected window, but a buffer here cannot close it
 					// (it would have to span the client's separate round-trip), so that
 					// residual gap is a limitation of the standalone frame, not fixable here.
-					ws.send('{"type":"resumed"}', false, false);
-					bumpOut(ws, '{"type":"resumed"}');
+					sendControl(ws, '{"type":"resumed"}');
 					if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
 					return;
 				}
@@ -3105,9 +3091,7 @@ if (WS_ENABLED) {
 						if (slot.saturation > counters.leaseSaturationPeak) counters.leaseSaturationPeak = slot.saturation;
 						const g = grantSizeFor();
 						slot.gate.requestN(g.count, g.ttlMs);
-						const frame = leaseGrantFrame(g.count, g.ttlMs);
-						ws.send(frame, false, false);
-						bumpOut(ws, frame);
+						sendControl(ws, leaseGrantFrame(g.count, g.ttlMs));
 					}
 					return;
 				}
@@ -3121,9 +3105,7 @@ if (WS_ENABLED) {
 					// silent drop.
 					const ud = ws.getUserData();
 					if (bindIngress(ud, ws, msg.id, msg.kind, msg.target)) {
-						const boundFrame = ingressBoundFrame(msg.id);
-						ws.send(boundFrame, false, false);
-						bumpOut(ws, boundFrame);
+						sendControl(ws, ingressBoundFrame(msg.id));
 					} else if (wsDebug) {
 						console.log('[ws] ingress-bind for unregistered kind=%s (kept on JSON fallback)', msg.kind);
 					}

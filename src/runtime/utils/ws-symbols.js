@@ -1055,6 +1055,17 @@ export const WS_INGRESS_BINDINGS = Symbol.for('adapter-uws.ws.ingress-bindings')
 export const WS_LEASE = Symbol.for('adapter-uws.ws.lease');
 
 /**
+ * This connection's control-frame egress budget, as the closure that charges
+ * it. Holds the window's start and its running total and nothing else, so the
+ * slot is the whole accountant.
+ *
+ * Declared like every other slot rather than created on first use: the first
+ * charge is the `welcome` frame sent at open, so a lazily created budget would
+ * be lazy in shape and never in effect.
+ */
+export const WS_CONTROL_BUDGET = Symbol.for('adapter-uws.ws.control-budget');
+
+/**
  * Every slot the runtime writes onto a connection's userData object.
  *
  * The list exists because those writes are plain assignments, and a plain
@@ -1097,7 +1108,8 @@ export const CONNECTION_SLOTS = Object.freeze([
 	WS_SHARED_COHORTS,
 	WS_CONNECTION_PERMIT,
 	WS_INGRESS_BINDINGS,
-	WS_LEASE
+	WS_LEASE,
+	WS_CONTROL_BUDGET
 ]);
 
 /**

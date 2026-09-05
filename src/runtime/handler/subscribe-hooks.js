@@ -2,6 +2,7 @@ import { wsModule } from '../ws-handler-bridge.js';
 import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, topicEpochValue } from '../utils.js';
 import { counters } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
+import { sendControl } from './control-egress.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 
@@ -208,9 +209,7 @@ export function sendSubscribed(ws, topic, ref) {
 		const p = ws.getUserData()[WS_PLATFORM];
 		if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
 	} catch { epoch = topicEpochValue(topic); }
-	const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
-	try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
-	bumpOut(ws, payload);
+	sendControl(ws, JSON.stringify({ type: 'subscribed', topic, ref, epoch }));
 }
 
 /**
@@ -224,9 +223,7 @@ export function sendSubscribed(ws, topic, ref) {
  */
 export function sendSubscribeDenied(ws, topic, ref, reason) {
 	if (ref === null) return;
-	const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
-	try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
-	bumpOut(ws, payload);
+	sendControl(ws, JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }));
 }
 
 /**
