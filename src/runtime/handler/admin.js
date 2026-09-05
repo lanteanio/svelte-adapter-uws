@@ -103,6 +103,28 @@ async function writeAdminResponse(res, response, state) {
 	});
 }
 
+let mounted = false;
+
+/**
+ * Record that the admin route was actually registered. Called by the route
+ * registration itself rather than recomputing its condition, so the two cannot
+ * disagree about whether the prefix is reserved on this instance.
+ */
+export function markAdminRouteMounted() {
+	mounted = true;
+}
+
+/**
+ * Is the admin route mounted? The main request edge asks before refusing a
+ * target that resolves into the prefix: without the mount both spellings reach
+ * the app anyway, so there is no lane for them to disagree about.
+ *
+ * @returns {boolean}
+ */
+export function adminRouteMounted() {
+	return mounted;
+}
+
 /**
  * uWS handler for the reserved `/__realtime/*` route. Reads the request off the
  * stack-allocated `req` synchronously, builds a Web `Request`, hands it to the

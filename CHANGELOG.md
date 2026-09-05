@@ -137,6 +137,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Those two keys are now inert - a call carrying them publishes as any other origin publish would, drawing the topic counter. In a multi-worker runtime such a call meets the same sequence-authority refusal every other publish meets, which is a `TypeError` where it previously published silently. The batch-admission marker is hardened the same way: an options object that answers for every key no longer gets a publish past a crossed egress ceiling. `createTestServer` and the dev plugin take the same decisions.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the reserved admin prefix now holds against a target that arrives inside it.** The mount matches the raw target while the lanes behind it resolve and percent-decode, so `/foo/../__realtime/introspect` and `/%5f%5frealtime/introspect` both skipped the admin lane and reached the app's own routing inside the reserved namespace.
+  - **Affects:** Apps exporting an `admin(request)` handler, where the mount is what reserves the prefix. Without one there is no mount, no reservation, and nothing changes.
+  - **Action:** None. An app that read `/__realtime/*` as a prefix its own routes never see was right to; that now holds for the resolved and the encoded spellings alike.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Such a target now answers 400 instead of reaching the app, which is the same answer the opposite direction already gives. A dot segment or an escape that lands somewhere ordinary is unaffected - the check is about where a path ends up, so those still resolve and are served normally. The bare prefix stays on the catch-all, exactly as when it is spelled directly. Worth knowing where the reservation is part of a security boundary: a fronting proxy's ACL on the literal prefix sees none of these spellings, so the adapter is what refuses them.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a socket leaves the live set before the rest of its close teardown.** The close released the permit, the subscription accounting, the capability counts and the wire states before removing the connection, and none of those is individually guarded - so one throw stranded a socket whose handle was gone in every publish walk and in the auditor's sum, permanently.
   - **Affects:** Every deployment, on the connection close path. Nothing about a close that completes changes.
   - **Action:** None.
@@ -706,6 +712,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real drift still reports. `test/auditor-snapshot.test.js` drives the freed
   handle through the builder and asserts the predicate stays silent, then holds
   the other side so the guard cannot degrade into disabling the accountant.
+
+- **The reserved admin prefix now holds against a target that arrives inside
+  it.** uWS matches the mount against the raw request target, while every lane
+  behind it reads a different spelling of that target: the SSR `Request`
+  resolves the path, and both the prerendered lookup and SvelteKit's router
+  percent-decode before matching. So two shapes missed the mount and reached
+  the app's own routing inside the namespace the adapter documents as reserved
+  and mounts ahead of page routing - `/foo/../__realtime/introspect`, where
+  resolution drops a segment, and `/%5f%5frealtime/introspect`, where decoding
+  spells the prefix and no dot segment is involved at all. Which happened was
+  the caller's spelling to choose.
+  The mirror of the escape the admin lane already refuses, and refused the same
+  way: the main request edge answers 400 when a target arrives in the prefix its
+  raw form was outside of. Not rerouted into the admin lane - that picks one of
+  the two readings on the caller's behalf, and would let a caller reach that
+  lane through a spelling a fronting proxy's ACL does not read as admin.
+
+- **What bounds that check.** It runs only while the route is mounted, since the
+  mount is what reserves the prefix; with no `admin` export both spellings reach
+  the app anyway and refusing one would take away a path the app serves. The
+  namespace test is the mount's own - `/__realtime/` and below, leaving the bare
+  prefix on the catch-all where uWS leaves it. It sits AHEAD of the prerendered
+  lookup, which decodes too, so a prerendered page inside the prefix cannot
+  answer the encoded spelling first; the static fast path needs no such care,
+  matching raw pathnames against built asset keys that no encoded spelling hits.
+  The decode is `decodeURIComponent`, stronger than the router's, because the
+  two lanes below disagree about `%2F` and the stronger reading covers both.
+  A one-pass character scan decides the rest for free: a path can arrive in the
+  prefix only by DROPPING a segment - a dot segment (`.` or `%2e`), a backslash,
+  or the whitespace the URL parser strips - or by SPELLING one of the prefix's
+  own characters encoded (`%`), so a path carrying none of the five never
+  reaches the resolution. That scan measures 7.8 ns per request and the resolve
+  408 ns on the paths that take it.
+  `test/admin-prefix-entry-real.test.js` drives the resolved and encoded
+  spellings over raw sockets, because every HTTP client resolves the target
+  before sending it, and the fixture app carries a real route inside the prefix
+  so a failure is the app answering a reserved path rather than a status code
+  standing in for one. It also prerenders a page there, which is what makes the
+  ordering testable rather than assumed.
+  `test/admin-prefix-unmounted-real.test.js` holds the other side: with no admin
+  handler the same targets are served by that route and that page - which is
+  also what proves the prerendered entry exists, since the mount shadows every
+  spelling that reaches it.
 
 - **A closing socket leaves the live set first.** The close finally released
   the permit, the subscription accounting, the capability counts, the wire

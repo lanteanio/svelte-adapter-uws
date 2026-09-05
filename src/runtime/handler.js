@@ -207,7 +207,7 @@ export function noteRelayFrameRefused(lane) {
 	relayFrameRefusedInc?.(lane);
 }
 import { handleRequest } from './handler/request.js';
-import { handleAdminRequest } from './handler/admin.js';
+import { handleAdminRequest, markAdminRouteMounted } from './handler/admin.js';
 import { registerRoute } from './handler/route-registry.js';
 
 // EVERY route registration on `app` goes through this helper, never through
@@ -3383,6 +3383,7 @@ if (READINESS_CHECK_PATH) {
 // adapter is pure request/response plumbing.
 if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
 	route('any', ADMIN_PATH + '/*', handleAdminRequest);
+	markAdminRouteMounted();
 	console.log(`[svelte-adapter-uws] Admin route registered at ${ADMIN_PATH}/*`);
 	// The adapter cannot see whether the app's admin() handler gates its own
 	// requests, so it says so once at boot. An operator who HAS gated it sets
