@@ -73,6 +73,32 @@ describeUWS('the resume lane honours the grant model (built runtime)', () => {
 		).toEqual([]);
 	});
 
+	it('applies the same filter to the epoch map', async () => {
+		// The two maps arrive on one frame, keyed the same, and the hook reads
+		// them together - an app deciding truncation iterates the EPOCH map. A
+		// filter on the seqs alone hands back the ungranted topic by the other
+		// hand, which is worth more to an attacker than the seq entry: it names
+		// the topic and its generation.
+		const dave = await client();
+		dave.send({ type: 'grant', topic: 'room-11' });
+		expect(await dave.waitFor((f) => f?.event === 'granted'), 'the fixture must mint the grant').not.toBeNull();
+
+		dave.send({
+			type: 'resume',
+			sessionId: 'sess-4',
+			lastSeenSeqs: { 'room-11': 0, 'tenant-b:secret': 0 },
+			lastSeenEpochs: { 'room-11': 1, 'tenant-b:secret': 1 }
+		});
+
+		const echoed = await dave.waitFor((f) => f?.event === 'resume-topics');
+		expect(echoed, 'the resume hook must have run').not.toBeNull();
+		expect(echoed.parsed.data.topics, 'the seq filter still drops the ungranted topic').toEqual(['room-11']);
+		expect(
+			echoed.parsed.data.epochTopics,
+			'the epoch map reached the hook carrying a topic the seq filter dropped'
+		).toEqual(['room-11']);
+	});
+
 	it('still hands over a topic this connection WAS granted', async () => {
 		// The control: the filter must drop only the ungranted topics. Without it
 		// the case above is satisfied by a gate that empties every resume frame,

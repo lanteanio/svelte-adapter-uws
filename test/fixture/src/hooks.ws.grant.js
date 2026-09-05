@@ -70,8 +70,15 @@ export function upgrade({ cookies }) {
 // the ABSENCE of replay traffic would pass against a server with no resume hook
 // at all, which is exactly what this fixture had; echoing the filtered list is
 // what makes the grant filter observable.
-export async function resume(ws, { lastSeenSeqs, platform }) {
-	platform.send(ws, 'probe', 'resume-topics', { topics: Object.keys(lastSeenSeqs || {}) });
+export async function resume(ws, { lastSeenSeqs, lastSeenEpochs, platform }) {
+	// Both maps are echoed. They arrive on the same frame keyed the same way, and
+	// an app checking for an epoch mismatch reads the epoch map rather than the
+	// seq map - so a filter applied to one and not the other hands the hook the
+	// topics the gate refused, by the other hand.
+	platform.send(ws, 'probe', 'resume-topics', {
+		topics: Object.keys(lastSeenSeqs || {}),
+		epochTopics: Object.keys(lastSeenEpochs || {})
+	});
 }
 
 export async function message(ws, { data, platform }) {

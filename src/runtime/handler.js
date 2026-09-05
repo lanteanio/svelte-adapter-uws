@@ -3020,16 +3020,31 @@ if (WS_ENABLED) {
 					// Untouched when the gate is off or an app hook owns the topic
 					// decision, which is the same condition the other lanes use.
 					let resumeSeqs = msg.lastSeenSeqs;
+					let resumeEpochs = lastSeenEpochs;
 					if (subscribeAuth.enabled && (subscribeAuth.strict || !hasUserSubscribeHook())) {
 						const _grants = ws.getUserData()[WS_SUBSCRIPTIONS];
-						/** @type {Record<string, unknown>} */
-						const _allowed = Object.create(null);
-						let _dropped = 0;
-						for (const _t of Object.keys(resumeSeqs)) {
-							if (deniesUngrantedObserve(true, false, _grants, _t)) { _dropped++; continue; }
-							_allowed[_t] = resumeSeqs[_t];
-						}
-						if (_dropped > 0) resumeSeqs = _allowed;
+						/**
+						 * Both client-named maps on this frame take the same filter.
+						 * They arrive keyed the same way, by the same client, in the
+						 * same frame, and the hook reads them together - an app
+						 * checking for an epoch mismatch iterates the epoch map, so a
+						 * topic dropped from the seqs and left in the epochs is a
+						 * topic the gate refused arriving by the other hand.
+						 * @param {Record<string, unknown>} map
+						 * @returns {Record<string, unknown>}
+						 */
+						const _filterGranted = (map) => {
+							/** @type {Record<string, unknown>} */
+							const _allowed = Object.create(null);
+							let _dropped = 0;
+							for (const _t of Object.keys(map)) {
+								if (deniesUngrantedObserve(true, false, _grants, _t)) { _dropped++; continue; }
+								_allowed[_t] = map[_t];
+							}
+							return _dropped > 0 ? _allowed : map;
+						};
+						resumeSeqs = _filterGranted(resumeSeqs);
+						if (resumeEpochs) resumeEpochs = _filterGranted(resumeEpochs);
 					}
 					if (wsModule.resume) {
 						try {
@@ -3044,7 +3059,7 @@ if (WS_ENABLED) {
 							await wsModule.resume(ws, {
 								sessionId: msg.sessionId,
 								lastSeenSeqs: resumeSeqs,
-								lastSeenEpochs,
+								lastSeenEpochs: resumeEpochs,
 								platform: ws.getUserData()[WS_PLATFORM]
 							});
 						} catch (err) {
