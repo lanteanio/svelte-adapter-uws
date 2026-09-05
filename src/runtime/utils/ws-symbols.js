@@ -506,11 +506,29 @@ export function setCohortHooks(onJoin, onLeave) {
  * merely slower; on an app whose WebSocket route was never registered it
  * aborts the process, and imported-runtime harnesses hold exactly such an
  * app).
+ * The slot is one `Symbol.for` on globalThis, so every copy of this module in
+ * the worker addresses the same sink - which is the point, and also the hazard:
+ * an install REPLACES whatever was there, and nothing about that is visible.
+ * Two copies of the handler in one worker each register their own counter at
+ * module scope, the second silently takes every delta, and from then on one
+ * counter is frozen while the other receives releases for memberships it never
+ * charged. That reads downstream as a subscription total drifting under its
+ * summed bookkeeping on one side and going negative on the other, with nothing
+ * naming the cause. So the install says whether it displaced a DIFFERENT sink,
+ * and the caller decides what that is worth reporting.
+ *
  * @param {((delta: number, topic: string) => void) | null} onChange
+ * @returns {boolean} true when this replaced a different, already-installed sink
  */
 export function setSubscriptionAccountingHook(onChange) {
-	/** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK] =
-		typeof onChange === 'function' ? onChange : null;
+	const next = typeof onChange === 'function' ? onChange : null;
+	const previous = /** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK];
+	// Only a function displacing a DIFFERENT function is a takeover. Clearing to
+	// null is how a test releases the slot, and re-installing the same function
+	// is idempotent.
+	const displaced = typeof previous === 'function' && next !== null && previous !== next;
+	/** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK] = next;
+	return displaced;
 }
 
 /** @param {number} delta @param {string} topic */

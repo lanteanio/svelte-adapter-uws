@@ -157,7 +157,28 @@ function adjustTotalSubscriptions(delta, topic) {
 	if (nextHeld > 0) topicSubscriberCounts.set(topic, nextHeld);
 	else topicSubscriberCounts.delete(topic);
 }
-setSubscriptionAccountingHook(adjustTotalSubscriptions);
+// A second handler copy in one worker takes the shared sink from the first.
+// Both keep their own counter and their own auditor, so the displaced one stops
+// receiving deltas while the new one receives releases for memberships it never
+// charged - the reported shapes being a total stuck under its summed
+// bookkeeping, and a total driven negative by unmatched releases. Neither says
+// why on its own, and the topology that causes it is invisible from either side.
+//
+// Reported, not asserted. A soft assertion throws under NODE_ENV=test, and
+// loading two independently built runtimes into one test process is an ordinary
+// thing for this suite to do - the condition is about a deployment carrying two
+// copies, not about a harness that deliberately holds two.
+if (setSubscriptionAccountingHook(adjustTotalSubscriptions)) {
+	emitOperationalEvent({
+		source: 'svelte-adapter-uws',
+		component: 'runtime.subscription-accounting',
+		event: 'runtime.subscription-accounting.sink-displaced',
+		severity: 'warn',
+		dataClass: 'operational',
+		message: 'A second adapter runtime in this worker took over the subscription accounting sink. One subscription total is now frozen and the other is charged releases it never matched.',
+		attributes: {}
+	});
+}
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js';

@@ -894,7 +894,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The writes are per connection and per process, never per frame; no
 	// statement executes differently on any frame path, no byte is read,
 	// allocated or copied, and no copy primitive entered either graph.
-	ingress: '70c09a8eb7a571db59fdfead2abeb8ed7bbe49663fef7d0fd44cf7a2f1f7bb36',
+	//
+	// Re-pinned for the subscription-accounting sink reporting its own takeover:
+	// the installer now says whether it displaced a different sink and the
+	// handler reports that through the operational channel, plus the registry
+	// entry that names it. A boolean return, one branch at module evaluation and
+	// frozen literal data. No statement executes differently on any frame path,
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	ingress: '176c0164c561689e4bbb74b431f7b644819f0abee297b68d7d9cf2bf97641fda',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1585,7 +1592,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// relay-token JSDoc that landed between them moves none of the three, so
 	// the prose allowlist covers that one exactly as it claims to. Both causes
 	// are reporting and identity strings; no byte-owning change entered.
-	platform: 'edba1f682d7551ff18a45a6dbc803f5cf9932e61bc17d3f2eaa8bad0be30ed74',
+	//
+	// Re-pinned for the subscription-accounting sink reporting its own takeover:
+	// the installer now says whether it displaced a different sink and the
+	// handler reports that through the operational channel, plus the registry
+	// entry that names it. A boolean return, one branch at module evaluation and
+	// frozen literal data. No statement executes differently on any frame path,
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	platform: '32f3cd910944bd340ef1abb8dc345f4b12a07a03b1abacb14d1e22343e3e07c2',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1824,7 +1838,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The writes are per connection and per process, never per frame; no
 	// statement executes differently on any frame path, no byte is read,
 	// allocated or copied, and no copy primitive entered this graph.
-	'wire-fanout': '062364c66b2d4dbe33090df73ed7e877bd5c4354fb4344a6cf28e3a788f3a07b',
+	//
+	// Re-pinned for the subscription-accounting sink reporting its own takeover:
+	// the installer now says whether it displaced a different sink and the
+	// handler reports that through the operational channel, plus the registry
+	// entry that names it. A boolean return, one branch at module evaluation and
+	// frozen literal data. No statement executes differently on any frame path,
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	'wire-fanout': '9962c58b1f2580d101b1d67967a7f8cdf7fc08930cb276a1b87f78e443bc5cd9',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

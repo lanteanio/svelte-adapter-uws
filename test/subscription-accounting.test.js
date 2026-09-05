@@ -41,6 +41,46 @@ describe('logical subscription accounting primitive', () => {
 		total = 0;
 	});
 
+	// The sink is one Symbol.for slot on globalThis so every copy of the module
+	// in a worker addresses the same counter. That also means an install
+	// REPLACES whatever was there. Two handler copies in one worker each
+	// register at module scope, the second takes every delta, and afterwards one
+	// counter is frozen while the other is charged releases for memberships it
+	// never added - which is what a total stuck under its summed bookkeeping,
+	// and a total driven negative, look like from the outside. The install
+	// reports the displacement so the condition has a name.
+	it('reports a sink that displaces a different one, and stays quiet otherwise', () => {
+		const first = (delta) => { total += delta; };
+		const second = (delta) => { total += delta; };
+
+		expect(setSubscriptionAccountingHook(first), 'installing into an empty slot is not a displacement').toBe(false);
+		expect(setSubscriptionAccountingHook(first), 'reinstalling the same sink is idempotent').toBe(false);
+		expect(setSubscriptionAccountingHook(second), 'a different sink took the slot and nothing said so').toBe(true);
+
+		// Clearing is how a caller releases the slot, and the install that follows
+		// it is a first install rather than a takeover.
+		expect(setSubscriptionAccountingHook(null), 'clearing is not a displacement').toBe(false);
+		expect(setSubscriptionAccountingHook(first), 'installing after a clear is not a displacement').toBe(false);
+	});
+
+	it('sends every delta to the sink that displaced the earlier one', () => {
+		// The half that matters downstream: after a takeover the FIRST counter
+		// stops moving entirely. A displaced counter that kept receiving deltas
+		// would be harmless; one that goes silent is what strands a total.
+		let displacedTotal = 0;
+		let activeTotal = 0;
+		setSubscriptionAccountingHook((delta) => { displacedTotal += delta; });
+		setSubscriptionAccountingHook((delta) => { activeTotal += delta; });
+
+		const subscriptions = new Set();
+		addLogicalSubscription(subscriptions, 'room');
+		addLogicalSubscription(subscriptions, 'other');
+		removeLogicalSubscription(subscriptions, 'room');
+
+		expect(displacedTotal, 'the displaced sink kept receiving deltas').toBe(0);
+		expect(activeTotal).toBe(1);
+	});
+
 	it('charges mixed wire/platform/tracked adds and duplicate removals exactly once', () => {
 		setSubscriptionAccountingHook((delta) => { total += delta; });
 		const subscriptions = new Set();

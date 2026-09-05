@@ -61,6 +61,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	TLS_RELOAD_SKIPPED: 'ADAPTER-ERR-TLS-RELOAD-SKIPPED',
 	TLS_SWAP: 'ADAPTER-ERR-TLS-SWAP',
 	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH',
+	SUBSCRIPTION_SINK_DISPLACED: 'ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED',
 	CLUSTER_CONFIG_WORKERS: 'ADAPTER-ERR-CLUSTER-CONFIG-WORKERS',
 	CLUSTER_CONFIG_COMPUTE: 'ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE',
 	CLUSTER_CONFIG_MODE: 'ADAPTER-ERR-CLUSTER-CONFIG-MODE',
@@ -653,6 +654,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-upgrade-hook',
 		help: 'docs/errors.md#adapter-err-upgrade-hook'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SUBSCRIPTION_SINK_DISPLACED,
+		code: null,
+		event: 'runtime.subscription-accounting.sink-displaced',
+		component: 'runtime.subscription-accounting',
+		severity: 'warn',
+		emission: 'direct',
+		problemPrefix: 'A second adapter runtime in this worker took over the subscription accounting sink. One subscription total is now frozen and the other is charged releases it never matched.',
+		messagePrefix: direct('runtime.subscription-accounting', 'runtime.subscription-accounting.sink-displaced', 'warn', 'A second adapter runtime in this worker took over the subscription accounting sink. One subscription total is now frozen and the other is charged releases it never matched.'),
+		cause: 'Two copies of the adapter runtime are loaded in one worker - typically a build that bundles the runtime while a package alongside it resolves its own copy from node_modules. The logical-subscription accounting sink is a single slot shared by every copy, so the second one to evaluate replaces the first one\'s counter.',
+		consequence: 'Subscription accounting splits across two counters that each describe only part of the worker. The displaced counter stops moving and drifts below the memberships it is supposed to describe, which the consistency auditor reports as `subs.total-mismatch`; the surviving counter receives releases for memberships it never charged and is driven below zero, which reports as `subs.total-negative` and is clamped back to zero each time. Publish and delivery are unaffected - the counters are accounting, not routing - but every subscription figure the worker reports is describing a fraction of it.',
+		automaticRecovery: 'None. The takeover happens once at module evaluation and holds for the life of the worker.',
+		nextAction: 'Make the worker load ONE runtime. Check whether the application bundles the adapter while a plugin or companion package imports it from node_modules, and deduplicate that - a single resolved copy removes the condition. Until then, treat this worker\'s subscription totals and any alert built on them as unreliable, and read the auditor\'s mismatch and negative reports as consequences of this line rather than as separate defects.',
+		sources: Object.freeze(['src/runtime/handler.js']),
+		anchor: 'adapter-err-subscription-sink-displaced',
+		help: 'docs/errors.md#adapter-err-subscription-sink-displaced'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.ATTRIBUTION_HOOK,
