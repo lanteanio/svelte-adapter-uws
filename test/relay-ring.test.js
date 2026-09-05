@@ -26,6 +26,61 @@ async function until(predicate, ms = 2000) {
 	}
 }
 
+describe('a length prefix with bit 31 set', () => {
+	it('is refused by the ceiling instead of driving the parse offset negative', () => {
+		// `|` produces a SIGNED 32-bit result, so this prefix used to decode
+		// negative - and a negative length walks past every guard: not greater
+		// than the ceiling so the refusal is skipped, not greater than the bytes
+		// on hand so the wait-for-more break never fires, and `offset += 4 + len`
+		// sends the parse offset deeply negative, after which the loop emits
+		// empty frames four bytes at a time until it climbs back. That wedges the
+		// reader thread the ceiling is there to protect, from exactly the corrupt
+		// stream its own comment claims to handle.
+		const sab = createRelayRingBuffer(1024);
+		const oversized = [];
+		const frames = [];
+		const reader = new RingReader(sab, (frame) => {
+			frames.push(frame.length);
+			// Bounds the FAILING path to one iteration: the parse loop returns as
+			// soon as the reader is closed, so a regression fails fast instead of
+			// spinning half a billion times inside the suite.
+			reader.close();
+		}, { maxFrameBytes: 4096, onOversized: (event) => oversized.push(event) });
+
+		// 0xFFFFFFFF, the largest prefix that fits the field.
+		reader.acc = new Uint8Array([0xff, 0xff, 0xff, 0xff, 1, 2, 3, 4]);
+		reader._parse();
+
+		expect(oversized.length, 'the oversized refusal never fired').toBe(1);
+		expect(oversized[0].declaredBytes, 'the declared size was not read as unsigned').toBe(4294967295);
+		expect(frames, 'the parser emitted frames from a length it should have refused').toEqual([]);
+		expect(reader.closed).toBe(true);
+	});
+
+	it('still accepts the largest length the ceiling allows', () => {
+		// The other side of the boundary: reading unsigned must not turn an
+		// ordinary frame into a refusal.
+		const sab = createRelayRingBuffer(1024);
+		const oversized = [];
+		const frames = [];
+		const reader = new RingReader(sab, (frame) => frames.push(frame.length), {
+			maxFrameBytes: 4096,
+			onOversized: (event) => oversized.push(event)
+		});
+
+		const body = new Uint8Array(3).fill(7);
+		const buf = new Uint8Array(4 + body.length);
+		buf[0] = body.length;
+		buf.set(body, 4);
+		reader.acc = buf;
+		reader._parse();
+
+		expect(oversized).toEqual([]);
+		expect(frames).toEqual([4 + body.length]);
+		reader.close();
+	});
+});
+
 describe('relay frame codec', () => {
 	it('round-trips a full publish frame', () => {
 		const frame = encodePublishFrame('room:1', '{"e":"moved"}', true, 42, 'smooth.protocol:1', 'update', { key: 'p1', x: 1.5 });

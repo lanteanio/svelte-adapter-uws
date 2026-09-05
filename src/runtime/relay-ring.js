@@ -415,8 +415,20 @@ export class RingReader {
 		let buf = /** @type {Uint8Array} */ (this.acc);
 		let offset = 0;
 		while (buf.length - offset >= 4) {
+			// Unsigned. `|` yields a SIGNED 32-bit result, so a prefix with bit 31
+			// set decoded NEGATIVE - and a negative length passes every guard
+			// below: it is not greater than the ceiling, so the oversized refusal
+			// is skipped; `buf.length - offset - 4 < len` is false against a
+			// negative, so the wait-for-more-bytes break never fires; and
+			// `offset += 4 + len` drives the parse offset deeply negative, after
+			// which the loop emits empty frames four bytes at a time until it
+			// climbs back to zero. A corrupt or hostile prefix therefore wedged
+			// the reader thread that the ceiling exists to protect. Read as
+			// unsigned, the same bytes are simply an enormous frame, which is
+			// what they claim to be and what the ceiling already knows how to
+			// refuse.
 			const len =
-				buf[offset] | (buf[offset + 1] << 8) | (buf[offset + 2] << 16) | ((buf[offset + 3] << 24) >>> 0);
+				(buf[offset] | (buf[offset + 1] << 8) | (buf[offset + 2] << 16) | (buf[offset + 3] << 24)) >>> 0;
 			if (len > this.maxFrameBytes) {
 				// Decided from the length PREFIX, before waiting for the rest: the
 				// point is not to allocate for it. Stopping the reader is the honest

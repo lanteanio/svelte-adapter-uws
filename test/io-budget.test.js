@@ -1599,7 +1599,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// entry that names it. A boolean return, one branch at module evaluation and
 	// frozen literal data. No statement executes differently on any frame path,
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	platform: '32f3cd910944bd340ef1abb8dc345f4b12a07a03b1abacb14d1e22343e3e07c2',
+	//
+	// Re-pinned for the relay-ring length prefix reading unsigned: the decode
+	// wraps its existing bitwise expression in a >>> 0 so a prefix with bit 31
+	// set is an enormous frame the ceiling refuses rather than a negative that
+	// walked past every guard. One coercion on a value the parser already
+	// computed; no statement executes differently on any frame path, no byte is
+	// read, allocated or copied, and no copy primitive entered.
+	platform: 'f49bbac9b1cbb00131406a045be3d3e7a2dfe76ca56a1d69f2d6ace13835ff57',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
