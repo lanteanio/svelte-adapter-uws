@@ -237,9 +237,20 @@ describe('vite plugin', () => {
 			// half of this rule lives in test/egress-dev.test.js; this case
 			// holds it for every export at once, including ones added later.
 			const source = await readFile(new URL('../src/vite.js', import.meta.url), 'utf8');
-			const start = source.indexOf('function applyHandlers(mod)');
-			expect(start, 'applyHandlers must stay findable by name').toBeGreaterThan(-1);
-			const body = source.slice(start, source.indexOf('\n\t}', start));
+			// Both anchors are checked, not just the opening one. A missed CLOSING
+			// anchor does not fail the carve - `indexOf` returns -1, `slice` reads it
+			// as one-before-the-end, and the slice grows to nearly the whole file.
+			// The vacuity floors below cannot catch that: a wider slice yields MORE
+			// matches, so they pass more easily rather than less, and the scoping
+			// these carves exist for is silently gone.
+			const carve = (label, from, to) => {
+				const begin = source.indexOf(from);
+				expect(begin, `${label}: opening anchor ${JSON.stringify(from)} not found`).toBeGreaterThan(-1);
+				const end = source.indexOf(to, begin);
+				expect(end, `${label}: closing anchor ${JSON.stringify(to)} not found after it`).toBeGreaterThan(begin);
+				return source.slice(begin, end);
+			};
+			const body = carve('applyHandlers', 'function applyHandlers(mod)', '\n\t}');
 			// The backreference matters: `egressTenantOf: mod.egressTenant`
 			// would otherwise extract a name that the comparison list appears
 			// to cover while the installed value came from somewhere else.
@@ -251,9 +262,7 @@ describe('vite plugin', () => {
 			// Scoped to handleHotUpdate's own body: the same comparison written
 			// in any other function would satisfy a whole-file scan while the
 			// reload decision still never saw it.
-			const hotStart = source.indexOf('handleHotUpdate({ server })');
-			expect(hotStart, 'handleHotUpdate must stay findable by name').toBeGreaterThan(-1);
-			const hotBody = source.slice(hotStart, source.indexOf('\n\t\t}', hotStart));
+			const hotBody = carve('handleHotUpdate', 'handleHotUpdate({ server })', '\n\t\t}');
 			const compared = new Set(
 				[...hotBody.matchAll(/mod\.(\w+) !== userHandlers\.\1/g)].map((m) => m[1])
 			);
