@@ -237,8 +237,26 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(zlib.gunzipSync(joined).toString()).toBe(IDENTITY);
 	});
 
-	it('still resumes normally against the identity validator', () => {
-		const resumed = serve(entry, { range: 'bytes=10-19', ifRange: entry.etag });
+	it('refuses a range whose If-Range carries a weak validator', () => {
+		// RFC 9110 s13.1.5 evaluates If-Range with the STRONG comparison, and a
+		// weak validator never strong-matches. This lane issues nothing BUT weak
+		// validators (mtime and size), so an If-Range here can never authorise a
+		// splice - and authorising one anyway is how a client joins a slice onto
+		// a prefix of different octets that happened to share a tag, ending up
+		// with a corrupt body under a 206 that says it is fine.
+		expect(entry.etag.startsWith('W/'), 'this lane is supposed to issue weak validators').toBe(true);
+
+		const refused = serve(entry, { range: 'bytes=10-19', ifRange: entry.etag });
+		expect(refused.status).toBe('200 OK');
+		expect(header(refused, 'content-range')).toBeUndefined();
+		expect(refused.body.toString()).toBe(IDENTITY);
+	});
+
+	it('still resumes on a plain Range, which is what a download manager sends', () => {
+		// The other half, and the reason the change above costs little: a Range
+		// with no If-Range makes no consistency claim, so it is honoured exactly
+		// as before.
+		const resumed = serve(entry, { range: 'bytes=10-19' });
 		expect(resumed.status).toBe('206 Partial Content');
 		expect(header(resumed, 'content-range')).toBe(`bytes 10-19/${IDENTITY.length}`);
 		expect(header(resumed, 'content-encoding')).toBeUndefined();
@@ -263,10 +281,14 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(brotliTagAgainstIdentity, 'content-encoding')).toBeUndefined();
 		expect(brotliTagAgainstIdentity.body.equals(Buffer.from(IDENTITY))).toBe(true);
 
-		// And the matching case still resumes.
+		// Even the MATCHING tag does not resume, because matching is not enough:
+		// the comparison is strong, and both sides are weak. Selecting the right
+		// representation and being allowed to splice it are separate questions,
+		// and this case now pins both answers.
 		const matched = serve(entry, { acceptEncoding: 'br', range: 'bytes=10-19', ifRange: brEtag });
-		expect(matched.status).toBe('206 Partial Content');
-		expect(matched.body.equals(brBytes.subarray(10, 20))).toBe(true);
+		expect(matched.status).toBe('200 OK');
+		expect(header(matched, 'content-encoding')).toBe('br');
+		expect(matched.body.equals(brBytes)).toBe(true);
 	});
 
 	it('reports an unsatisfiable range against the selected representation length', () => {

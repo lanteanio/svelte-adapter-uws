@@ -370,6 +370,34 @@ function etagListHas(header, tag) {
  * @param {string} ifModifiedSince
  * @returns {0 | 304 | 412} 0 = serve
  */
+/**
+ * Compare two validators with RFC 9110's STRONG comparison function: equal,
+ * and neither one weak.
+ *
+ * `If-Range` is the one precondition that requires it. The client is asking to
+ * splice bytes onto a prefix it already holds, so the question is not 'is this
+ * the same resource' but 'is this the same OCTETS' - and a weak validator
+ * answers only the first. Two representations that differ can legitimately
+ * share one, which is what makes weak tags right for cache revalidation and
+ * unusable here: splicing across a weak match produces a corrupt body under a
+ * 206 that says it is fine.
+ *
+ * Every validator this lane issues is weak by construction (mtime and size,
+ * spelled W/"..."), so an `If-Range` carrying one falls through to the full
+ * representation - the same fallback a malformed or multi-range header takes.
+ * A plain `Range` with no `If-Range` is unaffected: it makes no consistency
+ * claim to break, and it is what a resuming download manager actually sends.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function strongMatch(a, b) {
+	if (!a || !b) return false;
+	if (a.startsWith('W/') || b.startsWith('W/')) return false;
+	return a === b;
+}
+
 export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, ifNoneMatch, ifModifiedSince) {
 	if (ifMatch !== '') {
 		const held = etagListHas(ifMatch, entry.etag) ||
@@ -474,7 +502,7 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 	// client its compression.
 	/** @type {{ start: number, end: number } | null | false} */
 	let range = false;
-	if (rangeHeader && repEtag && (!ifRangeHeader || ifRangeHeader === repEtag) && !rangeHeader.includes(',')) {
+	if (rangeHeader && repEtag && (!ifRangeHeader || strongMatch(ifRangeHeader, repEtag)) && !rangeHeader.includes(',')) {
 		range = parseRange(rangeHeader, body.byteLength);
 	}
 
