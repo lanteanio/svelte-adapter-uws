@@ -173,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Refused as `ADAPTER-ERR-CLUSTER-CONFIG-PORT` with the other capacity misconfigurations, before any worker spawns, so the failure is at boot rather than in the routing layer.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a certificate watch that dies after starting no longer takes the process down.** Nothing listened for the watcher's `error` event, and an unhandled one is rethrown - so a certificate directory that was removed or replaced raised an uncaught exception on a healthy serving process, and on a cluster primary that is the whole fleet.
+  - **Affects:** TLS deployments with the certificate watch on, which is the default. A watch that fails to START was always caught; this is the one that fails later, which arrives as an event rather than a throw.
+  - **Action:** None. If the new line appears, find what happened to the certificate directory - a redeployed secret volume that replaces the directory rather than the files in it is the usual cause - and restart.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The process now stays up and reports `ADAPTER-ERR-TLS-WATCH-LOST`, or `ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST` on a cluster primary, and enters the same degraded TLS state a watch that never started produces - sticky, so no later success clears it. Its own id rather than the existing watch ids, because no catch-up read follows this one and the operator's next move differs.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -831,6 +837,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the refusal is: off Linux reuseport is already refused by its own
   id, which fires first, so the condition cannot be reached there and a case
   that ran would assert the wrong refusal.
+
+- **The certificate watcher listens for its own error event.** A watch fails
+  two ways. Failing to START throws, and both callers already wrap `start()`
+  to degrade instead of crashing. Failing AFTER it started - the directory
+  removed or replaced, permissions changed, the platform's watch resources
+  exhausted - arrives as an `error` EVENT, which no one was listening for; an
+  `error` event with no listener is rethrown by EventEmitter, so a certificate
+  watcher could raise an uncaught exception on a process that was serving
+  fine, and on a cluster primary that ends the whole fleet.
+  The listener is attached whether or not the caller passes `onError`, because
+  not crashing is the point and being told is the option. A watch that has died
+  is not re-armed by anything, so it is closed rather than left to fire again,
+  a pending debounce is dropped rather than fired into a directory the watch
+  just lost, and a late error from a watcher `stop()` already replaced is
+  ignored. Reported as `ADAPTER-ERR-TLS-WATCH-LOST`, or
+  `ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST` on the primary - their own ids rather
+  than the existing watch ids, whose text promises a failure at start and an
+  arm-time catch-up read that this case does not get.
+  `test/tls-reload.test.js` drives the event through the injected `watchFs`
+  seam, and pins the EventEmitter contract the whole thing rests on against a
+  BARE emitter, so that assertion cannot pass because of the code it justifies.
+
+- **The cluster primary reads its TLS degraded-state policy from the ledger.**
+  Which degradations a success can clear is policy, and the primary carried a
+  second copy of it inline: a clear that ended the degradation on any successful
+  read, with no equivalent of the sticky watch reason the worker half keeps. Now
+  both halves answer through `createTlsDegradedLedger`, so a dead watch stays
+  degraded through any later success on either side.
+  No behaviour changes on the primary today, and the reason is worth writing
+  down rather than discovering twice: `onCertChange` has exactly one trigger and
+  it is the watcher itself, so once that watch is dead nothing fires again and
+  no success can reach the clear. What the inline version was, was a correct
+  answer with no reason behind it. The case reads the source rather than an
+  outcome, because an invariant with no reachable outcome is what it is.
 
 ## [0.6.0-next.94] - 2026-08-26
 

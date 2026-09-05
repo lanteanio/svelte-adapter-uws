@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -256,6 +257,94 @@ describe('createCertWatcher (injected clock + fs)', () => {
 		w.stop();
 		expect(t.size()).toBe(0);
 		expect(() => w.stop()).not.toThrow(); // safe repeat
+	});
+
+	// A watch can fail two ways and they arrive differently. Failing to START is
+	// a throw, which the cases around this one cover. Failing AFTER it started
+	// is an `error` EVENT on the FSWatcher - and an `error` event with no
+	// listener is rethrown by EventEmitter, which for a certificate watcher is
+	// an uncaught exception on a healthy serving process. On a cluster primary
+	// that is the whole fleet.
+	function emitterWatcher() {
+		const w = new EventEmitter();
+		w.closed = 0;
+		w.close = () => { w.closed++; };
+		return w;
+	}
+
+	it('rethrows an error event when nothing listens, which is what the listener exists to prevent', () => {
+		// The EventEmitter contract this rests on, asserted against a bare
+		// emitter rather than against the watcher - so it cannot pass because
+		// of the very code it justifies.
+		const bare = new EventEmitter();
+		expect(() => bare.emit('error', new Error('watch died'))).toThrow(/watch died/);
+	});
+
+	it('reports an error event after start through onError instead of throwing', () => {
+		const t = fakeTimers();
+		const fake = emitterWatcher();
+		const watchFs = () => fake;
+		const seen = [];
+		const w = createCertWatcher({
+			certPath: '/certs/live.crt', onChange: () => {}, onError: (err) => seen.push(err),
+			watchFs, setTimer: t.setTimer, clearTimer: t.clearTimer
+		});
+		w.start();
+
+		const err = Object.assign(new Error('watch died'), { code: 'EPERM' });
+		expect(() => fake.emit('error', err)).not.toThrow();
+		expect(seen).toEqual([err]);
+		// The watch is dead and nothing re-arms it, so it is closed rather than
+		// left to fire again - and a second error is not a second report.
+		expect(fake.closed).toBe(1);
+		fake.emit('error', new Error('again'));
+		expect(seen.length).toBe(1);
+	});
+
+	it('does not throw on an error event when no onError is configured', () => {
+		// The listener is attached unconditionally: not crashing is the point,
+		// and being told is the option. A caller that passes no onError still
+		// must not take an uncaught exception from its certificate watcher.
+		const fake = emitterWatcher();
+		const w = createCertWatcher({ certPath: '/certs/live.crt', onChange: () => {}, watchFs: () => fake });
+		w.start();
+		expect(() => fake.emit('error', new Error('watch died'))).not.toThrow();
+		expect(fake.closed).toBe(1);
+	});
+
+	it('drops a pending debounce when the watch dies, and reports nothing after stop()', () => {
+		const t = fakeTimers();
+		const fake = emitterWatcher();
+		let reloads = 0;
+		const seen = [];
+		let fsCallback;
+		const w = createCertWatcher({
+			certPath: '/certs/live.crt', debounceMs: 500, onChange: () => { reloads++; },
+			onError: (err) => seen.push(err),
+			watchFs: (_dir, _opts, cb) => { fsCallback = cb; return fake; },
+			setTimer: t.setTimer, clearTimer: t.clearTimer
+		});
+		w.start();
+		fsCallback('change', 'live.crt');
+		expect(t.size()).toBe(1);
+		// The reload that was about to run would read a directory the watch just
+		// lost; it is dropped rather than fired into that.
+		fake.emit('error', new Error('watch died'));
+		expect(t.size()).toBe(0);
+		t.fireAll();
+		expect(reloads).toBe(0);
+
+		// An error from a watcher this instance has already let go is not this
+		// watch any more.
+		const second = emitterWatcher();
+		const w2 = createCertWatcher({
+			certPath: '/certs/live.crt', onChange: () => {}, onError: (err) => seen.push(err),
+			watchFs: () => second, setTimer: t.setTimer, clearTimer: t.clearTimer
+		});
+		w2.start();
+		w2.stop();
+		second.emit('error', new Error('after stop'));
+		expect(seen.length).toBe(1);
 	});
 
 	it('surfaces a watchFs error from start() (fs.watch throws ENOENT on a missing dir) so the caller must guard it', () => {

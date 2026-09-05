@@ -287,7 +287,26 @@ function initTlsReload() {
 			certWatcher = createCertWatcher({
 				certPath: ssl_cert,
 				debounceMs: ssl_reload_debounce_ms,
-				onChange: reloadTls
+				onChange: reloadTls,
+				// A watch that dies AFTER starting arrives as an event, not a
+				// throw, so the catch below never sees it. Same consequence as a
+				// watch that never started - no renewal will be seen again - and
+				// sticky for the same reason, but reported under its own id
+				// because the causes and the operator's next move differ, and
+				// because no catch-up read follows this one.
+				onError: (err) => {
+					tlsHealth.watching = false;
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.tls',
+						event: 'tls.watch-lost',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The certificate directory watch stopped after running; hot reload is disabled and no further renewal will be seen.',
+						attributes: { error: diagnosticError(err) }
+					});
+					tlsWatchDegraded('the certificate directory watch stopped, so no further renewal will be seen');
+				}
 			});
 			certWatcher.start();
 			tlsHealth.watching = true;

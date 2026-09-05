@@ -294,7 +294,13 @@ export function applyServerNames(app, source, prev) {
  * injected (defaulting to the runtime seam + node:fs) so the debounce is
  * deterministic under test and routed through the injectable timer.
  *
- * @param {{ certPath: string, onChange: () => void, dir?: string, debounceMs?: number, watchFs?: typeof import('node:fs').watch, setTimer?: Function, clearTimer?: Function }} config
+ * `start()` throws what the platform throws when the watch cannot be
+ * established at all; `onError` reports a watch that dies AFTER starting, which
+ * arrives as an event rather than a throw and is otherwise fatal (see below).
+ * Both mean the same thing to a caller - no renewal will be seen again - and
+ * neither is retried.
+ *
+ * @param {{ certPath: string, onChange: () => void, onError?: (err: any) => void, dir?: string, debounceMs?: number, watchFs?: typeof import('node:fs').watch, setTimer?: Function, clearTimer?: Function }} config
  * @returns {{ start: () => void, stop: () => void }}
  */
 export function createCertWatcher(config) {
@@ -317,7 +323,30 @@ export function createCertWatcher(config) {
 		start() {
 			if (watcher) return;
 			// persistent:false so the watcher never holds the event loop open.
-			watcher = watchFs(dir, { persistent: false }, () => schedule());
+			const started = watchFs(dir, { persistent: false }, () => schedule());
+			watcher = started;
+			// An FSWatcher reports a failure that happens AFTER it started - the
+			// directory going away, a permission change, the platform's watch
+			// limit - as an `error` EVENT, and an `error` event with no listener
+			// is rethrown by EventEmitter. Unhandled, that is an uncaught
+			// exception raised by a certificate watcher, which on a cluster
+			// primary takes the whole fleet with it. So the listener is attached
+			// whether or not the caller passes `onError`: not crashing is the
+			// point, and being told is the option.
+			//
+			// Nothing re-arms a watch that has died, so it is closed here rather
+			// than left to fire again, and the caller hears about it once. A
+			// late error from a watcher that `stop()` already replaced is
+			// dropped - that one is not this watch any more.
+			if (started && typeof started.on === 'function') {
+				started.on('error', (err) => {
+					if (watcher !== started) return;
+					watcher = null;
+					if (timer) { clearTimer(timer); timer = null; }
+					try { started.close(); } catch { /* already gone */ }
+					if (config.onError) config.onError(err);
+				});
+			}
 		},
 		stop() {
 			if (timer) { clearTimer(timer); timer = null; }

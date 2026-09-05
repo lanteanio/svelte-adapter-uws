@@ -2,9 +2,9 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 40 entries
-against the 43 distinct diagnostic events emitted from the scanned sources, plus
-34 entries indexing consequential plain console lines that never enter the diagnostic
+for traffic, whether anything recovers on its own, and what to do next: 41 entries
+against the 44 distinct diagnostic events emitted from the scanned sources, plus
+35 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
@@ -65,6 +65,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped) | `tls.reload-skipped` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.reload-skipped severity=warn] A certificate reload was skipped and the previous certificate was kept; the renewal on disk is not being served.` |
 | [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap) | `tls.swap-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.swap-failed severity=error] A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.` |
 | [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch) | `tls.watch-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-failed severity=error] The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.` |
+| [ADAPTER-ERR-TLS-WATCH-LOST](#adapter-err-tls-watch-lost) | `tls.watch-lost` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-lost severity=error] The certificate directory watch stopped after running; hot reload is disabled and no further renewal will be seen.` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-WORKERS](#adapter-err-cluster-config-workers) | `cluster.config.invalid-workers` | `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE](#adapter-err-cluster-config-compute) | `cluster.config.invalid-compute-count` | `[svelte-adapter-uws] websocket.workers.compute (` |
 | [ADAPTER-ERR-CLUSTER-CONFIG-MODE](#adapter-err-cluster-config-mode) | `cluster.config.invalid-mode` | `[svelte-adapter-uws] Invalid CLUSTER_MODE: '` |
@@ -73,6 +74,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read) | `tls.primary.boot-read-failed` | `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` |
 | [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read) | `tls.primary.reload-read-failed` | `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` |
 | [ADAPTER-ERR-TLS-PRIMARY-WATCH](#adapter-err-tls-primary-watch) | `tls.primary.watch-failed` | `[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)` |
+| [ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST](#adapter-err-tls-primary-watch-lost) | `tls.primary.watch-lost` | `[tls] primary cert watch stopped after running, cluster hot-reload disabled (server keeps running)` |
 | [ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED](#adapter-err-shutdown-listener-rejected) | `shutdown.listener-rejected` | `[svelte-adapter-uws] a sveltekit:shutdown listener rejected` |
 | [ADAPTER-ERR-SHUTDOWN-LISTENER-THREW](#adapter-err-shutdown-listener-threw) | `shutdown.listener-threw` | `[svelte-adapter-uws] a sveltekit:shutdown listener threw` |
 | [ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED](#adapter-err-shutdown-requests-dropped) | `shutdown.requests-dropped` | `[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (` |
@@ -103,8 +105,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 43 distinct events.
-The 40 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 44 distinct events.
+The 41 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -151,6 +153,7 @@ Indexed events:
 - `tls.reload-skipped` - [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped)
 - `tls.swap-failed` - [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap)
 - `tls.watch-failed` - [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch)
+- `tls.watch-lost` - [ADAPTER-ERR-TLS-WATCH-LOST](#adapter-err-tls-watch-lost)
 
 Indexed console lines (no diagnostic event; the searchable key is the printed prefix and
 the stable ID tag on the line):
@@ -163,6 +166,7 @@ the stable ID tag on the line):
 - `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` - [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read)
 - `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` - [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read)
 - `[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)` - [ADAPTER-ERR-TLS-PRIMARY-WATCH](#adapter-err-tls-primary-watch)
+- `[tls] primary cert watch stopped after running, cluster hot-reload disabled (server keeps running)` - [ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST](#adapter-err-tls-primary-watch-lost)
 - `[svelte-adapter-uws] a sveltekit:shutdown listener rejected` - [ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED](#adapter-err-shutdown-listener-rejected)
 - `[svelte-adapter-uws] a sveltekit:shutdown listener threw` - [ADAPTER-ERR-SHUTDOWN-LISTENER-THREW](#adapter-err-shutdown-listener-threw)
 - `[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (` - [ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED](#adapter-err-shutdown-requests-dropped)
@@ -690,6 +694,18 @@ searchable log prefix is:
 - **Runtime help:** `docs/errors.md#adapter-err-tls-watch`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
 
+<a id="adapter-err-tls-watch-lost"></a>
+## `ADAPTER-ERR-TLS-WATCH-LOST`
+
+- **Code/event:** `tls.watch-lost`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-lost severity=error] The certificate directory watch stopped after running; hot reload is disabled and no further renewal will be seen.`
+- **Cause:** A watch that started successfully reported a failure later - the certificate directory was removed or replaced, its permissions changed, or the platform's watch resources ran out. This arrives as an event rather than a throw, so it happens while the process is serving rather than at boot.
+- **Consequence:** Certificate hot reload is off from that moment for the process lifetime, and the TLS degraded state is set and stays set. Unlike a watch that never started, no catch-up read follows this one: whatever was on disk at the moment the watch died is what this instance keeps serving, and the failure surfaces much later as an expired certificate.
+- **Automatic recovery:** None. The watch is not re-armed, so this does not resolve without a restart.
+- **Next action:** Find what happened to the certificate directory - a redeployed secret volume that replaced the directory rather than the files in it is the usual cause - and restart the process. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-watch-lost`
+- **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
+
 <a id="adapter-err-cluster-config-workers"></a>
 ## `ADAPTER-ERR-CLUSTER-CONFIG-WORKERS`
 
@@ -786,6 +802,18 @@ searchable log prefix is:
 - **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
 - **Next action:** Fix the path or permissions and restart the primary. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-primary-watch`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-tls-primary-watch-lost"></a>
+## `ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST`
+
+- **Code/event:** `tls.primary.watch-lost`
+- **Message prefix:** `[tls] primary cert watch stopped after running, cluster hot-reload disabled (server keeps running)`
+- **Cause:** A watch that started successfully on the cluster primary reported a failure later - the certificate directory was removed or replaced, its permissions changed, or the platform's watch resources ran out. A redeployed secret volume that replaces the directory rather than the files in it is the usual cause.
+- **Consequence:** Cluster-wide certificate hot reload is off from that moment: with no watcher on the primary, no worker is ever told to reload, so the whole fleet serves its current certificate until it expires. The primary enters the degraded TLS state and stays there; readiness probes stay green throughout.
+- **Automatic recovery:** None. The watch is not re-armed, so this does not resolve without a restart.
+- **Next action:** Find what happened to the certificate directory and restart the primary. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently. A watch that never started at all is reported separately as ADAPTER-ERR-TLS-PRIMARY-WATCH.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-primary-watch-lost`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
 
 <a id="adapter-err-shutdown-listener-rejected"></a>

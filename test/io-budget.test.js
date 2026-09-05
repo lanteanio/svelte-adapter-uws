@@ -907,7 +907,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Frozen literal data plus one boot-time comparison in the primary, before any
 	// worker spawns. No statement executes differently on any frame path, no byte
 	// is read, allocated or copied, and no copy primitive entered.
-	ingress: '8cd946b19b3ba92238e6d9bedc2d010f334fd685ab1ce49745a85b0166913ae9',
+	//
+	// Re-pinned for the two lost-watch error ids: two id constants and their two
+	// registry entries, which every sealed graph reaches through
+	// utils.js -> utils/metrics.js -> error-registry.js. Frozen literal data and
+	// nothing else - the code those ids report from (the certificate watcher's
+	// error listener and the cluster primary's degraded-state ledger) is in
+	// utils/tls-reload.js, handler/lifecycle.js and index.js, none of which any
+	// sealed graph reaches. Measured rather than assumed: reverting only
+	// error-registry.js to its previous content restores all three moved digests
+	// and this whole file passes. No statement executes differently on any frame path, no
+	// byte is read, allocated or copied, and no copy primitive entered.
+	ingress: '39d180781e715221e545d3bb809e622046c8618f6539d9147e572650a3651117',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1618,7 +1629,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Frozen literal data plus one boot-time comparison in the primary, before any
 	// worker spawns. No statement executes differently on any frame path, no byte
 	// is read, allocated or copied, and no copy primitive entered.
-	platform: '9ff69dcdc36c0a5bcd2853021d3c1454d96df1950f5ef1aedb99621b491161e6',
+	//
+	// Re-pinned for the two lost-watch error ids, the same drift and the same
+	// reach as the ingress digest above: two id constants and their two registry
+	// entries through utils.js -> utils/metrics.js -> error-registry.js, frozen
+	// literal data, and nothing from the watcher or ledger code inside any
+	// sealed graph. Reverting only error-registry.js restores all three.
+	platform: 'a02e48f11820591d6b1cd5fb47e3f5f944a3da2bbc3c124550aa8b8af83f63a3',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1870,7 +1887,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Frozen literal data plus one boot-time comparison in the primary, before any
 	// worker spawns. No statement executes differently on any frame path, no byte
 	// is read, allocated or copied, and no copy primitive entered.
-	'wire-fanout': '852f8fe0845279c7673ec93a8e468a6acbcf7dbd3f4d5d0dfc4d324a29378ad3',
+	//
+	// Re-pinned for the two lost-watch error ids, the same drift and the same
+	// reach as the ingress and platform digests: two id constants and their two
+	// registry entries through utils.js -> utils/metrics.js -> error-registry.js,
+	// frozen literal data, and nothing from the watcher or ledger code inside any
+	// sealed graph. Reverting only error-registry.js restores all three digests.
+	'wire-fanout': '4023cc831c0c0a5ee8ecabef41cbbb14656ca6f0c86461594708d93a0b309632',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

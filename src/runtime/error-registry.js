@@ -61,6 +61,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	TLS_RELOAD_SKIPPED: 'ADAPTER-ERR-TLS-RELOAD-SKIPPED',
 	TLS_SWAP: 'ADAPTER-ERR-TLS-SWAP',
 	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH',
+	TLS_WATCH_LOST: 'ADAPTER-ERR-TLS-WATCH-LOST',
 	SUBSCRIPTION_SINK_DISPLACED: 'ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED',
 	CLUSTER_CONFIG_WORKERS: 'ADAPTER-ERR-CLUSTER-CONFIG-WORKERS',
 	CLUSTER_CONFIG_COMPUTE: 'ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE',
@@ -70,6 +71,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	TLS_PRIMARY_BOOT_READ: 'ADAPTER-ERR-TLS-PRIMARY-BOOT-READ',
 	TLS_PRIMARY_RELOAD_READ: 'ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ',
 	TLS_PRIMARY_WATCH: 'ADAPTER-ERR-TLS-PRIMARY-WATCH',
+	TLS_PRIMARY_WATCH_LOST: 'ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST',
 	SHUTDOWN_LISTENER_REJECTED: 'ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED',
 	SHUTDOWN_LISTENER_THREW: 'ADAPTER-ERR-SHUTDOWN-LISTENER-THREW',
 	SHUTDOWN_REQUESTS_DROPPED: 'ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED',
@@ -793,6 +795,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		help: 'docs/errors.md#adapter-err-tls-watch'
 	}),
 	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_WATCH_LOST,
+		code: null,
+		event: 'tls.watch-lost',
+		component: 'runtime.tls',
+		severity: 'error',
+		emission: 'direct',
+		problemPrefix: 'The certificate directory watch stopped after running; hot reload is disabled and no further renewal will be seen.',
+		messagePrefix: direct('runtime.tls', 'tls.watch-lost', 'error', 'The certificate directory watch stopped after running; hot reload is disabled and no further renewal will be seen.'),
+		cause: 'A watch that started successfully reported a failure later - the certificate directory was removed or replaced, its permissions changed, or the platform\'s watch resources ran out. This arrives as an event rather than a throw, so it happens while the process is serving rather than at boot.',
+		consequence: 'Certificate hot reload is off from that moment for the process lifetime, and the TLS degraded state is set and stays set. Unlike a watch that never started, no catch-up read follows this one: whatever was on disk at the moment the watch died is what this instance keeps serving, and the failure surfaces much later as an expired certificate.',
+		automaticRecovery: 'None. The watch is not re-armed, so this does not resolve without a restart.',
+		nextAction: 'Find what happened to the certificate directory - a redeployed secret volume that replaced the directory rather than the files in it is the usual cause - and restart the process. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently.',
+		sources: Object.freeze(['src/runtime/handler/lifecycle.js']),
+		anchor: 'adapter-err-tls-watch-lost',
+		help: 'docs/errors.md#adapter-err-tls-watch-lost'
+	}),
+	Object.freeze({
 		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_WORKERS,
 		code: null,
 		event: 'cluster.config.invalid-workers',
@@ -929,6 +948,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-tls-primary-watch',
 		help: 'docs/errors.md#adapter-err-tls-primary-watch'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH_LOST,
+		code: null,
+		event: 'tls.primary.watch-lost',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[tls] primary cert watch stopped after running, cluster hot-reload disabled (server keeps running)',
+		cause: 'A watch that started successfully on the cluster primary reported a failure later - the certificate directory was removed or replaced, its permissions changed, or the platform\'s watch resources ran out. A redeployed secret volume that replaces the directory rather than the files in it is the usual cause.',
+		consequence: 'Cluster-wide certificate hot reload is off from that moment: with no watcher on the primary, no worker is ever told to reload, so the whole fleet serves its current certificate until it expires. The primary enters the degraded TLS state and stays there; readiness probes stay green throughout.',
+		automaticRecovery: 'None. The watch is not re-armed, so this does not resolve without a restart.',
+		nextAction: 'Find what happened to the certificate directory and restart the primary. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently. A watch that never started at all is reported separately as ADAPTER-ERR-TLS-PRIMARY-WATCH.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-tls-primary-watch-lost',
+		help: 'docs/errors.md#adapter-err-tls-primary-watch-lost'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.SHUTDOWN_LISTENER_REJECTED,

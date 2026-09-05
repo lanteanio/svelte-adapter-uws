@@ -124,6 +124,43 @@ describe('ADAPTER-ERR-TLS-WATCH: the degraded-state ledger', () => {
 		expect(s.disarmed()).toBe(0);
 	});
 
+	// The cluster primary keeps its own degraded state, and for a while it kept
+	// its own POLICY too - an inline clear that ended the degradation on any
+	// successful read, with no equivalent of the sticky watch reason. The two
+	// halves have to answer the same question the same way, so the primary reads
+	// the policy from the ledger rather than restating it.
+	//
+	// Asserted against the source because the primary's block only runs inside
+	// the cluster branch, and the distinction it encodes - sticky versus
+	// superseded - needs a success to FOLLOW a watch death to be visible at
+	// runtime. On the primary no success can: `onCertChange` has exactly one
+	// trigger and it is the watcher itself, so a dead watch means nothing fires
+	// again. What is being pinned is therefore the invariant, not an outcome,
+	// and the honest way to pin an invariant is to read the code that carries it.
+	describe('the cluster primary reads the same ledger', () => {
+		const source = readFileSync(new URL('../src/runtime/index.js', import.meta.url), 'utf8');
+
+		it('builds a ledger instead of clearing the degraded state by hand', () => {
+			expect(source).toContain('createTlsDegradedLedger({');
+			// The whole point: no inline write to the field the ledger owns.
+			// Without this, the ledger can be added and quietly bypassed.
+			expect(source).not.toMatch(/primaryTlsHealth\.degraded\s*=/);
+		});
+
+		it('routes the watch deaths to the sticky entry and the read failure to the superseding one', () => {
+			// A watch is dead for the process lifetime, so both of its sites take
+			// the variant a later success cannot clear; a read that failed is
+			// superseded by the next read that works.
+			// Both call sites, named by the reason each reports, so this fails if
+			// either one is moved back to the superseding entry.
+			expect(source).toMatch(/primaryTlsWatchDegraded\('the primary certificate directory watch failed to start/);
+			expect(source).toMatch(/primaryTlsWatchDegraded\('the primary certificate directory watch stopped/);
+			expect(source).toMatch(/function primaryTlsWatchDegraded[\s\S]*?primaryTlsLedger\.watchFailed\(/);
+			expect(source).toMatch(/function primaryTlsDegraded[\s\S]*?primaryTlsLedger\.failed\(/);
+			expect(source).toMatch(/function primaryTlsRecovered[\s\S]*?primaryTlsLedger\.recovered\(/);
+		});
+	});
+
 	it('without a dead watch, repeated failures collapse into one recovery', () => {
 		const s = build();
 		s.ledger.failed('first');
