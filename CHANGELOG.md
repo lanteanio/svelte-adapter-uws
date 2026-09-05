@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every request that answered 304 before still does; the new answers only add 304s and 412s where the RFC requires them. `If-Match` compares by opaque equality against any validator the lane issued, because every validator is weak by construction and strict strong comparison would refuse the exact tag the server handed out. `last-modified` joins the reserved `staticHeaders` keys, since the date preconditions answer from the file's real time.
   - **Detail:** [Added engineering detail](#added).
+- **Added: a displaced subscription-accounting sink now says so.** The counter lives in one `globalThis` slot, so a second copy of the runtime in one worker silently takes every delta - freezing one total while the other is charged releases it never matched; installing over a different sink is now `ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED`.
+  - **Affects:** Deployments or suites where two copies of the adapter runtime load in one worker - a duplicated dependency instance, or two built fixtures imported by one test process. A single copy never reaches it.
+  - **Action:** None unless it fires; then deduplicate the runtime instance rather than the counter, which is a symptom.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Clearing the slot to `null` and reinstalling the same function are not displacements, so releasing the slot stays ordinary. This names the topology; it does not change how subscriptions are counted.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: a subscription-drift report now says how many connections it summed and how many a close had already settled.** A membership counted twice and a closed connection still in the live set produce the same sum, so the two quantities that separate them now ride on the report instead of being reconstructed by whoever reads it.
   - **Affects:** Anyone reading `subs.total-mismatch` diagnostics; the two existing fields are unchanged and two more are added beside them.
   - **Action:** None. A reader keying on `totalSubscriptions` and `summed` keeps working.
@@ -131,6 +137,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Those two keys are now inert - a call carrying them publishes as any other origin publish would, drawing the topic counter. In a multi-worker runtime such a call meets the same sequence-authority refusal every other publish meets, which is a `TypeError` where it previously published silently. The batch-admission marker is hardened the same way: an options object that answers for every key no longer gets a publish past a crossed egress ceiling. `createTestServer` and the dev plugin take the same decisions.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a socket leaves the live set before the rest of its close teardown.** The close released the permit, the subscription accounting, the capability counts and the wire states before removing the connection, and none of those is individually guarded - so one throw stranded a socket whose handle was gone in every publish walk and in the auditor's sum, permanently.
+  - **Affects:** Every deployment, on the connection close path. Nothing about a close that completes changes.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The removal owes nothing to the releases that followed it, so moving it first changes only what survives a throw among them. A stranded entry read as a ledger mismatch no double charge explained and never cleared, which is the shape that no longer occurs.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a relay frame length with its top bit set no longer wedges the reader.** The ring decoded the four-byte prefix with `|`, which yields a signed result, so such a prefix read negative - under the oversized ceiling, under the bytes on hand, and into a parse offset that emitted empty frames until it climbed back to zero.
+  - **Affects:** Multi-worker deployments with the cluster relay enabled, on a corrupt or hostile length prefix - the input class the ceiling exists for.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Read unsigned, those same bytes are an enormous frame, which is what they claim to be and what the ceiling already refuses. Every length the ring accepted before is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: `If-Range` is evaluated with the strong comparison RFC 9110 requires.** Every validator this lane issues is weak by construction, and the range gate took one as a match - so a client could splice a slice onto bytes from a representation that merely shared a validator, and read a corrupt body under a 206 saying it was fine.
+  - **Affects:** Clients sending `If-Range` with an entity tag against a static or prerendered asset. A plain `Range` is untouched, which is what a resuming download manager sends.
+  - **Action:** None. A client wanting the range without the consistency claim sends `Range` alone.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** A weak `If-Range` now falls through to the full 200 representation - the fallback a malformed or multi-range header already takes - where it previously answered 206. Since every validator this lane issues is weak, that is every entity-tag `If-Range` it sees; a date `If-Range` is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a resume frame's epoch map takes the same grant gate as its sequence numbers.** `lastSeenSeqs` had its ungranted topics dropped and `lastSeenEpochs` reached the hook exactly as parsed, so the gate dropped a client-named topic from one hand and returned it with the other - carrying its generation as well as its name.
+  - **Affects:** Deployments with a resume hook and the wire-subscribe grant gate armed. Both maps arrive on one frame and the hook reads them together, so an ungranted topic was visible through the epoch half.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Both maps now take one filter, written once so they cannot drift. A granted topic's epoch reaches the hook exactly as before.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: an ephemeral port under reuseport is refused instead of booting a fleet nothing routes to.** Every reuseport worker calls `listen()` for itself, so `PORT=0` hands each of them a different port and the single shared port the mode exists to provide never happens - while the balancer, the health check and the startup log all name port 0.
+  - **Affects:** Linux deployments setting `PORT=0` with reuseport cluster mode. Acceptor mode is untouched and must be: the primary binds once and hands descriptors down, so one ephemeral port is still one port.
+  - **Action:** Name a real port. Off Linux nothing changes - reuseport is already refused there by its own id, which fires first.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Refused as `ADAPTER-ERR-CLUSTER-CONFIG-PORT` with the other capacity misconfigurations, before any worker spawns, so the failure is at boot rather than in the routing layer.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -195,6 +231,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/static-preconditions.test.js` carries the case table: precedence
   pins, boundary dates at the exact second, list and `*` forms, the
   representation distinction, and the immutable exemption.
+
+- **A subscription-accounting sink that displaces another one now reports
+  it.** The sink is one `Symbol.for` slot on `globalThis`, so every copy of
+  the module in a worker addresses the same counter, and an install replaced
+  whatever was there without a word. Two runtime copies each register at
+  module scope; the second takes every delta, and afterwards one counter is
+  frozen while the other is charged releases for memberships it never added.
+  Those are the two shapes such a deployment reports from the outside: a
+  total stuck under its own summed bookkeeping on the displaced side, and a
+  total driven negative by unmatched releases on the other. The negative
+  always reads exactly `-1`, because `adjustTotalSubscriptions` clamps to
+  zero after reporting, so every unmatched release starts from zero again.
+  The install now returns whether it displaced a different sink, and the
+  handler reports that through the operational channel at `warn`, as
+  `ADAPTER-ERR-SUBSCRIPTION-SINK-DISPLACED`. Reported rather than asserted:
+  a soft assertion throws under `NODE_ENV=test`, and holding two
+  independently built runtimes in one test process is an ordinary thing for
+  this suite to do - the condition describes a deployment that carries two
+  copies, not a harness that deliberately holds two.
+  Clearing the slot to `null` and reinstalling the same function are not
+  displacements - a suite releasing the slot is ordinary. This does not
+  change how subscriptions are counted; it names which of the two candidate
+  causes is in play the first time it happens, instead of leaving two
+  symptoms that point nowhere. `test/subscription-accounting.test.js` installs
+  a second sink and reads the displacement back, and holds the half that
+  matters downstream: after a takeover the displaced counter stops moving at
+  all, which is what strands a total.
 
 ### Changed
 
@@ -643,6 +706,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real drift still reports. `test/auditor-snapshot.test.js` drives the freed
   handle through the builder and asserts the predicate stays silent, then holds
   the other side so the guard cannot degrade into disabling the accountant.
+
+- **A closing socket leaves the live set first.** The close finally released
+  the permit, the subscription accounting, the capability counts, the wire
+  states, the shared wire-id refs and the send-gate slot, and the removal
+  from `wsConnections` sat last. None of those releases is individually
+  guarded, so one throw skipped everything after it - including the removal.
+  A stranded entry does not sit still: every publish walk keeps visiting a
+  socket whose handle is gone, and its registry keeps counting toward the
+  auditor's summed bookkeeping while the accountant has already released
+  those memberships, which reads as a ledger mismatch no double charge
+  explains and which never clears. The removal owes nothing to the releases
+  below it, so it goes first. `test/close-path-ordering.test.js` pins the
+  order in the close handler itself - the removal is its own statement, it
+  precedes every release that can throw, and it appears exactly once - because
+  what has to hold is the position, and a runtime case can only reach the
+  arrangement through whichever release it chose to break.
+
+- **The relay ring reads a frame length as unsigned.** `|` yields a signed
+  32-bit result, so a prefix with bit 31 set decoded negative - and a
+  negative length walks past every guard: it is not greater than the ceiling,
+  so the oversized refusal is skipped; it is not greater than the bytes on
+  hand, so the wait-for-more break never fires; and `offset += 4 + len`
+  drives the parse offset deeply negative, after which the loop emits empty
+  frames four bytes at a time until it climbs back to zero. So a corrupt or
+  hostile prefix wedged the reader thread that the ceiling exists to protect,
+  from exactly the input class its own comment claims to handle. Read
+  unsigned, the same bytes are an enormous frame, which is what they claim to
+  be and what the ceiling already refuses. The case in
+  `test/relay-ring.test.js` closes the reader from its frame callback, so the
+  pre-fix arithmetic fails it in milliseconds rather than spinning half a
+  billion iterations inside the suite.
+
+- **`If-Range` is evaluated with the strong comparison.** Every validator this
+  lane issues is weak by construction - mtime and size, spelled `W/"..."` -
+  and the range gate accepted one as an `If-Range` match. RFC 9110 s13.1.5
+  requires the strong comparison there, and a weak validator never
+  strong-matches. It is not pedantry: `If-Range` exists so a client can splice
+  a slice onto bytes it already holds, and a weak validator does not promise
+  those bytes are the same octets - two representations that differ may share
+  one. Splicing across that yields a corrupt body under a 206 saying it is
+  fine. A weak `If-Range` now falls through to the full representation, which
+  is the fallback a malformed or multi-range header already takes. A plain
+  `Range` is untouched: it claims no consistency, and it is what a resuming
+  download manager sends, which is why this costs almost nothing in practice.
+  Two cases in `test/static-assets-negotiate.test.js` changed with it - both
+  asserted that a matching tag resumes, which is the behaviour being removed -
+  and they now pin the refusal and the plain-`Range` resume separately, so
+  selecting a representation and being allowed to splice it are tested as the
+  different questions they are.
+
+- **A resume frame's epoch map takes the observer gate.** The frame carries two
+  client-named maps: `lastSeenSeqs` went through the gate and had its
+  ungranted topics dropped, while `lastSeenEpochs` was handed to the hook
+  exactly as parsed. They arrive on one frame, keyed the same way, and the
+  hook reads them together - checking for an epoch mismatch means iterating
+  the epoch map. So the gate dropped a topic from one hand and returned it
+  with the other, carrying its generation as well as its name. Both maps now
+  take one filter, written once so they cannot drift. The fixture echoes the
+  epoch keys the hook received, which is what makes the drop observable;
+  asserting on absent replay traffic would pass against a server with no
+  resume hook at all. Removing the epoch filter fails the case in
+  `test/resume-grant-gate-real.test.js` with the ungranted topic in the list.
+
+- **`PORT=0` is refused under reuseport.** Under reuseport every I/O worker
+  calls `listen()` for itself, so an ephemeral port hands each of them a
+  different one and the single shared port reuseport exists to provide never
+  happens. The fleet boots green and serves where nothing routes: the
+  balancer, the health check and the startup log all name port 0. Acceptor
+  mode is untouched and must be - the primary binds once and hands
+  descriptors to the workers, so one ephemeral port is still one port; that
+  is the control case. Refused as `ADAPTER-ERR-CLUSTER-CONFIG-PORT` with the
+  other capacity misconfigurations, before any worker spawns. The cases in
+  `test/error-registry-cluster-config.test.js` are Linux-only, and not
+  because the refusal is: off Linux reuseport is already refused by its own
+  id, which fires first, so the condition cannot be reached there and a case
+  that ran would assert the wrong refusal.
 
 ## [0.6.0-next.94] - 2026-08-26
 
