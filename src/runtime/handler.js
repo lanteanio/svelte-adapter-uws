@@ -3180,6 +3180,17 @@ if (WS_ENABLED) {
 				// ran. Everything in the finally still runs for them.
 				if (userData[WS_SESSION_ID] !== undefined) wsModule.close?.(ws, ctx);
 			} finally {
+				// Leave the live set FIRST, before any other release. Everything
+				// below is teardown that reads userData and touches no connection
+				// set, but it is unguarded: one throw anywhere in it used to skip
+				// the removal and stand the connection in `wsConnections` forever.
+				// A stranded entry is not a leak that stays still - every publish
+				// walk keeps visiting a dead socket, and its topics keep counting
+				// toward the auditor's summed bookkeeping while the accountant has
+				// already released them, which reports as a subscription-ledger
+				// mismatch that no membership explains. Removal owes nothing to the
+				// steps below, so it goes where nothing can skip it.
+				wsConnections.delete(ws);
 				if (userData[WS_CONNECTION_PERMIT]) {
 					userData[WS_CONNECTION_PERMIT] = undefined;
 					admission.releaseConnection();
@@ -3200,7 +3211,6 @@ if (WS_ENABLED) {
 				// Free the per-connection send-gate slot (only present when the
 				// connection opted into internal flow control).
 				if (userData[WS_LEASE]) userData[WS_LEASE] = undefined;
-				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}
 		},

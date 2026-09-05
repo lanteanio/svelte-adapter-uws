@@ -42,8 +42,35 @@ function trackedPaths() {
 	);
 }
 
-// `import ... from './x.js'`, `export ... from './x.js'`, and `import('./x.js')`.
+// Static `import`/`export ... from`, plus dynamic `import(...)`.
 const SPECIFIER = /(?:^|\n)\s*(?:import|export)[^'"\n]*from\s*['"](\.[^'"]+)['"]|import\(\s*['"](\.[^'"]+)['"]\s*\)/g;
+
+/**
+ * Drop comment lines before matching.
+ *
+ * The dynamic-import branch cannot be line-anchored the way the static one is,
+ * so it matches anywhere - including inside a comment that quotes an example
+ * specifier. This file's own doc comment did exactly that and the check
+ * reported itself. A module that documents an import is ordinary; a checker
+ * that reads documentation as code is not.
+ *
+ * Line-based, because that is what the false positive needs and it cannot
+ * corrupt a string the way a general comment stripper can: a `//` inside a
+ * string literal never starts the line, and block comments here are JSDoc whose
+ * continuations start with `*`.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function withoutCommentLines(text) {
+	return text
+		.split('\n')
+		.map((line) => {
+			const trimmed = line.trimStart();
+			return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') ? '' : line;
+		})
+		.join('\n');
+}
 
 export function findOffenses() {
 	const tracked = trackedPaths();
@@ -57,9 +84,10 @@ export function findOffenses() {
 		} catch {
 			continue;
 		}
+		const code = withoutCommentLines(text);
 		SPECIFIER.lastIndex = 0;
 		let match;
-		while ((match = SPECIFIER.exec(text)) !== null) {
+		while ((match = SPECIFIER.exec(code)) !== null) {
 			const specifier = match[1] || match[2];
 			if (!specifier) continue;
 			const target = posix.normalize(posix.join(posix.dirname(file), specifier));
