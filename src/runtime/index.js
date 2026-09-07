@@ -835,7 +835,10 @@ if (is_primary) {
 				// A transition earns an immediate push: a defense daemon
 				// reacting to the deployment entering siege must not wait out
 				// the rest of the cadence window.
-				if (postureAggregate.note(msg.threadId, msg.line) && postureExporter !== null) {
+				// Keyed on the spawn-time thread id the exit handler retires with,
+				// never on a worker-supplied one, so an entry cannot outlive the
+				// worker that wrote it.
+				if (meta && postureAggregate.note(meta.threadId, msg.line) && postureExporter !== null) {
 					postureExporter.broadcast();
 				}
 			} else if (msg.type === 'publish') {

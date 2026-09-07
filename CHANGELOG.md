@@ -135,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Deployments setting both `postureExport` and `workers`. Single-process deployments are untouched.
   - **Action:** None. The documented path is the same path.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** The primary owns the socket and serves the highest posture any worker is in, carrying that worker's own reason and pressure numbers. The line gains an additive `workers` count of the threads it summarizes; single-process lines do not carry it. The 1 Hz cadence and its liveness meaning are unchanged.
+  - **Compatibility:** The primary owns the socket and serves the highest posture any worker is in, carrying that worker's own reason and pressure numbers. The line gains an additive `workers` count of the threads it summarizes; single-process lines do not carry it. The 1 Hz cadence is unchanged; under `workers` its liveness meaning is the PRIMARY's, and a worker that stops reporting keeps its last posture on the line until the heartbeat watchdog terminates it and its exit drops it, about 30 seconds.
   - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: `publishWire` no longer treats an application's options as a relayed frame.** The cross-worker relay marked its re-entry with two ordinary option keys, so an app that set them was handled as a sibling worker's relay: it named the topic's seq itself, uncounted, past an armed egress ceiling, and out over the relay.
   - **Affects:** Apps calling `platform.publishWire` directly, including through a plugin codec. No documented option changes and no ordinary call behaves differently.
