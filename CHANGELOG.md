@@ -532,12 +532,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the evidence `ws.platform-double-init` reads to refuse a re-entrant open. The
   declaration cannot ride the upgrade object instead: uWS copies that object
   into its own with `[[Set]]`, so a slot declared there is intercepted on the
-  way across and arrives absent. The process-wide slots that have no connection
-  to hang a declaration on - the operational event sink and its registry, the
-  ingress kind registry, the derived and plugin-owned topic prefixes, and the
-  side-effect hook marker - are defined rather than assigned for the same
-  reason. Slot presence is no longer a signal that a lane has allocated
-  anything; the value is.
+  way across and arrives absent. Slot presence is no longer a signal that a
+  lane has allocated anything; the value is.
+
+- **The process-wide slots are defined the same way.** The slots that have no
+  connection to hang a declaration on live on `globalThis` under `Symbol.for`
+  keys, so one accessor on `Object.prototype` takes the publication for every
+  copy of the module at once, and each is written once per process - exactly
+  the write an accessor meets. The operational event sink and its registry, the
+  ingress kind registry, the derived and plugin-owned topic prefixes, the
+  side-effect hook marker, the shared-cohort hooks, the subscription accounting
+  sink, the settled-registry set, the dev dashboard's contributor map and the
+  dropped-field warning set are all defined rather than assigned.
+  `test/connection-slot-declaration.test.js` installs the accessor first and
+  then uses each process-wide slot through its public entry point, so a write
+  that reached the accessor fails the case.
 
 - **The admin route's matched path and its reported path are now the same
   path.** The route is registered on the raw prefix and uWS matches the raw

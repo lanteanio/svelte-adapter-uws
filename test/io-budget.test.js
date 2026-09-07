@@ -930,7 +930,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// every graph the way every id does, through utils/metrics.js - frozen
 	// literal data. No statement executes differently on any frame path, no byte
 	// is read, allocated or copied, and no copy primitive entered.
-	ingress: '33925d6ced81069a1d0658bfdb474d47d5e48de048a24682379c2823db397be1',
+	//
+	// Re-pinned for utils/ws-symbols.js, reached through utils.js: the cohort
+	// hooks, the subscription accounting sink and the settled-registry set are
+	// published onto globalThis with defineProperty instead of a bare
+	// assignment, each a once-per-process write inside an existing lazy-init
+	// branch, and the registries are the same objects read the same way
+	// afterwards. Measured: with every other module at its previous content
+	// this digest reads f15675d6630ed67377f5caf2fad346c63b37286f460b25ae412683c49a5e4133
+	// and reverting ws-symbols.js returns it to its previous value; the
+	// dispatch-body digest and the wire-fanout digest do not move. No statement
+	// executes differently on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered.
+	ingress: 'f15675d6630ed67377f5caf2fad346c63b37286f460b25ae412683c49a5e4133',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1666,7 +1678,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// utils/byte-budget.js so the test server and the dev plugin could read the
 	// same three numbers: three frozen constants changing file, reached only by
 	// this graph. Nothing executes differently.
-	platform: '71bd895918b03472e4f94455b52b7f8f0b4828aea646425533857cca07cf886b',
+	//
+	// Re-pinned for utils/ws-symbols.js: the same three defineProperty
+	// publications named on the ingress digest, reached here through utils.js.
+	// Measured: with every other module at its previous content this digest
+	// reads 8d94e7824f28bfcad014eca4b90c58e62076c29a3c33dd66f7e7a3ec0ef57142 and
+	// reverting ws-symbols.js returns it to its previous value. Once-per-process
+	// writes inside existing lazy-init branches; nothing executes differently on
+	// any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: '8d94e7824f28bfcad014eca4b90c58e62076c29a3c33dd66f7e7a3ec0ef57142',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

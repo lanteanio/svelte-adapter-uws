@@ -30,7 +30,10 @@ export function dashboardContributors() {
 	let m = /** @type {any} */ (globalThis)[CONTRIBUTORS_KEY];
 	if (m === undefined) {
 		m = new Map();
-		/** @type {any} */ (globalThis)[CONTRIBUTORS_KEY] = m;
+		// Defined rather than assigned: an accessor on the key would swallow the
+		// publication and each copy of this module would register into its own
+		// discarded Map.
+		Object.defineProperty(globalThis, CONTRIBUTORS_KEY, { value: m, writable: true, enumerable: true, configurable: true });
 	}
 	return m;
 }

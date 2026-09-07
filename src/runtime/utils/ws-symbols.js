@@ -480,7 +480,9 @@ function cohortHooks() {
 	let hooks = /** @type {any} */ (globalThis)[COHORT_HOOKS];
 	if (!hooks) {
 		hooks = { join: null, leave: null };
-		/** @type {any} */ (globalThis)[COHORT_HOOKS] = hooks;
+		// Defined, not assigned: an accessor on the key would swallow the
+		// publication and every caller would install into a discarded object.
+		defineSlot(globalThis, COHORT_HOOKS, hooks);
 	}
 	return hooks;
 }
@@ -527,7 +529,9 @@ export function setSubscriptionAccountingHook(onChange) {
 	// null is how a test releases the slot, and re-installing the same function
 	// is idempotent.
 	const displaced = typeof previous === 'function' && next !== null && previous !== next;
-	/** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK] = next;
+	// Defined, not assigned, so an accessor on the key cannot take the hook and
+	// leave every subscribe unaccounted while the installer reports success.
+	defineSlot(globalThis, SUBSCRIPTION_ACCOUNTING_HOOK, next);
 	return displaced;
 }
 
@@ -568,7 +572,10 @@ function settledRegistries() {
 	let settled = /** @type {any} */ (globalThis)[SETTLED_REGISTRIES];
 	if (!settled) {
 		settled = new WeakSet();
-		/** @type {any} */ (globalThis)[SETTLED_REGISTRIES] = settled;
+		// Defined, not assigned: an accessor here would hand every caller a fresh
+		// WeakSet, so no registry would ever read as settled and the close path
+		// plus a late unsubscribe would charge the same membership twice.
+		defineSlot(globalThis, SETTLED_REGISTRIES, settled);
 	}
 	return settled;
 }

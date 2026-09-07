@@ -857,7 +857,9 @@ export function noteDroppedField(name, surface) {
 	);
 	if (!warned) {
 		warned = new Set();
-		/** @type {any} */ (globalThis)[DROPPED_FIELD_WARNINGS] = warned;
+		// Defined rather than assigned, so an accessor on the key cannot swallow
+		// the set and turn the once-per-name warning into one per drop.
+		Object.defineProperty(globalThis, DROPPED_FIELD_WARNINGS, { value: warned, writable: true, enumerable: true, configurable: true });
 	}
 	// Cheapest test first, and a HARD CAP on how many distinct names will ever
 	// be reported. The names on a projected object can be client-influenced - an
