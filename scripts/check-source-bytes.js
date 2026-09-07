@@ -92,8 +92,10 @@ export function trackedEol(rootDirectory = root) {
 		// repository's `* text=auto eol=lf` prints as `attr/text=auto eol=lf` - so
 		// it runs up to the tab before the path, not to the first space. The
 		// working-copy field is EMPTY for a path missing from disk, and that path
-		// still has a staged blob to judge, so `w/` may match nothing.
-		const match = /^i\/(\S+)\s+w\/(\S*)\s+attr\/([^\t]*?)\s*\t(.*)$/.exec(line);
+		// still has a staged blob to judge, so `w/` may match nothing. The path
+		// runs to the end of the record, newline included: git allows one in
+		// a name, and a dropped row would undercount rather than refuse.
+		const match = /^i\/(\S+)\s+w\/(\S*)\s+attr\/([^\t]*?)\s*\t([\s\S]*)$/.exec(line);
 		if (match) rows.push({ index: match[1], worktree: match[2], attr: match[3], path: match[4] });
 	}
 	return rows;
@@ -214,6 +216,12 @@ function describe(code) {
  */
 function offensesFor(row, read, staged) {
 	const bytes = read(row.path);
+	if (bytes === null && !staged.has(row.path)) {
+		// A path git lists that this process cannot open, and that git does not
+		// report as differing from the index, is not a clean file; it is a file
+		// the scan never saw, and saying so beats counting it as scanned.
+		return [`${row.path}: git lists it and it could not be read, so its bytes were not checked`];
+	}
 	let hits = bytes === null ? [] : controlCharacters(bytes);
 	let where = 'in tracked source';
 	let fix = 'the same byte at runtime, and the file stays text';
@@ -244,13 +252,14 @@ function offensesFor(row, read, staged) {
  * clean tree having checked no file at all.
  *
  * @param {string} [rootDirectory]
+ * @param {(file: string) => Uint8Array | null} [read] how a tracked path's
+ *   working copy is read; null for a file that cannot be opened
  * @returns {{ offenses: string[], scanned: number, tracked: number }}
  */
-export function findOffenses(rootDirectory = root) {
+export function findOffenses(rootDirectory = root, read = (file) => {
+	try { return readFileSync(resolve(rootDirectory, file)); } catch { return null; }
+}) {
 	const rows = trackedEol(rootDirectory);
-	const read = (file) => {
-		try { return readFileSync(resolve(rootDirectory, file)); } catch { return null; }
-	};
 	const divergent = divergentPaths(rootDirectory);
 	const text = new Set(rows.filter((row) => !declaredBinary(row.attr)).map((row) => row.path));
 	const staged = indexBlobs([...divergent].filter((path) => text.has(path)), rootDirectory);

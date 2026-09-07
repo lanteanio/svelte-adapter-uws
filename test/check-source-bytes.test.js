@@ -9,7 +9,7 @@
 // something.
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -189,6 +189,18 @@ describe('against a scratch repository', () => {
 		git('add', name);
 		({ offenses } = findOffenses(repo));
 		expect(offenses.find((line) => line.startsWith(name))).toBeUndefined();
+	});
+
+	it('a listed path the scan cannot open is an offense, never a file counted as scanned and clean', () => {
+		// The reader answers null for one clean, undiverged path - what an
+		// unreadable file or a name the process cannot spell would produce.
+		const blind = (file) => {
+			if (file === 'crlf.js') return null;
+			try { return readFileSync(join(repo, file)); } catch { return null; }
+		};
+		const { offenses, scanned } = findOffenses(repo, blind);
+		expect(scanned).toBe(8);
+		expect(offenses.find((line) => line.startsWith('crlf.js'))).toMatch(/could not be read, so its bytes were not checked/);
 	});
 
 	it('reads the staged blobs in one batch and maps an unknown path to null', () => {
