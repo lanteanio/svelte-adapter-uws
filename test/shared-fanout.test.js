@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { parseBinaryFrame } from '../src/runtime/wire.js';
 import { SHARED_WIRE_ID_BASE } from '../src/runtime/handler/shared-wire-id.js';
-import { setCohortHooks, trackedSubscribe, trackedUnsubscribe, WS_SUBSCRIPTIONS } from '../src/runtime/utils.js';
+import { setCohortHooks, trackedSubscribe, trackedUnsubscribe, WS_CAPS, WS_SHARED_COHORTS, WS_SUBSCRIPTIONS } from '../src/runtime/utils.js';
 
 let uWS;
 try {
@@ -118,6 +118,41 @@ describeUWS('shared binary fan-out via cohort topics', () => {
 		expect(env.event).toBe('snapshot');
 		expect(env.data).toEqual({ tick: 1, n: 42 });
 		expect(frame.seq).toBe(env.seq); // both cohorts carry the one stamped seq
+	});
+
+	it('a joiner whose announce the socket refuses past its backpressure limit is served the JSON cohort, not none', async () => {
+		server = await createTestServer({});
+		const bin = await connectClient(server.wsUrl, [CAP]);
+		// A scripted connection shaped like the subset of the socket the cohort
+		// join touches: subscribed to TOPIC, capable, and a send that answers 2
+		// (dropped past maxBackpressure) to the announce. The harness runs a
+		// real uWS app, so a slow reader produces that status on its own; it is
+		// scripted here because a real socket cannot be made to refuse one frame
+		// on cue.
+		const ud = {};
+		ud[WS_SUBSCRIPTIONS] = new Set([TOPIC]);
+		ud[WS_CAPS] = new Set([CAP]);
+		const subscribed = [];
+		const sent = [];
+		const refused = {
+			getUserData() { return ud; },
+			send(payload) { sent.push(String(payload)); return 2; },
+			subscribe(topic) { subscribed.push(topic); },
+			close() { /* server.close() ends every tracked connection */ }
+		};
+		server.wsConnections.add(refused);
+
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec());
+
+		// The announce went out and came back refused with the connection still
+		// open, so the joiner is put in the JSON cohort rather than left in no
+		// cohort at all, which is what production does with the same answer.
+		expect(sent.filter((text) => text.includes('"wire-id"')).length).toBe(1);
+		expect(subscribed).toEqual([TOPIC + '\0json']);
+		expect(ud[WS_SHARED_COHORTS]?.has(TOPIC)).toBeFalsy();
+		// The capable neighbour is unaffected: its announce, then the binary frame.
+		await until(() => bin.frames.binary.length >= 1);
+		expect(bin.frames.wireIds.length).toBe(1);
 	});
 
 	it('cohorts a NEW binary joiner that subscribes after the topic is already shared', async () => {

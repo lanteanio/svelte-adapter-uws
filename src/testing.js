@@ -895,21 +895,25 @@ export async function createTestServer(options = {}) {
 	// worker (one server per worker), which the module default models.
 	const sharedWireIds = createSharedWireIdTable();
 
-	// Cohort membership for shared binary fan-out (mirror of handler/cohort.js). The
-	// in-memory app models `topic\0bin` / `topic\0json` as distinct exact-string
-	// topics, and models no backpressure, so the announce always lands (no demote).
+	// Cohort membership for shared binary fan-out (mirror of handler/cohort.js).
+	// `topic\0bin` / `topic\0json` are distinct exact-string topics on the app.
 	function cohortTopicsT(topic) { return { bin: topic + '\0bin', json: topic + '\0json' }; }
 	function joinCohortT(ws, ud, topic, capability) {
 		const caps = ud[WS_CAPS];
 		const { bin, json } = cohortTopicsT(topic);
 		if (caps && caps.has(capability) && !wireStatePoisonedT(ud, capability)) {
 			const id = sharedWireIds.acquire(topic);
-			// Charged like the production cohort's announce. The in-memory app
-			// models no backpressure, so the only way this fails to deliver is
-			// the control budget cutting the connection - and then there is
-			// nothing left to subscribe, so the reference is handed back.
+			// Charged like the production cohort's announce. A 2 is one of two
+			// things, and the budget slot tells them apart: the budget cut the
+			// connection (nothing is left to subscribe), or the socket refused
+			// the frame past its backpressure limit while the connection stays
+			// open - then it is served JSON, as production does. Either way the
+			// reference the announce would have held is handed back.
 			if (sendControlT(ws, wireIdAnnounce(topic, id)) === 2) {
 				sharedWireIds.release(topic);
+				if (ud[WS_CONTROL_BUDGET] !== null) {
+					try { ws.subscribe(json); } catch { closedWsAbortsT++; }
+				}
 				return;
 			}
 			let cohorts = ud[WS_SHARED_COHORTS];
