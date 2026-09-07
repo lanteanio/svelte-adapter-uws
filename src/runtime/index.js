@@ -1256,10 +1256,12 @@ if (is_primary) {
 				// throw, so the catch below never sees it - and an `error` event
 				// with no listener is rethrown, which on the primary is an
 				// uncaught exception that takes the whole fleet down. Reported
-				// under its own id because no catch-up read follows this one and
-				// the operator's next move differs.
+				// under its own id because the causes and the operator's next
+				// move differ from a watch that never started. The reference is
+				// KEPT: a replaced directory gets one final debounced read after
+				// this report, and only `stop()` clears that timer, so a shutdown
+				// inside the debounce window must still be able to reach it.
 				onError: (err) => {
-					primaryCertWatcher = null;
 					console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH_LOST), err && err.message ? err.message : err);
 					primaryTlsWatchDegraded('the primary certificate directory watch stopped, so no worker will be told to reload');
 				}

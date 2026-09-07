@@ -29,7 +29,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { applyServerNames, createTlsDegradedLedger } from '../src/runtime/utils/tls-reload.js';
+import { applyServerNames, createCertWatcher, createTlsDegradedLedger } from '../src/runtime/utils/tls-reload.js';
 import { hasUWS, EVAL_TIME_ENV, freePort } from './helpers/real-runtime.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { variantOut } from './fixture/variants.js';
@@ -130,15 +130,51 @@ describe('ADAPTER-ERR-TLS-WATCH: the degraded-state ledger', () => {
 	// halves have to answer the same question the same way, so the primary reads
 	// the policy from the ledger rather than restating it.
 	//
-	// Asserted against the source because the primary's block only runs inside
-	// the cluster branch, and the distinction it encodes - sticky versus
-	// superseded - needs a success to FOLLOW a watch death to be visible at
-	// runtime. On the primary no success can: `onCertChange` has exactly one
-	// trigger and it is the watcher itself, so a dead watch means nothing fires
-	// again. What is being pinned is therefore the invariant, not an outcome,
-	// and the honest way to pin an invariant is to read the code that carries it.
+	// A success DOES follow a watch death on the primary: a certificate
+	// directory replaced by a new one at the same path ends the watch (the
+	// sticky report) and then gets one final debounced read, which fires
+	// `onCertChange` and, when the replacement reads cleanly, the recovery. The
+	// inline clear would have ended the degradation right there, on a process
+	// that will never see the next renewal. That outcome is driven below with
+	// the real watcher and the real ledger composed the way the primary composes
+	// them; the source pins after it hold index.js to that composition, since
+	// its block only runs inside the cluster branch.
 	describe('the cluster primary reads the same ledger', () => {
 		const source = readFileSync(new URL('../src/runtime/index.js', import.meta.url), 'utf8');
+
+		it('a replaced directory reads once more and stays degraded through that success', () => {
+			// The primary's wiring, with the watcher over injected seams: the
+			// watch death goes to the sticky entry, the reload that follows it
+			// goes to recovered(). Identity answers: alive at start, a different
+			// inode when the directory-named event arrives.
+			const s = build();
+			let fsCallback = null;
+			let stats = 0;
+			const pending = [];
+			const watcher = createCertWatcher({
+				certPath: '/certs/live.crt', debounceMs: 500,
+				onChange: () => s.ledger.recovered(),
+				onError: () => s.ledger.watchFailed('the primary certificate directory watch stopped, so no worker will be told to reload'),
+				watchFs: (_dir, _opts, cb) => { fsCallback = cb; return { close() {} }; },
+				statFs: () => ({ dev: 7n, ino: stats++ === 0 ? 100n : 101n }),
+				setTimer: (cb) => { pending.push(cb); return pending.length; },
+				clearTimer: () => {}
+			});
+			watcher.start();
+			fsCallback('rename', 'certs');
+			expect(s.health.degraded).toMatch(/watch stopped/);
+			expect(s.armed()).toBe(1);
+			// The final read of the replacement: a success after the death.
+			expect(pending).toHaveLength(1);
+			pending.pop()();
+			expect(s.health.degraded, 'the swap worked, the watcher is still dead').toMatch(/watch stopped/);
+			expect(s.disarmed()).toBe(0);
+			expect(s.recovered).toEqual([]);
+			// And the watcher still owns that timer until stop(), which is why
+			// the primary keeps its reference after the report.
+			expect(source).not.toMatch(/onError: \(err\) => \{\s*primaryCertWatcher = null;/);
+			expect(source).toMatch(/if \(primaryCertWatcher\) \{ primaryCertWatcher\.stop\(\);/);
+		});
 
 		it('builds a ledger instead of clearing the degraded state by hand', () => {
 			expect(source).toContain('createTlsDegradedLedger({');
@@ -171,6 +207,12 @@ describe('ADAPTER-ERR-TLS-WATCH: the degraded-state ledger', () => {
 			const mentions = source.match(/primaryTlsDisarm\b/g) ?? [];
 			expect(mentions.length).toBe(2);
 			expect(source).toMatch(/disarmSentinel:\s*primaryTlsDisarm\b/);
+			// The count above is passed by inlining the disarm's body at a
+			// recovery site instead of naming it, so the body is pinned too: the
+			// sentinel is cleared in exactly one place, the disarm's definition.
+			const clears = source.match(/clearIntervalTimer\(primaryTlsSentinel\)/g) ?? [];
+			expect(clears.length).toBe(1);
+			expect(source).toMatch(/function primaryTlsDisarm\(\) \{[\s\S]{0,200}?clearIntervalTimer\(primaryTlsSentinel\)/);
 		});
 	});
 

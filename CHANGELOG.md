@@ -934,8 +934,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seam, and pins the EventEmitter contract the whole thing rests on against a
   BARE emitter, so that assertion cannot pass because of the code it justifies.
 
-- **A watched certificate directory that is removed, moved or replaced ends
-  the watch.** No platform reports that through `error`. Measured: on Windows
+- **A watched certificate directory that is removed or replaced ends the
+  watch, and a moved one where the platform says so.** No platform reports
+  that through `error`. Measured: on Windows
   a removed directory makes the watcher narrate its own deletion at about a
   hundred thousand `rename` events a second for as long as the process runs
   and never raises `error`, and the events keep coming after a new directory
@@ -972,12 +973,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read, with no equivalent of the sticky watch reason the worker half keeps. Now
   both halves answer through `createTlsDegradedLedger`, so a dead watch stays
   degraded through any later success on either side.
-  No behaviour changes on the primary today, and the reason is worth writing
-  down rather than discovering twice: `onCertChange` has exactly one trigger and
-  it is the watcher itself, so once that watch is dead nothing fires again and
-  no success can reach the clear. What the inline version was, was a correct
-  answer with no reason behind it. The case reads the source rather than an
-  outcome, because an invariant with no reachable outcome is what it is.
+  On the primary that success is reachable: a certificate directory replaced
+  by a new one at the same path ends the watch and is then read once more,
+  and when the replacement reads cleanly that read is a success following a
+  watch death. The inline clear would have ended the degradation there, on a
+  process that will never see the next renewal. The case drives the real
+  watcher and the real ledger composed the way the primary composes them and
+  holds the degradation through the final read; the primary also keeps its
+  watcher reference after the report, because the final read's timer is the
+  watcher's and only `stop()` at shutdown clears it.
 
 ## [0.6.0-next.94] - 2026-08-26
 

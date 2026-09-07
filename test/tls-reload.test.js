@@ -357,8 +357,8 @@ describe('createCertWatcher (injected clock + fs)', () => {
 	});
 });
 
-// A watched directory that is removed, moved or replaced is a dead watch on
-// every platform, and no platform reports it through `error`: inotify drops
+// A watched directory that is removed or replaced (or, on Linux, moved) is a
+// dead watch, and no platform reports it through `error`: inotify drops
 // the watch with the inode and says nothing more, and a Windows directory
 // handle narrates its own deletion at ~100k events a second for as long as
 // the process runs. What every platform does deliver is an event that names

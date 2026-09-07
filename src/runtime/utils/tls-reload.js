@@ -301,9 +301,9 @@ export function applyServerNames(app, source, prev) {
  *
  * The platform may report its own failure as an `error` event, which with no
  * listener is rethrown and otherwise fatal (see `start`). Or it may not: a
- * watched directory that is removed, moved or replaced is a dead watch on
- * every platform - inotify watches the inode and drops the watch with it, and
- * a Windows directory handle keeps narrating its own deletion - and none of
+ * watched directory that is removed or replaced is a dead watch on every
+ * platform - inotify watches the inode and drops the watch with it, and a
+ * Windows directory handle keeps narrating its own deletion - and none of
  * them says so through `error`. What they do say is an event that names the
  * WATCHED DIRECTORY ITSELF rather than an entry inside it (inotify spells it
  * as the directory's basename, Windows as its full path), so that spelling is

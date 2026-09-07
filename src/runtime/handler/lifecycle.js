@@ -292,8 +292,9 @@ function initTlsReload() {
 				// throw, so the catch below never sees it. Same consequence as a
 				// watch that never started - no renewal will be seen again - and
 				// sticky for the same reason, but reported under its own id
-				// because the causes and the operator's next move differ, and
-				// because no catch-up read follows this one.
+				// because the causes and the operator's next move differ. A
+				// replaced directory is read once more after this report; the
+				// watcher owns that timer and `stop()` clears it.
 				onError: (err) => {
 					tlsHealth.watching = false;
 					emitOperationalEvent({

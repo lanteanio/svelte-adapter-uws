@@ -309,9 +309,14 @@ describe('ADAPTER-ERR-TLS-WATCH-LOST and ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST', ()
 	for (const id of [ADAPTER_ERROR_IDS.TLS_WATCH_LOST, ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH_LOST]) {
 		it(`${id}: the cause names both producers and the code has both`, () => {
 			const entry = entryFor(id);
-			expect(entry.cause).toMatch(/error/);
-			expect(entry.cause).toMatch(/removed, moved or replaced/);
+			expect(entry.cause).toMatch(/error event/);
+			expect(entry.cause).toMatch(/removed or replaced/);
 			expect(entry.cause).toMatch(/identity/);
+			// A move is silent on Windows, so the cause may only claim it where
+			// the platform announces it; an unqualified 'moved' is a claim no
+			// measurement supports.
+			expect(entry.cause).not.toMatch(/removed, moved or replaced/);
+			expect(entry.cause).toMatch(/Windows delivers nothing for a move/);
 
 			// Producer one: the platform's own error event.
 			const byError = watcher(() => ({ dev: 1n, ino: 5n }));
