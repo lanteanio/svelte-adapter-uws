@@ -11,10 +11,11 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { findOffenses, relativeImports, trackedPaths } from '../scripts/check-tracked-imports.js';
 
-const SCRIPT = new URL('../scripts/check-tracked-imports.js', import.meta.url);
+const SCRIPT = fileURLToPath(new URL('../scripts/check-tracked-imports.js', import.meta.url));
 
 describe('the tracked tree', () => {
 	it('is clean, over a source list large enough to mean something', () => {
@@ -96,6 +97,8 @@ describe('against a scratch repository', () => {
 		write('src/quoted.js', "// import './ghost.js';\nconst s = \"import './ghost.js'\";\nexport { s };\n");
 		write('src/computed.js', "const which = './untracked.js';\nexport const load = () => import(which);\n");
 		write('src/broken.js', 'export const = ;\n');
+		write('src/theme.css', 'body { margin: 0; }\n');
+		write('src/styled.js', "import './widget.svelte';\nimport './theme.css';\n");
 		write('scripts/tool.js', "#!/usr/bin/env node\nimport { t } from '../src/tracked.js';\nconsole.log(t);\n");
 		write('test/fixture/src/app.js', "import '../build/handler/state.js';\n");
 		write('test/uses-build.test.js', "import '../test/fixture/build/index.js';\nimport '../test/fixture/build-grant/index.js';\n");
@@ -104,6 +107,7 @@ describe('against a scratch repository', () => {
 		git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'seed');
 		// On disk, never added: the case the gate exists for.
 		write('src/untracked.js', 'export const u = 2;\n');
+		write('src/widget.svelte', '<p>hi</p>\n');
 		// The fixture's generated output: on disk, untracked, and out of scope.
 		write('test/fixture/build/index.js', 'export {};\n');
 		write('test/fixture/build/handler/state.js', 'export {};\n');
@@ -116,7 +120,7 @@ describe('against a scratch repository', () => {
 
 	it('refuses every import form that reaches the untracked file, and names the line', () => {
 		const { offenses, scanned } = findOffenses(repo);
-		expect(scanned).toBe(18);
+		expect(scanned).toBe(19);
 		const untracked = offenses.filter((line) => line.includes('./untracked.js'));
 		expect(untracked.map((line) => line.split(':')[0]).sort()).toEqual([
 			'src/lazy.js', 'src/multiline.js', 'src/named.js', 'src/re-export.js', 'src/side-effect.js', 'src/star.js'
@@ -132,6 +136,11 @@ describe('against a scratch repository', () => {
 		expect(offenses.find((line) => line.startsWith('src/legacy.js'))).toMatch(/:2: imports \.\/missing\.cjs - which resolves to nothing/);
 		expect(offenses.find((line) => line.startsWith('src/bare.js'))).toMatch(/imports \.\/tracked - no file extension/);
 		expect(offenses.find((line) => line.startsWith('src/broken.js'))).toMatch(/does not parse as a module/);
+		// Any extension names a file: the untracked .svelte is an offense, the
+		// tracked .css is not, and neither is mistaken for a bare specifier.
+		const styled = offenses.filter((line) => line.startsWith('src/styled.js'));
+		expect(styled).toHaveLength(1);
+		expect(styled[0]).toMatch(/^src\/styled\.js:1: imports \.\/widget\.svelte - present on disk, absent from git/);
 	});
 
 	it('leaves alone a tracked target, a query suffix, a quoted specifier, a computed import, the generated fixture output and a directory outside the scan', () => {
@@ -143,25 +152,25 @@ describe('against a scratch repository', () => {
 	});
 
 	it('the command-line entry exits 1 against the scratch tree and 0 once the file is tracked', () => {
-		const before = spawnSync(process.execPath, [SCRIPT.pathname.replace(/^\/([A-Za-z]:)/, '$1'), repo], { encoding: 'utf8' });
+		const before = spawnSync(process.execPath, [SCRIPT, repo], { encoding: 'utf8' });
 		expect(before.status).toBe(1);
 		expect(before.stderr).toMatch(/src\/side-effect\.js:1: imports \.\/untracked\.js - present on disk, absent from git/);
 		expect(before.stderr).toMatch(/breaks every clone/);
 
 		// The offenses that are not the untracked file stay, so track it AND
 		// remove the other shapes to see the entry report a clean tree.
-		git('add', 'src/untracked.js');
+		git('add', 'src/untracked.js', 'src/widget.svelte');
 		git('rm', '-q', '--cached', 'src/missing.js', 'src/legacy.js', 'src/bare.js', 'src/broken.js');
-		const after = spawnSync(process.execPath, [SCRIPT.pathname.replace(/^\/([A-Za-z]:)/, '$1'), repo], { encoding: 'utf8' });
+		const after = spawnSync(process.execPath, [SCRIPT, repo], { encoding: 'utf8' });
 		expect(after.status).toBe(0);
-		expect(after.stdout).toMatch(/15 tracked source file\(s\) scanned; every relative import resolves to a tracked file/);
+		expect(after.stdout).toMatch(/16 tracked source file\(s\) scanned; every relative import resolves to a tracked file/);
 	});
 
 	it('the entry refuses to call an empty repository clean', () => {
 		const empty = mkdtempSync(join(tmpdir(), 'tracked-imports-empty-'));
 		try {
 			execFileSync('git', ['init', '-q'], { cwd: empty, stdio: 'ignore' });
-			const result = spawnSync(process.execPath, [SCRIPT.pathname.replace(/^\/([A-Za-z]:)/, '$1'), empty], { encoding: 'utf8' });
+			const result = spawnSync(process.execPath, [SCRIPT, empty], { encoding: 'utf8' });
 			expect(result.status).toBe(1);
 			expect(result.stderr).toMatch(/listed no source file/);
 		} finally {

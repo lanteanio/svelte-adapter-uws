@@ -50,8 +50,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** The tracked files this check reads: JavaScript under src/, scripts/ and test/. */
 const SOURCE = /^(src|scripts|test)\/.*\.(js|mjs)$/;
 
-/** A specifier that names a file this loader could open. */
-const FILE_EXTENSION = /\.(js|mjs|cjs|json)$/;
+/**
+ * A specifier whose last segment carries an extension, so it names a file.
+ * Any extension counts: a `.svelte` or `.css` import from a fixture route is
+ * a file a clone needs just as much as a module is.
+ */
+const NAMES_FILE = /\.[^./\\]+$/;
 
 /** The fixture build output every clone regenerates through the suite's global setup. */
 const GENERATED = /^test\/fixture\/build(-[^/]+)?\//;
@@ -159,7 +163,7 @@ export function findOffenses(rootDirectory = root) {
 		for (const { specifier, line } of imports) {
 			const target = posix.normalize(posix.join(posix.dirname(file), specifier.replace(/[?#].*$/, '')));
 			if (GENERATED.test(target)) continue;
-			if (!FILE_EXTENSION.test(target)) {
+			if (!NAMES_FILE.test(target)) {
 				offenses.push(`${file}:${line}: imports ${specifier} - no file extension, which Node's module loader does not resolve; name the file`);
 				continue;
 			}
