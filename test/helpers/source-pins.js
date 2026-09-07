@@ -18,9 +18,11 @@
  * `expectStatement` asks for a LINE whose trimmed text is exactly the
  * statement. Deleting the call fails it, renaming it fails it, and anything
  * written on the same line around it fails it, because the line is no longer
- * that statement. Block comments are stripped first, so `/* stmt *\/` is not a
- * line either. The failure names the line it found instead of reporting a
- * bare `false`, so a neutralized guard identifies itself.
+ * that statement. Comments and the inside of a literal that spans lines are
+ * blanked first, so `/* stmt *\/`, `// stmt` and a template literal whose own
+ * line reads as the statement are not lines either. The failure names the
+ * line it found instead of reporting a bare `false`, so a neutralized guard
+ * identifies itself.
  *
  * WHAT LINE EQUALITY CANNOT SEE: a wrapper on ANOTHER line. `if (false) {`
  * above the statement, or the statement moved into an arrow nothing calls,
@@ -34,14 +36,173 @@
 
 import { expect } from 'vitest';
 
+/** The characters after which a `/` opens a regular expression rather than dividing. */
+const REGEX_LEADERS = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^']);
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+
 /**
- * The slice as lines, trimmed, with block comments removed so a commented-out
- * statement is not a line that reads as the statement.
+ * `source` with every comment blanked, and the inside of every string,
+ * template or regular-expression literal that spans a line blanked as well,
+ * newlines kept so line numbers still mean what they did.
+ *
+ * A regular expression on the comment syntax cannot do this: a `/*` inside a
+ * string or a line comment would open a "comment" that swallows real code up
+ * to the next `*\/`, and a failure would then blame a statement that is
+ * present. So this walks the text once and knows which of the four literal
+ * kinds it is inside. A single-line literal is left as it is, because a
+ * pinned statement may legitimately carry one (`throw new Error('x');`) and
+ * must still equal its line.
+ *
+ * Whether a `/` divides or opens a regular expression is decided by the last
+ * significant character before it, the way a tokenizer without a parser does.
+ * That is exact for the source this repository writes and errs, if it errs,
+ * toward reading a division as a regex that ends at the next `/`, which
+ * blanks nothing across lines.
+ *
+ * @param {string} source
+ * @returns {string}
+ */
+export function blankNonCode(source) {
+	const out = source.split('');
+	const blank = (from, to) => {
+		for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ';
+	};
+	const length = source.length;
+	let i = 0;
+	// The last non-space character outside a comment, and the identifier it
+	// ends, for the regex-or-division decision.
+	let last = '';
+	let lastWord = '';
+	while (i < length) {
+		const ch = source[i];
+		const next = source[i + 1];
+		if (ch === '/' && next === '/') {
+			const end = source.indexOf('\n', i);
+			const stop = end === -1 ? length : end;
+			blank(i, stop);
+			i = stop;
+			continue;
+		}
+		if (ch === '/' && next === '*') {
+			const end = source.indexOf('*/', i + 2);
+			const stop = end === -1 ? length : end + 2;
+			blank(i, stop);
+			i = stop;
+			continue;
+		}
+		if (ch === '\'' || ch === '"') {
+			const stop = literalEnd(source, i + 1, ch);
+			if (source.slice(i, stop).includes('\n')) blank(i + 1, stop - 1);
+			i = stop;
+			last = ch;
+			lastWord = '';
+			continue;
+		}
+		if (ch === '`') {
+			i = templateSpan(source, i, out);
+			last = '`';
+			lastWord = '';
+			continue;
+		}
+		if (ch === '/' && (last === '' || REGEX_LEADERS.has(last) || REGEX_KEYWORDS.has(lastWord))) {
+			const stop = regexEnd(source, i + 1);
+			if (source.slice(i, stop).includes('\n')) blank(i + 1, stop - 1);
+			i = stop;
+			last = '/';
+			lastWord = '';
+			continue;
+		}
+		if (!/\s/.test(ch)) {
+			last = ch;
+			lastWord = /[A-Za-z_$]/.test(ch) ? lastWord + ch : /[0-9]/.test(ch) && lastWord !== '' ? lastWord + ch : '';
+		}
+		i++;
+	}
+	return out.join('');
+}
+
+/** The index just past the closing `quote`, honouring backslash escapes; an unterminated literal ends at the line. */
+function literalEnd(source, from, quote) {
+	for (let i = from; i < source.length; i++) {
+		const ch = source[i];
+		if (ch === '\\') { i++; continue; }
+		if (ch === quote) return i + 1;
+		if (ch === '\n') return i;
+	}
+	return source.length;
+}
+
+/** The index just past the closing `/` and its flags, honouring escapes and character classes. */
+function regexEnd(source, from) {
+	let inClass = false;
+	let i = from;
+	for (; i < source.length; i++) {
+		const ch = source[i];
+		if (ch === '\\') { i++; continue; }
+		if (ch === '\n') return i;
+		if (inClass) { if (ch === ']') inClass = false; continue; }
+		if (ch === '[') { inClass = true; continue; }
+		if (ch === '/') { i++; break; }
+	}
+	while (i < source.length && /[a-z]/.test(source[i])) i++;
+	return i;
+}
+
+/**
+ * Walk a template literal starting at the backtick at `from`, blanking its
+ * quasi text in `out` when the literal spans a line, and recursing through
+ * each `${ }` so the code inside is kept and a nested template is handled.
+ * Returns the index just past the closing backtick.
+ */
+function templateSpan(source, from, out) {
+	const spans = [];
+	let i = from + 1;
+	let quasiStart = i;
+	while (i < source.length) {
+		const ch = source[i];
+		if (ch === '\\') { i += 2; continue; }
+		if (ch === '`') { spans.push([quasiStart, i]); i++; break; }
+		if (ch === '$' && source[i + 1] === '{') {
+			spans.push([quasiStart, i]);
+			i = expressionEnd(source, i + 2, out);
+			quasiStart = i;
+			continue;
+		}
+		i++;
+	}
+	if (source.slice(from, i).includes('\n')) {
+		for (const [start, end] of spans) for (let k = start; k < end; k++) if (out[k] !== '\n') out[k] = ' ';
+	}
+	return i;
+}
+
+/** The index just past the `}` closing a `${` expression, skipping nested braces, strings and templates. */
+function expressionEnd(source, from, out) {
+	let depth = 0;
+	let i = from;
+	while (i < source.length) {
+		const ch = source[i];
+		if (ch === '\'' || ch === '"') { i = literalEnd(source, i + 1, ch); continue; }
+		if (ch === '`') { i = templateSpan(source, i, out); continue; }
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			if (depth === 0) return i + 1;
+			depth--;
+		}
+		i++;
+	}
+	return i;
+}
+
+/**
+ * The slice as lines, trimmed, with comments and multi-line literal bodies
+ * blanked so a commented-out or quoted statement is not a line that reads as
+ * the statement.
  * @param {string} slice
  * @returns {string[]}
  */
 function statementLines(slice) {
-	return slice.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.trim());
+	return blankNonCode(slice).split('\n').map((line) => line.trim());
 }
 
 /**

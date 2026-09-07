@@ -62,17 +62,27 @@ describe('exact native backpressure drop telemetry', () => {
 		expect(dropped.value.type).toBe('ArrowFunctionExpression');
 		expect(dropped.value.params.map((param) => param.name)).toEqual(['_ws', 'message']);
 
-		// Only a call that IS a statement of the callback counts: the arrow's
-		// expression body, or an expression statement in its block. A walk that
-		// collected every CallExpression would still find the call inside
+		// Only a call that IS a statement of the callback counts, and only one
+		// the callback reaches: the arrow's expression body, or an expression
+		// statement in its block before the first return or throw, or the
+		// returned expression itself. A walk that collected every
+		// CallExpression would still find the call inside
 		// `false && recordBackpressureDrop(counters, message)`, where it is the
-		// right operand of a logical expression and never runs - the same
+		// right operand of a logical expression and never runs, and a walk over
+		// every statement would still find it after `return;` - the same
 		// blindness a substring pin has, in the one place this file is the only
 		// guard.
 		const body = dropped.value.body;
-		const calls = body.type === 'BlockStatement'
-			? body.body.filter((statement) => statement.type === 'ExpressionStatement').map((statement) => statement.expression)
-			: [body];
+		const calls = [];
+		if (body.type === 'BlockStatement') {
+			for (const statement of body.body) {
+				if (statement.type === 'ExpressionStatement') calls.push(statement.expression);
+				else if (statement.type === 'ReturnStatement') { if (statement.argument) calls.push(statement.argument); break; }
+				else if (statement.type === 'ThrowStatement') break;
+			}
+		} else {
+			calls.push(body);
+		}
 		expect(calls.some((call) =>
 			call.type === 'CallExpression' &&
 			call.callee.type === 'Identifier' &&
