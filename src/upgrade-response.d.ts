@@ -36,14 +36,20 @@
  * @param headers Headers to set on the 101 response. Optional, so headers can be
  * attached conditionally (`upgradeResponse(ud, refresh ? h : undefined)`) without
  * failing the upgrade.
- * @throws {TypeError} when a header name is not a valid RFC 7230 token, a value
- * contains a control character (CR, LF and NUL split or truncate the 101
- * response on the wire; the accepted class is Node's own - tab, printable ASCII
- * and the high range - so a value this helper accepts is one Node and the
- * cookie serializer in this package accept too), or a value is not a string. Validating here rather than at write
- * time is what makes the failure useful: uWS refuses a non-string only after the
- * 101 status line has already been corked, so the client would otherwise be left
- * holding a half-written handshake instead of getting a clean refusal.
+ * @throws {TypeError} when a header name is not a valid RFC 7230 token, a name
+ * is one the handshake itself writes (`Connection`, `Upgrade`,
+ * `Sec-WebSocket-Accept`, and the negotiated `Sec-WebSocket-Extensions` and
+ * `Sec-WebSocket-Protocol`, compared case-insensitively - an application value
+ * would go out beside the server's own line and a conforming client refuses a
+ * doubled handshake header), a value contains a control character (CR, LF and
+ * NUL split or truncate the 101 response on the wire; the accepted class is
+ * Node's own - tab, printable ASCII and the high range - so a value this helper
+ * accepts is one Node and the cookie serializer in this package accept too; a
+ * high-range code unit leaves as its two-octet UTF-8 spelling on every surface),
+ * or a value is not a string. Validating here rather than at write time is what
+ * makes the failure useful: uWS refuses a non-string only after the 101 status
+ * line has already been corked, so the client would otherwise be left holding a
+ * half-written handshake instead of getting a clean refusal.
  */
 export function upgradeResponse<UserData>(
 	userData: UserData,

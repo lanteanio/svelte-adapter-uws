@@ -2095,12 +2095,12 @@ export async function upgrade({ cookies }) {
   // `upgradeResponse()` with custom non-cookie headers is also supported:
   // return upgradeResponse({ userId: user.id }, { 'x-session-version': '2' });
   // It throws a TypeError for a header that cannot be written safely - a name
-  // outside the RFC 7230 token set, a non-string value, or a string outside
-  // Node's accepted header class (TAB, printable ASCII and Latin-1 high bytes).
+  // outside the RFC 7230 token set or one the handshake writes itself
+  // (Connection, Upgrade, Sec-WebSocket-*), a non-string value, or a string
+  // outside Node's accepted header class (TAB, printable ASCII, 0x80-0xFF).
   // CR, LF and NUL split or truncate the 101; the other refused controls fail
   // at strict Node-based proxies. The throw takes the hook-error path: 500, no
-  // 101. Passing no headers at all
-  // is fine, so `upgradeResponse(ud, refresh ? headers : undefined)` works.
+  // 101. No headers at all is fine: `upgradeResponse(ud, refresh ? h : undefined)`.
   return { userId: user.id, name: user.name, role: user.role };
 }
 

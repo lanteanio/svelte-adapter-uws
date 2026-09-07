@@ -79,8 +79,37 @@ export const SHAPE_VECTORS = {
 	/** A numeric value uWS would reject only after the 101 status was corked. */
 	numberValue: 'number-value',
 	/** A non-string whose coercion produces CRLF; coercion must never run. */
-	coercionValue: 'coercion-value'
+	coercionValue: 'coercion-value',
+	/** A second `Connection` line beside the one the handshake writes. */
+	ownedConnection: 'owned-connection',
+	/** A second `Upgrade` line beside the one the handshake writes. */
+	ownedUpgrade: 'owned-upgrade',
+	/** A forged `Sec-WebSocket-Accept`, in the canonical mixed case. */
+	ownedAccept: 'owned-accept',
+	/** The same name in lower case: header names compare case-insensitively. */
+	ownedAcceptLowercase: 'owned-accept-lowercase',
+	/** `Sec-WebSocket-Extensions`, which the server negotiates from the offer. */
+	ownedExtensions: 'owned-extensions',
+	/** `Sec-WebSocket-Protocol`, which the server negotiates from the offer. */
+	ownedProtocol: 'owned-protocol'
 };
+
+/**
+ * The shape vectors that carry a handshake-owned NAME. Every surface refuses
+ * each of them the way it refuses an unsafe byte: no 101, and the value never
+ * reaches the wire beside the server's own line.
+ */
+export const OWNED_NAME_VECTORS = [
+	SHAPE_VECTORS.ownedConnection,
+	SHAPE_VECTORS.ownedUpgrade,
+	SHAPE_VECTORS.ownedAccept,
+	SHAPE_VECTORS.ownedAcceptLowercase,
+	SHAPE_VECTORS.ownedExtensions,
+	SHAPE_VECTORS.ownedProtocol
+];
+
+/** The value every owned-name vector carries, so a raw response can be searched for it. */
+export const OWNED_NAME_MARKER = 'Forged-By-App';
 
 /** What a shape vector poisons with. Must be refused if it reaches validation. */
 export const POISON_VALUE = 'a=1\r\nInjected: yes';
@@ -174,6 +203,15 @@ export function buildShapeHeaders(name) {
 		return { 'x-safe: yes\r\nInjected': SAFE_VECTOR.value };
 	}
 	if (name === SHAPE_VECTORS.numberValue) return { 'x-count': 3 };
+	// Handshake-owned names. The bytes are clean on purpose: what is refused is
+	// the NAME, so a surface that only checks bytes writes these beside its own
+	// line and the marker shows up in the raw 101.
+	if (name === SHAPE_VECTORS.ownedConnection) return { Connection: OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedUpgrade) return { Upgrade: OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedAccept) return { 'Sec-WebSocket-Accept': OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedAcceptLowercase) return { 'sec-websocket-accept': OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedExtensions) return { 'Sec-WebSocket-Extensions': OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedProtocol) return { 'Sec-WebSocket-Protocol': OWNED_NAME_MARKER };
 	if (name === SHAPE_VECTORS.coercionValue) {
 		return {
 			'set-cookie': {

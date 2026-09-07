@@ -191,6 +191,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The watch ends with `ADAPTER-ERR-TLS-WATCH-LOST` (or the primary id) and the same sticky degraded state as any other dead watch; a directory replaced by a new one at the same path is read once more first, so a certificate that arrived with the replacement is served, and on the primary that reload is broadcast. Windows delivers no event for a directory moved aside, so that case stays as before: silent until restart.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a custom 101 header named `Connection`, `Upgrade` or `Sec-WebSocket-Accept` is refused instead of written beside the server's own.** The upgrade-header check refused unsafe bytes and non-token names but not the names the handshake writes itself, so an application value went out as a second line and a conforming client refused the handshake silently.
+  - **Affects:** Applications returning `upgradeResponse()` headers named `Connection`, `Upgrade`, `Sec-WebSocket-Accept`, `Sec-WebSocket-Extensions` or `Sec-WebSocket-Protocol`, in any letter case, on the production runtime, `createTestServer` or `vite dev`.
+  - **Action:** Remove the header; the server writes the first three on every handshake and negotiates the last two from the client's offer. A subprotocol is selected by the client's offer, not by a response header set from the hook.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Refused the way an unsafe byte is: `upgradeResponse()` throws a `TypeError` naming the header, and a duck-typed result carrying one takes the hook-error path (500, no 101, nothing written). Every other header name is unchanged. Values in the 0x80-0xFF range stay legal and leave as UTF-8 on every surface, which the suites now pin as the one spelling.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -982,6 +988,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds the degradation through the final read; the primary also keeps its
   watcher reference after the report, because the final read's timer is the
   watcher's and only `stop()` at shutdown clears it.
+
+- **The handshake's own header names are not the application's to write.**
+  `findUnsafeUpgradeHeader` said which BYTES a 101 header may carry and
+  which names are tokens, and nothing said which names the handshake owns.
+  uWS appends its own `Connection`, `Upgrade` and `Sec-WebSocket-Accept`
+  after the application's headers, and `ws` assembles its own first, so an
+  application value for one of those went out as a second line of the same
+  name; a forged `Sec-WebSocket-Accept` produced a 101 carrying two, which a
+  conforming client refuses. Low severity - the bag is application-authored
+  and the client fails closed - but a shared gap the shared predicate was
+  built to close. It now refuses those three plus `Sec-WebSocket-Extensions`
+  and `Sec-WebSocket-Protocol`, which the server negotiates from the client's
+  offer, compared case-insensitively, with the same consequence as an unsafe
+  byte: the helper throws, a duck-typed result takes the hook-error path, no
+  partial 101. Six named shape vectors join the shared table, so all three
+  surfaces are held to the refusal by the same cases, each reading the raw
+  response for the marker the refused value carried.
+  Measured while there: a value with a code unit in 0x80-0xFF leaves as the
+  same two UTF-8 octets on every surface (uWS and `ws` both encode a JS
+  string as UTF-8), so the range stays legal and the dev suite now pins the
+  spelling the other two already did.
 
 ## [0.6.0-next.94] - 2026-08-26
 

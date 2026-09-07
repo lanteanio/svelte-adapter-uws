@@ -29,6 +29,8 @@ import {
 	UNSAFE_VECTORS,
 	VECTORS_BY_NAME,
 	SHAPE_VECTORS,
+	OWNED_NAME_VECTORS,
+	OWNED_NAME_MARKER,
 	buildShapeHeaders
 } from './helpers/handshake-vectors.js';
 
@@ -68,6 +70,14 @@ describe('upgradeResponse() helper refuses every unsafe handshake header', () =>
 		});
 	}
 
+	for (const name of OWNED_NAME_VECTORS) {
+		it(`refuses the handshake-owned ${name} name at construction`, () => {
+			// Clean bytes, refused for the NAME: the server writes this line
+			// itself, and an application value would go out beside it.
+			expect(() => upgradeResponse({}, buildShapeHeaders(name))).toThrow(/belongs to the WebSocket handshake/);
+		});
+	}
+
 	for (const name of [
 		SHAPE_VECTORS.arraySliceIterator, SHAPE_VECTORS.arrayHooksThrow, SHAPE_VECTORS.arraySpeciesThrow
 	]) {
@@ -89,7 +99,7 @@ describe('upgradeResponse() helper refuses every unsafe handshake header', () =>
 	});
 });
 
-describe('the Vite dev server validates the production handshake shape it cannot emit', () => {
+describe('the Vite dev server validates and writes the same handshake headers production does', () => {
 	/** @type {import('node:http').Server | null} */
 	let httpServer = null;
 	let port = 0;
@@ -122,11 +132,17 @@ describe('the Vite dev server validates the production handshake shape it cannot
 		});
 	}
 
-	for (const { name, why } of SAFE_VECTORS) {
-		it(`accepts and discards the ${name} vector (${why})`, async () => {
+	for (const { name, value, why } of SAFE_VECTORS) {
+		it(`accepts and writes the ${name} vector (${why})`, async () => {
 			await boot();
-			const { status } = await rawUpgrade(port, { 'x-fixture-vector': name });
+			const { status, raw } = await rawUpgrade(port, { 'x-fixture-vector': name });
 			expect(status).toBe('101');
+			expect(raw.toLowerCase()).toContain('set-cookie:');
+			// rawUpgrade decodes bytes as Latin-1; `ws` encodes JS strings as
+			// UTF-8, the same spelling uWS gives the other two surfaces, so a
+			// high-range code unit leaves as the same two octets everywhere.
+			const wireValue = Buffer.from(value, 'utf8').toString('latin1');
+			expect(raw).toContain(wireValue);
 		});
 	}
 
@@ -136,6 +152,16 @@ describe('the Vite dev server validates the production handshake shape it cannot
 			const { status, raw } = await rawUpgrade(port, { 'x-fixture-vector': name });
 			expect(status).toBe('500');
 			expect(raw.toLowerCase()).not.toContain('switching protocols');
+		});
+	}
+
+	for (const name of OWNED_NAME_VECTORS) {
+		it(`refuses the handshake-owned ${name} name just like production`, async () => {
+			await boot();
+			const { status, raw } = await rawUpgrade(port, { 'x-fixture-vector': name });
+			expect(status).toBe('500');
+			expect(raw.toLowerCase()).not.toContain('switching protocols');
+			expect(raw, 'the application value must not go out beside the handshake\'s own line').not.toContain(OWNED_NAME_MARKER);
 		});
 	}
 
@@ -270,6 +296,16 @@ describeUWS('in-process test server matches production on every handshake header
 			// 'Injected' text (nul, trailing): a refused upgrade writes no header at
 			// all, so the value cannot have reached the wire in any form.
 			expect(raw.toLowerCase()).not.toContain('set-cookie');
+		});
+	}
+
+	for (const name of OWNED_NAME_VECTORS) {
+		it(`refuses the handshake-owned ${name} name before writing a 101`, async () => {
+			const s = await boot();
+			const { status, raw } = await rawUpgrade(portOf(s), { 'x-fixture-vector': name });
+			expect(status, 'a handshake-owned header name must not yield a 101').not.toBe('101');
+			expect(raw.toLowerCase()).not.toContain('switching protocols');
+			expect(raw, 'the application value must not go out beside the handshake\'s own line').not.toContain(OWNED_NAME_MARKER);
 		});
 	}
 });

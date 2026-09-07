@@ -19,7 +19,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { hasUWS, startRealRuntime, rawUpgrade } from './helpers/real-runtime.js';
-import { SAFE_VECTOR, SAFE_VECTORS, UNSAFE_VECTORS, SHAPE_VECTORS } from './helpers/handshake-vectors.js';
+import { SAFE_VECTOR, SAFE_VECTORS, UNSAFE_VECTORS, SHAPE_VECTORS, OWNED_NAME_VECTORS, OWNED_NAME_MARKER } from './helpers/handshake-vectors.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
 
@@ -110,6 +110,18 @@ describeUWS('101 handshake header injection (built runtime)', () => {
 			// 'Injected' text (nul, trailing): a refused upgrade writes no header at
 			// all, so the value cannot have reached the wire in any form.
 			expect(raw.toLowerCase()).not.toContain('set-cookie');
+		});
+	}
+
+	for (const name of OWNED_NAME_VECTORS) {
+		it(`refuses the handshake-owned ${name} name before writing a 101`, async () => {
+			// The bytes are clean; the NAME is the server's. uWS appends its own
+			// Connection, Upgrade and Sec-WebSocket-Accept after the app's headers,
+			// so a byte-only check writes the app's line and the client sees two.
+			const { status, raw } = await rawUpgrade(server.port, { 'x-fixture-vector': name });
+			expect(status, 'a handshake-owned header name must not yield a 101').not.toBe('101');
+			expect(raw.toLowerCase()).not.toContain('switching protocols');
+			expect(raw, 'the application value must not go out beside the handshake\'s own line').not.toContain(OWNED_NAME_MARKER);
 		});
 	}
 });

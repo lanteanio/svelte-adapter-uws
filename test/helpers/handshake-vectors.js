@@ -10,6 +10,8 @@ export {
 	UNSAFE_VECTORS,
 	VECTORS_BY_NAME,
 	SHAPE_VECTORS,
+	OWNED_NAME_VECTORS,
+	OWNED_NAME_MARKER,
 	POISON_VALUE,
 	buildShapeHeaders
 } from '../fixture/src/handshake-vectors.js';

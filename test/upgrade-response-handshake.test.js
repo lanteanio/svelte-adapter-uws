@@ -114,6 +114,25 @@ describe('upgradeResponse header validation', () => {
 			headers: { 'x-session-version': '2', 'set-cookie': ['a=1', 'b=2'] }
 		});
 	});
+
+	it('refuses the header names the handshake itself writes, in any case', async () => {
+		// The server writes these lines on every 101 and negotiates the two
+		// Sec-WebSocket-* ones from the client's offer. An app value does not
+		// replace the server's line, it goes out beside it, and a client that
+		// sees two Sec-WebSocket-Accept lines refuses the handshake.
+		const { upgradeResponse } = await import('../src/upgrade-response.js');
+		const { HANDSHAKE_OWNED_HEADER_NAMES } = await import('../src/runtime/utils/upgrade-headers.js');
+		expect(HANDSHAKE_OWNED_HEADER_NAMES).toEqual([
+			'connection', 'upgrade', 'sec-websocket-accept', 'sec-websocket-extensions', 'sec-websocket-protocol'
+		]);
+		for (const owned of HANDSHAKE_OWNED_HEADER_NAMES) {
+			expect(() => upgradeResponse({}, { [owned]: 'clean' })).toThrow(/belongs to the WebSocket handshake/);
+			expect(() => upgradeResponse({}, { [owned.toUpperCase()]: 'clean' })).toThrow(/belongs to the WebSocket handshake/);
+		}
+		expect(() => upgradeResponse({}, { 'Sec-WebSocket-Accept': ['clean'] })).toThrow(/belongs to the WebSocket handshake/);
+		// A name that merely contains one of the words is the app's to write.
+		expect(() => upgradeResponse({}, { 'x-connection-id': 'c1', 'x-upgrade-note': 'ok' })).not.toThrow();
+	});
 });
 
 describeUWS('upgradeResponse handshake', () => {

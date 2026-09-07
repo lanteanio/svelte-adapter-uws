@@ -29,10 +29,35 @@ export const UPGRADE_HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/i;
  * one `cookies.set()` in the same package would refuse, and a header round-trip
  * through any Node-based proxy would throw where the adapter had passed it.
  * TAB stays legal because it is valid header whitespace, and the high range
- * stays legal because uWS writes bytes and a latin-1 value is not a splitting
- * risk.
+ * stays legal because it is not a splitting risk: a code unit in 0x80-0xFF
+ * leaves as its two-octet UTF-8 spelling on every surface (uWS and the `ws`
+ * library both encode a JS string as UTF-8), never as a bare octet, and
+ * neither spelling can start a new header line.
  */
 export const UPGRADE_HEADER_VALUE_RE = /[^\t\x20-\x7e\x80-\xff]/;
+
+/**
+ * Header names the handshake itself owns, so an app may not set them.
+ *
+ * The server writes `Connection`, `Upgrade` and `Sec-WebSocket-Accept` on
+ * every 101 - uWS appends them after the app's headers, `ws` assembles them
+ * first - and negotiates `Sec-WebSocket-Extensions` and
+ * `Sec-WebSocket-Protocol` from the client's offer. An app value for one of
+ * these does not replace the server's line; it goes out BESIDE it, and a
+ * second `Sec-WebSocket-Accept` or a second `Connection` is a handshake a
+ * conforming client refuses, so the app has broken its own connection with
+ * no line in any log saying why. The byte checks above say which characters
+ * a header may carry; this says which names are not the app's to write.
+ * Compared case-insensitively, since header names are.
+ */
+export const HANDSHAKE_OWNED_HEADER_NAMES = Object.freeze([
+	'connection',
+	'upgrade',
+	'sec-websocket-accept',
+	'sec-websocket-extensions',
+	'sec-websocket-protocol'
+]);
+const HANDSHAKE_OWNED = new Set(HANDSHAKE_OWNED_HEADER_NAMES);
 
 /**
  * First reason these headers cannot be written safely, or null when clean.
@@ -48,6 +73,9 @@ export function findUnsafeUpgradeHeader(responseHeaders) {
 	for (const [name, value] of Object.entries(responseHeaders)) {
 		if (!UPGRADE_HEADER_NAME_RE.test(name)) {
 			return `header name ${JSON.stringify(name)} is not a valid RFC 7230 token`;
+		}
+		if (HANDSHAKE_OWNED.has(name.toLowerCase())) {
+			return `header ${JSON.stringify(name)} belongs to the WebSocket handshake and is written by the server; an application value would go out beside it and break the handshake`;
 		}
 		const arrayValue = Array.isArray(value);
 		const length = arrayValue ? value.length : 1;
