@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Clearing the slot to `null` and reinstalling the same function are not displacements, so releasing the slot stays ordinary. This names the topology; it does not change how subscriptions are counted.
   - **Detail:** [Added engineering detail](#added).
+- **Added: the cluster simulator can fail a worker's relay attach.** `attachFailWorker(id)` on the multi-worker scenario API models a worker that reports ready and never reports its relay reader live, and `metrics.attachFailures` counts it; the simulator now judges workers through the primary's own sweep and slot fields, so the attach regime is reachable from a scenario.
+  - **Affects:** Anyone running `svelte-adapter-uws/sim` multi-worker scenarios; the production primary's behaviour is unchanged.
+  - **Action:** None. Existing scenarios and seeds reproduce as before; the new fault is opt-in per scenario.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive. The simulator's restart budget now resets on the attach rather than on ready, which is what the primary does; no existing scenario goes ready without attaching, so no recorded run changes.
+  - **Detail:** [Added engineering detail](#added).
 - **Added: the control/ack channel is bounded per connection.** It amplifies - a client names a topic in a few bytes and is answered with a whole frame - so a connection may now be sent 4 MiB of protocol frames per 10-second window, and one that exceeds it is closed with 4429 rather than served.
   - **Affects:** Every deployment. Measured at the worst legal shape, one 8 KB `subscribe-batch` is answered with about 97 KB across 1,345 frames, and nothing rate-limited the repetition: every `messageAdmission` ceiling is disabled unless configured.
   - **Action:** None. A reconnecting client restoring 256 topics spends about 15 KB of the window and a 5,000-topic restore about 300 KB, so a healthy burst is orders of magnitude clear of it.
@@ -288,6 +294,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a second sink and reads the displacement back, and holds the half that
   matters downstream: after a takeover the displaced counter stops moving at
   all, which is what strands a total.
+
+- **The simulator reaches the attach regime, through the primary's own
+  stamping and sweep.** `classifyWorkerHealth` judges a ready worker on its
+  ready-to-attach gap only when the meta carries `readyAt` and
+  `relayAttached` explicitly, and the simulator built its meta without them,
+  so that branch was unreachable from any scenario. The two liveness steps the
+  primary kept inline now live beside the classifier in `worker-watchdog.js`:
+  `recordWorkerMessage` applies one inbound worker message to the slot record
+  (the heartbeat clock every message advances, the ready edge under each
+  cluster mode with its `readyAt`, the one-time `relay-attached` flip) and
+  names the transition, and `sweepWorkerHealth` runs one heartbeat sweep over
+  a cohort. index.js calls both; the simulator calls the sweep over metas that
+  carry the same fields, and `attachFailWorker(id)` puts a worker into the
+  ready-but-unattached state. Its ready edge does not reset the simulated
+  budget - the primary stamps the budget on the attach - so a worker that
+  fails to attach on every boot exhausts in the simulator as it does in
+  production. Deliberately not modelled: the consequence of the state (the
+  unattached worker's subscribers missing every cross-worker publish), which
+  is evidence about the failure rather than the watchdog and would need the
+  relay bus to gate on the flag; the real cluster tests cover that path.
+
+- **How the attach regime is held on both sides.** The unit suite drives the
+  primary's composition end to end: slot records shaped as `spawn_worker`
+  builds them, messages posted in the order a worker posts them with the
+  attach withheld, the shared sweep, and the real restart supervisor charging
+  the exit - the unattached slot's attempts climb across two lives while the
+  attached sibling resets, and a deterministic attach failure walks to
+  exhaustion. The attach-gate pins hold the flip to the shared function and
+  the primary to routing every message through it. The simulator cases cover
+  the escalation and recovery, the inside-the-window boundary, a disabled
+  boot deadline (the regime is not tied to it) and a worker whose every
+  respawn fails to attach, each replaying reproducibly. The golden corpus is
+  re-blessed: a run's fingerprint folds its metrics object, so the added
+  `attachFailures` key moves every fingerprint, and the corpus verified
+  against a build with only that key removed matched 40 of 40 - the behaviour
+  under every recorded seed is unchanged.
 
 - **The control/ack channel is bounded per connection.** Everything on it
   shares a property ordinary fan-out does not: the client asked for it. A

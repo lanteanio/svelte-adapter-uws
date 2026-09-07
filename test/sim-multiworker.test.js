@@ -283,6 +283,82 @@ describe('runSim multi-worker - restart-budget outcomes', () => {
 		expect(r.fatals).toEqual([]);
 		expect((await replaySim(r)).reproduced).toBe(true);
 	});
+
+	it('a worker that reports ready and never attaches its relay reader is escalated by the attach regime, then recovers', async () => {
+		// It keeps acking heartbeats (so the steady timeout never fires) and it is
+		// ready (so the boot deadline never applies): the third regime is the only
+		// one that sees it, once the ready-to-attach gap outlives the steady
+		// timeout. The respawn boots and attaches cleanly.
+		const r = await runSim({
+			workers: 2, seed: 'attach-fail',
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.attachFailWorker(1);
+				await api.advanceTime(45000);   // past HEARTBEAT_TIMEOUT_MS (30s)
+			}
+		});
+		expect(r.metrics.attachFailures).toBe(1);
+		expect(r.metrics.restarts).toBe(1);    // attach-regime escalation -> respawn
+		expect(r.metrics.workersLive).toBe(2); // slot recovered
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('a ready-but-unattached worker is left alone inside the steady window', async () => {
+		const r = await runSim({
+			workers: 2, seed: 'attach-fail-underwindow',
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.attachFailWorker(1);
+				await api.advanceTime(20000);   // under HEARTBEAT_TIMEOUT_MS (30s)
+			}
+		});
+		expect(r.metrics.attachFailures).toBe(1);
+		expect(r.metrics.restarts).toBe(0);
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('the attach regime is not tied to the boot deadline: WORKER_BOOT_TIMEOUT_MS=0 still escalates it', async () => {
+		// An operator disabling the boot deadline is saying an init may take
+		// arbitrarily long, not that a serving worker may miss relay traffic forever.
+		const r = await runSim({
+			workers: 2, seed: 'attach-fail-nodeadline', workerBootTimeoutMs: 0,
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.attachFailWorker(1);
+				await api.advanceTime(45000);
+			}
+		});
+		expect(r.metrics.attachFailures).toBe(1);
+		expect(r.metrics.restarts).toBe(1);
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('a worker that fails to attach on every boot exhausts the budget instead of flapping forever', async () => {
+		// The ready edge of an unattached worker does not reset the budget, so
+		// each attach kill is one more attempt; a stamp at ready would have reset
+		// it every 30 s and the slot would never reach exhaustion.
+		const r = await runSim({
+			workers: 2, seed: 'attach-fail-loop',
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.attachFailWorker(1, { recover: false });
+				// Each life: ready, unattached, killed after the 30 s window, respawned
+				// after a backoff of at most 5 s. Enough virtual time for the whole
+				// budget (RESTART_MAX_ATTEMPTS lives) and then some.
+				await api.advanceTime(45000 * 55);
+			}
+		});
+		expect(r.metrics.attachFailures).toBeGreaterThan(50);
+		expect(r.fatals.map((f) => f.reason)).toContain('restart-budget-exhausted');
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
 });
 
 describe('runSim multi-worker - acceptor mode', () => {

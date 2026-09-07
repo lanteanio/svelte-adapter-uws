@@ -122,3 +122,66 @@ export function routeWorkerMessage(type, booted) {
 	if (type === 'terminate') return 'terminate';
 	return booted ? 'dispatch' : 'buffer';
 }
+
+/**
+ * Apply one inbound worker message to its slot's liveness record and name the
+ * transition it produced. This is the primary's stamping, factored out so the
+ * verdict above is driven with a meta the real stamping code produced rather
+ * than a hand-built literal.
+ *
+ * Any message proves the worker alive, so the liveness clock advances first:
+ * a worker saturated with publish traffic, whose heartbeat-ack queues behind
+ * the publishes, is never false-flagged as unresponsive. Then:
+ *   - `relay-attached` flips `relayAttached` and answers 'attached' the FIRST
+ *     time only; a repeat is 'alive'. The caller stamps the restart budget's
+ *     uptime clock on 'attached', not on 'ready': a ready-but-never-attached
+ *     worker is killed by the attach regime after the steady window, which is
+ *     also the budget's stable window, so a stamp at ready would read every
+ *     such kill as a stably up worker dying and the slot would flap forever.
+ *   - the ready edge - `descriptor` under an acceptor primary, `ready` under a
+ *     reuseport one or from a compute worker in either mode - marks the worker
+ *     ready and records when, which is what the attach regime measures from.
+ *   - anything else is 'alive'.
+ *
+ * @param {{ ready: boolean, lastHeartbeat: number, readyAt: number, relayAttached: boolean }} meta
+ * @param {{ type: string, role?: string }} msg
+ * @param {number} now  monotonic clock reading at receipt
+ * @param {'acceptor' | 'reuseport'} clusterMode
+ * @returns {'attached' | 'ready' | 'alive'}
+ */
+export function recordWorkerMessage(meta, msg, now, clusterMode) {
+	meta.lastHeartbeat = now;
+	if (msg.type === 'relay-attached') {
+		if (meta.relayAttached) return 'alive';
+		meta.relayAttached = true;
+		return 'attached';
+	}
+	const readyEdge = (msg.type === 'descriptor' && clusterMode === 'acceptor')
+		|| (msg.type === 'ready' && (clusterMode === 'reuseport' || msg.role === 'compute'));
+	if (readyEdge) {
+		meta.ready = true;
+		meta.readyAt = now;
+		return 'ready';
+	}
+	return 'alive';
+}
+
+/**
+ * One heartbeat sweep over every worker: judge each with classifyWorkerHealth
+ * and hand the verdict to the caller's `escalate` or `keep`. The primary's
+ * interval body and the deterministic cluster sim both run this, so the two
+ * cannot judge a cohort differently.
+ *
+ * @template W
+ * @param {Iterable<[W, HealthMeta]>} workers
+ * @param {number} now
+ * @param {{ steadyTimeoutMs: number, bootTimeoutMs: number }} opts
+ * @param {{ escalate: (worker: W, meta: HealthMeta, verdict: { escalate: true, regime: string, reason: string }) => void, keep: (worker: W, meta: HealthMeta) => void }} hooks
+ */
+export function sweepWorkerHealth(workers, now, opts, hooks) {
+	for (const [worker, meta] of workers) {
+		const verdict = classifyWorkerHealth(meta, now, opts);
+		if (verdict.escalate) hooks.escalate(worker, meta, verdict);
+		else hooks.keep(worker, meta);
+	}
+}

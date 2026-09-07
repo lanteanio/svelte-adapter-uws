@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { relayEligible, relayRingEligible } from '../src/runtime/relay-spill-policy.js';
 
 const INDEX_SOURCE = readFileSync(fileURLToPath(new URL('../src/runtime/index.js', import.meta.url)), 'utf8');
+const WATCHDOG_SOURCE = readFileSync(fileURLToPath(new URL('../src/runtime/worker-watchdog.js', import.meta.url)), 'utf8');
 
 describe('relay ring attach gate', () => {
 	it('refuses a worker that has not reported its reader live', () => {
@@ -70,7 +71,12 @@ describe('relay ring attach gate', () => {
 		// worker being replaced - which would hand the replacement's ring the
 		// very backlog this gate exists to prevent.
 		expect(INDEX_SOURCE).toContain('relayAttached: false');
-		expect(INDEX_SOURCE).toMatch(/msg\.type === 'relay-attached'[\s\S]{0,400}?meta\.relayAttached = true/);
+		// The flip itself lives in the shared stamping function, and the primary
+		// routes every inbound worker message through it; the sim drives the
+		// same function, which is what makes its attach regime the primary's.
+		expect(WATCHDOG_SOURCE).toMatch(/msg\.type === 'relay-attached'[\s\S]{0,200}?meta\.relayAttached = true/);
+		expect(INDEX_SOURCE).toContain("recordWorkerMessage(meta, msg, monotonicNow(), cluster_mode) : 'alive';");
+		expect(INDEX_SOURCE, 'the flag is flipped in exactly one place, and that place is not the primary').not.toMatch(/meta\.relayAttached = true/);
 		// And the worker announces it only after the reader is actually started,
 		// so the first frame the primary sends has somewhere to drain to.
 		const attachIndex = INDEX_SOURCE.indexOf('relayReader.start()');

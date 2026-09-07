@@ -15,7 +15,7 @@
 
 import { setTimer, setIntervalTimer, clearTimer, monotonicNow } from './runtime.js';
 import { computeStateHash } from './invariants.js';
-import { classifyWorkerHealth } from './worker-watchdog.js';
+import { sweepWorkerHealth } from './worker-watchdog.js';
 
 // The supervisor constants, verbatim from src/runtime/index.js so the modeled budget
 // matches production exactly.
@@ -229,7 +229,7 @@ export function createSupervisor(opts) {
 	const bootTimeoutMs = opts.bootTimeoutMs ?? WORKER_BOOT_TIMEOUT_MS;
 	const hooks = opts.hooks;
 
-	/** @type {Map<number, { id: number, state: 'starting'|'ready'|'dead', lastHeartbeat: number, spawnedAt: number, wedged: boolean, bootWedged: boolean }>} */
+	/** @type {Map<number, { id: number, state: 'starting'|'ready'|'dead', lastHeartbeat: number, spawnedAt: number, readyAt: number, relayAttached: boolean, wedged: boolean, bootWedged: boolean }>} */
 	const metas = new Map();
 	let restart_delay = 0;
 	let restart_attempts = 0;
@@ -242,7 +242,9 @@ export function createSupervisor(opts) {
 	const restartTimers = new Set();
 	let shuttingDown = false;
 	let listenPaused = false;
-	const metrics = { restarts: 0, flaps: 0, wedges: 0, initWedges: 0 };
+	const metrics = { restarts: 0, flaps: 0, wedges: 0, initWedges: 0, attachFailures: 0 };
+	/** Worker ids whose every respawn reports ready and never attaches (see attachFail). */
+	const attachFailing = new Set();
 
 	function liveReady() {
 		let n = 0;
@@ -251,17 +253,27 @@ export function createSupervisor(opts) {
 	}
 
 	function addWorker(id) {
-		metas.set(id, { id, state: 'starting', lastHeartbeat: 0, spawnedAt: monotonicNow(), wedged: false, bootWedged: false });
+		metas.set(id, { id, state: 'starting', lastHeartbeat: 0, spawnedAt: monotonicNow(), readyAt: 0, relayAttached: false, wedged: false, bootWedged: false });
 	}
-	/** Mark a (freshly spawned) worker ready - the budget-reset edge (index.js resets the
-	 *  restart counters when a worker posts 'ready' / 'descriptor'). */
-	function markReady(id) {
+	/**
+	 * Mark a (freshly spawned) worker ready. A healthy worker posts its
+	 * `relay-attached` in the same tick it goes ready, so both land here at
+	 * once; `attached: false` is the worker whose attach post was swallowed.
+	 * The budget-reset edge is the ATTACH, as in index.js (the restart budget's
+	 * uptime clock is stamped on `relay-attached`, not on `ready`), so a worker
+	 * that reports ready and never attaches keeps counting against the budget.
+	 */
+	function markReady(id, { attached = true } = {}) {
 		const m = metas.get(id);
 		if (!m) return;
+		const now = monotonicNow();
 		m.state = 'ready';
 		m.wedged = false;
 		m.bootWedged = false;
-		m.lastHeartbeat = monotonicNow();
+		m.lastHeartbeat = now;
+		m.readyAt = now;
+		m.relayAttached = attached;
+		if (!attached) return;
 		restart_delay = 0;
 		restart_attempts = 0;
 		backoffSchedule = [];
@@ -305,7 +317,15 @@ export function createSupervisor(opts) {
 			// path, so a persistent crash-loop marches the budget to exhaustion -
 			// exactly the production "died after N restarts".
 			Promise.resolve(hooks.spawn(id))
-				.then(() => { if (!shuttingDown) markReady(id); })
+				.then(() => {
+					if (shuttingDown) return;
+					if (attachFailing.has(id)) {
+						metrics.attachFailures++;
+						markReady(id, { attached: false });
+					} else {
+						markReady(id);
+					}
+				})
 				.catch(() => { if (!shuttingDown) workerExit(id); });
 		}, restart_delay);
 		restartTimers.add(timer);
@@ -344,30 +364,56 @@ export function createSupervisor(opts) {
 		metrics.initWedges++;
 	}
 
+	/** Fault action: force a worker into a re-boot that reports ready and never reports
+	 *  its relay reader live - the `relay-attached` post is a postMessage inside a
+	 *  swallowing try/catch in the worker's boot tail, so a failed post leaves exactly
+	 *  this: a worker that acks every heartbeat and is handed no relay frame at all.
+	 *  Neither the steady timeout (it keeps acking) nor the boot deadline (it is ready)
+	 *  sees it; the attach regime does, once the ready-to-attach gap outlives the steady
+	 *  timeout, and the respawn boots and attaches cleanly. Unattached, the ready edge
+	 *  does not reset the budget, so a worker that fails to attach on every boot
+	 *  exhausts instead of flapping forever. */
+	function attachFail(id, { recover = true } = {}) {
+		const m = metas.get(id);
+		if (!m || m.state === 'dead') return;
+		// recover:false models a worker whose every boot fails to attach - the
+		// respawn comes up ready and unattached again, so the attach kills
+		// repeat and, unstamped, march the budget to exhaustion.
+		if (!recover) attachFailing.add(id);
+		m.spawnedAt = monotonicNow();
+		markReady(id, { attached: false });
+		metrics.attachFailures++;
+	}
+
 	// The heartbeat scan (unref'd interval, mirror index.js's heartbeat monitor). Each tick
 	// models each worker's liveness ack, then routes the escalate decision through the SAME
-	// classifyWorkerHealth index.js ships. A healthy worker - ready, or a slow-but-healthy
-	// boot answering via its pre-start responder - refreshes its stamp; a wedged worker
-	// (steady-state wedge, or an init that blocks the event loop) does not, so its clock goes
-	// stale and it is terminated and routed through the exit/restart path.
+	// sweep and the SAME classifyWorkerHealth index.js ships, over a meta carrying every
+	// field the primary's carries - `readyAt` and `relayAttached` included, so the attach
+	// regime is reachable from here exactly as it is from the primary. A healthy worker -
+	// ready, or a slow-but-healthy boot answering via its pre-start responder - refreshes
+	// its stamp; a wedged worker (steady-state wedge, or an init that blocks the event
+	// loop) does not, so its clock goes stale; a worker that never attached keeps acking
+	// and is judged on its ready-to-attach gap. All three are terminated and routed
+	// through the exit/restart path.
 	const heartbeat = setIntervalTimer(() => {
 		if (shuttingDown) return;
 		const t = monotonicNow();
+		/** @type {Array<[number, import('./worker-watchdog.js').HealthMeta]>} */
+		const judged = [];
 		for (const m of metas.values()) {
-			// A dead worker is already on the respawn path; only a ready (steady regime)
-			// or a still-booting (boot regime) worker is judged here.
+			// A dead worker is already on the respawn path; only a ready (steady or attach
+			// regime) or a still-booting (boot regime) worker is judged here.
 			if (m.state === 'dead') continue;
 			if (!m.wedged && !m.bootWedged) m.lastHeartbeat = t;
-			const verdict = classifyWorkerHealth(
-				{ ready: m.state === 'ready', lastHeartbeat: m.lastHeartbeat, spawnedAt: m.spawnedAt },
-				t,
-				{ steadyTimeoutMs: HEARTBEAT_TIMEOUT_MS, bootTimeoutMs }
-			);
-			if (verdict.escalate) {
-				hooks.terminate(m.id);
-				workerExit(m.id);
-			}
+			judged.push([m.id, {
+				ready: m.state === 'ready', lastHeartbeat: m.lastHeartbeat, spawnedAt: m.spawnedAt,
+				readyAt: m.readyAt, relayAttached: m.relayAttached
+			}]);
 		}
+		sweepWorkerHealth(judged, t, { steadyTimeoutMs: HEARTBEAT_TIMEOUT_MS, bootTimeoutMs }, {
+			escalate: (id) => { hooks.terminate(id); workerExit(id); },
+			keep: () => {}
+		});
 	}, HEARTBEAT_INTERVAL_MS);
 	if (heartbeat.unref) heartbeat.unref();
 
@@ -385,6 +431,7 @@ export function createSupervisor(opts) {
 		flap,
 		wedge,
 		initWedge,
+		attachFail,
 		shutdown,
 		get listenPaused() { return listenPaused; },
 		metrics,

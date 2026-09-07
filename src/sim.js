@@ -621,6 +621,7 @@ async function runClusterSim(config) {
 			},
 			wedgeWorker: (id) => supervisor.wedge(id),
 			initWedgeWorker: (id) => supervisor.initWedge(id),
+			attachFailWorker: (id, opts) => supervisor.attachFail(id, opts),
 			async advance(rounds) {
 				totalSteps += await scheduler.run({ maxSteps: rounds ?? maxSteps, onStep: checkInvariants });
 			},
@@ -691,7 +692,8 @@ async function runClusterSim(config) {
 		// the merged per-worker topic index.
 		const steadyFaults = faultClasses(config.faults, config.relayFaults);
 		steadyFaults.disrupted = fatals.length > 0 || supervisor.metrics.flaps > 0
-			|| supervisor.metrics.wedges > 0 || supervisor.metrics.initWedges > 0 || supervisor.metrics.restarts > 0;
+			|| supervisor.metrics.wedges > 0 || supervisor.metrics.initWedges > 0 || supervisor.metrics.attachFailures > 0
+			|| supervisor.metrics.restarts > 0;
 		steadyFaults.multiOriginator = [...originators.values()].some((s) => s.size > 1);
 		/** @type {Record<string, number>} */
 		const mergedTopicCounts = {};
@@ -769,6 +771,7 @@ async function runClusterSim(config) {
 				flaps: supervisor.metrics.flaps,
 				wedges: supervisor.metrics.wedges,
 				initWedges: supervisor.metrics.initWedges,
+				attachFailures: supervisor.metrics.attachFailures,
 				// Live ready workers at quiescence. A concurrent recovering flap can leave
 				// the cohort below `workers` (a recovery clears the shared restart-timer set,
 				// cancelling a sibling's pending respawn - faithful to the production primary's
