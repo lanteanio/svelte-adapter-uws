@@ -169,12 +169,18 @@ and has no config:
   once git does call it binary, every diff, blame and patch on it degrades to
   `Bin n -> m bytes` and `check-formatting` skips it. Write the byte as an
   escape: the same value at runtime, and the file stays text.
-- **check-tracked-imports** - every relative file import in `src/` and
-  `scripts/` resolves to a file that is actually in git. A module can sit on
-  disk and be absent from the index, and then the tests, the checks and
-  `npm pack` all pass because every one of them reads the working tree; only a
-  clone is broken, and at module load. Directory and extensionless specifiers
-  are out of scope, so relative imports keep their explicit extensions.
+- **check-tracked-imports** - every relative import in `src/`, `scripts/` and
+  `test/` resolves to a file that is actually in git. A module can sit on disk
+  and be absent from the index, and then the tests, the checks and `npm pack`
+  all pass because every one of them reads the working tree; only a clone is
+  broken, and at module load. The imports are read from the parsed module, so
+  a side-effect import, a named import spanning lines, `export ... from`, a
+  literal dynamic `import()` and `require()` all count, and a specifier quoted
+  in a comment or a string does not. A relative specifier without a file
+  extension is refused, since Node's loader does not resolve one. The
+  fixture's generated `test/fixture/build*` output, which the suite's global
+  setup produces in every clone, is the one untracked target a test may
+  import.
 - **check-contributor-map** - this file's three inventories are derived from
   their real sources: every gate below runs in `npm run check`, every hosted
   job is named, and every `npm run` lane it sends you to exists. It is why the
