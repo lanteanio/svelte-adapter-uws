@@ -801,7 +801,11 @@ export async function createTestServer(options = {}) {
 	function ensureWireIdT(ws, ud, topic) {
 		const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
 		if (isNew) {
-			const result = sendOutboundT(ws, wireIdAnnounce(topic, id));
+			// The announce is a control frame the client's subscribe or first
+			// binary publish bought, so it is charged to the connection's control
+			// budget like every other one - and a connection the budget cut is a
+			// dropped announce too (sendControlT answers 2 for both).
+			const result = sendControlT(ws, wireIdAnnounce(topic, id));
 			if (result === 2) return -1;
 		}
 		return id;
@@ -900,7 +904,14 @@ export async function createTestServer(options = {}) {
 		const { bin, json } = cohortTopicsT(topic);
 		if (caps && caps.has(capability) && !wireStatePoisonedT(ud, capability)) {
 			const id = sharedWireIds.acquire(topic);
-			sendOutboundT(ws, wireIdAnnounce(topic, id));
+			// Charged like the production cohort's announce. The in-memory app
+			// models no backpressure, so the only way this fails to deliver is
+			// the control budget cutting the connection - and then there is
+			// nothing left to subscribe, so the reference is handed back.
+			if (sendControlT(ws, wireIdAnnounce(topic, id)) === 2) {
+				sharedWireIds.release(topic);
+				return;
+			}
 			let cohorts = ud[WS_SHARED_COHORTS];
 			if (!cohorts) { cohorts = new Set(); ud[WS_SHARED_COHORTS] = cohorts; }
 			cohorts.add(topic);

@@ -199,12 +199,25 @@ export function decodeSmoothCommandBatch(
  * already load this plugin). `decode` turns a frame payload into the routed
  * value (return `null`/`undefined` to drop the frame); `route` delivers it; the
  * optional `state` factory makes one per-binding decoder state.
+ *
+ * A route that answers the client - a denial, a protocol error - sends
+ * through `sendControl`, the calling surface's budgeted control sender: the
+ * frame is then charged to the connection's control-egress window like every
+ * other answer, on the production runtime, `createTestServer` and `vite dev`
+ * alike. A raw send on the socket is an uncharged frame on every surface.
  */
 export function registerIngress(
 	kind: string,
 	handler: {
 		decode: (payload: Uint8Array, schemaVersion: number, seq: number, state: unknown) => unknown;
-		route: (ws: unknown, target: unknown, value: unknown, platform: unknown, seq: number) => void;
+		route: (
+			ws: unknown,
+			target: unknown,
+			value: unknown,
+			platform: unknown,
+			seq: number,
+			sendControl: (ws: unknown, payload: string) => unknown
+		) => void;
 		state?: { onAttach?: (ws: unknown) => unknown };
 	}
 ): void;

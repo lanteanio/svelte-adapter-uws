@@ -263,4 +263,60 @@ describe('every surface hands its control sender to the shared routes', () => {
 			expect(read(rel), rel).not.toMatch(/\bws\.send\(/);
 		}
 	});
+
+	it('the test server charges its wire-id announces, on both the per-connection and the cohort path', () => {
+		// The harness mirrors the production announces in its own two sites;
+		// an announce sent through the plain outbound helper there is the
+		// ~1.8x under-charge the production sites no longer have.
+		const testing = read('../src/testing.js');
+		expectStatement(testing, 'const result = sendControlT(ws, wireIdAnnounce(topic, id));', 'testing.js ensureWireIdT');
+		expectStatement(testing, 'if (sendControlT(ws, wireIdAnnounce(topic, id)) === 2) {', 'testing.js joinCohortT');
+		expect(testing).not.toMatch(/sendOutboundT\(ws, wireIdAnnounce/);
+	});
+
+	it('the dev plugin answers the JSON game lane through its budgeted sender', () => {
+		const vite = read('../src/vite.js');
+		expectStatement(vite, 'sendControlWrappedV(wrapped, denied);', 'vite.js JSON game denial');
+		expect(vite).not.toMatch(/wrapped\.send\(denied\)/);
+	});
+});
+
+describe('the control-egress budget on the dev plugin', () => {
+	/** @type {import('node:http').Server | null} */
+	let httpServer = null;
+	afterAll(async () => {
+		if (httpServer) await new Promise((resolve) => httpServer.close(() => resolve(undefined)));
+	});
+
+	it('cuts a JSON game-lane denial flood the same way the other surfaces do', async () => {
+		// The dev plugin has no binary lane cap to share, so its own JSON game
+		// lane is where a grant-less client is answered with a denial per frame.
+		// Routed through the wrapper-aware budgeted sender, the same 4429 lands.
+		const { createServer } = await import('node:http');
+		const { default: uws } = await import('../src/vite.js');
+		httpServer = createServer((_req, res) => { res.statusCode = 404; res.end(); });
+		await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+		const port = /** @type {any} */ (httpServer.address()).port;
+		const handler = { message() {} };
+		const plugin = uws({ allowedOrigins: '*', handler: '/virtual-egress-handler' });
+		await plugin.configureServer({
+			httpServer,
+			middlewares: { use() {} },
+			config: { root: process.cwd(), server: {}, logger: { warn() {}, info() {}, error() {} } },
+			async ssrLoadModule() { return { default: handler, ...handler }; }
+		});
+
+		const { ws, state } = await connect(`ws://127.0.0.1:${port}/ws`);
+		const frame = JSON.stringify({ type: 'game', event: 'move', data: { x: 1 } });
+		for (let chunk = 0; chunk < 60 && state.closeCode === null; chunk++) {
+			if (ws.readyState !== WebSocket.OPEN) break;
+			for (let n = 0; n < 5000; n++) ws.send(frame);
+			await settle(20);
+		}
+		await settle(500);
+		expect(state.closeCode, 'the connection must be cut').toBe(CONTROL_FLOOD_CLOSE_CODE);
+		expect(state.frames, 'the denials flowed before the cut').toBeGreaterThan(1000);
+		expect(state.last.join(' ')).toContain('game-denied');
+		expect(state.bytes).toBeLessThan(MAX_CONTROL_EGRESS_BYTES * 2);
+	}, 60000);
 });

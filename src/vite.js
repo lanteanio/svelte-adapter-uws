@@ -309,8 +309,9 @@ export default function uws(options = {}) {
 			const denied = msg.id === undefined
 				? JSON.stringify({ type: 'game-denied', reason })
 				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-			wrapped.send(denied);
-			bumpOutV(gud, denied);
+			// A denial the client's frame bought: charged to the control budget
+			// through the wrapper-aware sender, as on the binary lane.
+			sendControlWrappedV(wrapped, denied);
 			return;
 		}
 		context.platform.publishGame(wrapped, grantTopic, msg.event, msg.data, msg.id);
