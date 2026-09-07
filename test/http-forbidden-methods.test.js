@@ -77,3 +77,39 @@ describeUWS('forbidden HTTP methods, against the real built runtime', () => {
 			.not.toContain('405 Method Not Allowed');
 	}, 30000);
 });
+
+describeUWS('forbidden HTTP methods, against the admin lane of the published test server', () => {
+	// The harness admin lane builds a Request the same way, so the same three
+	// methods would throw out of it; a regression test written against this
+	// server must see the production answer, 405 with Allow, not a 400.
+	let server;
+	const seen = [];
+
+	beforeAll(async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			handler: {
+				admin(request) {
+					seen.push(request.method);
+					return new Response('ok', { status: 200 });
+				}
+			}
+		});
+	}, 60000);
+
+	afterAll(async () => {
+		await server?.close();
+	});
+
+	it('answers 405 with an Allow header and never reaches the handler', async () => {
+		for (const method of ['TRACE', 'TRACK', 'CONNECT']) {
+			const raw = await rawRequest(server.port, method + ' /__realtime/status');
+			expect(status(raw), method + ' status').toContain('405');
+			expect(header(raw, 'allow'), method + ' Allow header')
+				.toEqual(['GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS']);
+		}
+		expect(seen).toEqual([]);
+		expect(status(await rawRequest(server.port, 'GET /__realtime/status'))).toContain('200');
+		expect(seen).toEqual(['GET']);
+	}, 30000);
+});

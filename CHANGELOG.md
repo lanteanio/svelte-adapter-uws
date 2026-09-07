@@ -215,6 +215,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Refused the way an unsafe byte is: `upgradeResponse()` throws a `TypeError` naming the header, and a duck-typed result carrying one takes the hook-error path (500, no 101, nothing written). Every other header name is unchanged. Values in the 0x80-0xFF range stay legal and leave as UTF-8 on every surface, which the suites now pin as the one spelling.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the test server's admin lane answers `TRACE`, `TRACK` and `CONNECT` with 405 and an `Allow` header.** The production edge has refused the three fetch-forbidden methods since next.91; the `createTestServer` admin lane still let them throw out of `Request` construction and answered 400, so a test written against it could not see the production answer.
+  - **Affects:** Test suites that drive the admin lane of `svelte-adapter-uws/testing` with those methods; the production runtime is unchanged.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The harness now answers the same status, `Allow` header and body as production, through the same helper, and the `admin` handler is not called for those methods; every other method reaches it exactly as before.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -446,6 +452,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The test server's admin lane refuses the fetch-forbidden methods the way
+  production does.** `createTestServer` builds a `Request` for its admin route
+  exactly as `handler/admin.js` does, and the same `TypeError` for `TRACE`,
+  `TRACK` and `CONNECT` was caught by its construction guard and answered as a
+  400 with a JSON body. The lane now checks `FORBIDDEN_METHODS` before anything
+  else and answers through the shared `send405`, so the status, the `Allow`
+  header and the body are the production ones and the `admin` handler is never
+  called. Pinned over a raw socket against the published test server, beside
+  the built-runtime case, since a fetch client refuses to send those methods.
 - **A worker's uncaught exception no longer takes the whole process with it.**
   A worker thread holds uWS socket handles that libuv knows about and Node does
   not, so when Node tore the thread down after an uncaught exception the loop

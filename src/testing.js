@@ -7,6 +7,7 @@ import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
+import { FORBIDDEN_METHODS, send405 } from './runtime/handler/http-helpers.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -3593,6 +3594,11 @@ export async function createTestServer(options = {}) {
 			const method = req.getMethod().toUpperCase();
 			const pathname = req.getUrl();
 			const query = req.getQuery();
+			// Same refusal as the production admin route: this lane builds a
+			// Request too, so a method the fetch specification forbids would throw
+			// out of it, and the answer the RFC requires is 405 with Allow, not
+			// the 400 the construction guard below would give.
+			if (FORBIDDEN_METHODS.has(method.toLowerCase())) return send405(res);
 			// Repeated header lines are merged per header class, mirroring the
 			// production admin route. An ambiguous framing / identity header is
 			// refused below, as soon as the error writer exists.
