@@ -79,11 +79,14 @@ const INVISIBLE = new Map([
  * @returns {{ path: string, index: string, worktree: string, attr: string }[]}
  */
 export function trackedEol(rootDirectory = root) {
-	const output = execFileSync('git', ['ls-files', '--eol'], {
+	// -z: a path with a space or a non-ASCII character is printed as it is,
+	// where the line form quotes and escapes it into a spelling no file has -
+	// and a path the scan cannot open would count as scanned and clean.
+	const output = execFileSync('git', ['ls-files', '--eol', '-z'], {
 		cwd: rootDirectory, encoding: 'utf8', maxBuffer: MAX_BUFFER
 	});
 	const rows = [];
-	for (const line of output.split('\n')) {
+	for (const line of output.split('\0')) {
 		if (!line.trim()) continue;
 		// The attribute field holds SEVERAL space-separated attributes - this
 		// repository's `* text=auto eol=lf` prints as `attr/text=auto eol=lf` - so

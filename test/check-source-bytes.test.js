@@ -59,7 +59,7 @@ describe('the byte scan', () => {
 		// The neighbours of those sequences are ordinary text: U+00A0, an em dash
 		// (E2 80 94), the zero-width joiner emoji carry, a CJK character and an
 		// umlaut share lead bytes with the refused set and must not be hits.
-		expect(controlCharacters(utf8('a\u00a0b — \u{1f468}\u200d\u{1f469} 中 ü'))).toEqual([]);
+		expect(controlCharacters(utf8('a\u00a0b \u2014 \u{1f468}\u200d\u{1f469} 中 ü'))).toEqual([]);
 	});
 
 	it('stops after eight hits, because one is enough to act on', () => {
@@ -170,6 +170,25 @@ describe('against a scratch repository', () => {
 		const { offenses, scanned } = findOffenses(repo);
 		expect(scanned).toBe(7);
 		expect(offenses.find((line) => line.startsWith('del.js'))).toMatch(/U\+007F in the staged blob/);
+	});
+
+	it('a path with a non-ASCII name is opened, scanned and judged by its staged blob like any other', () => {
+		// git prints such a path quoted and escaped in its line output, a
+		// spelling no file on disk has; a scan that trusted it would count the
+		// path as scanned and find nothing.
+		const name = 'caf\u00e9.js';
+		writeFileSync(join(repo, name), filler + "const mark = '\u0001';\n");
+		git('add', name);
+		git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'non-ascii');
+		expect(trackedEol(repo).map((row) => row.path)).toContain(name);
+		let { offenses } = findOffenses(repo);
+		expect(offenses.find((line) => line.startsWith(name))).toMatch(/:401: control character U\+0001 in tracked source/);
+		writeFileSync(join(repo, name), filler + "const mark = '\\u0001';\n");
+		({ offenses } = findOffenses(repo));
+		expect(offenses.find((line) => line.startsWith(name))).toMatch(/in the staged blob/);
+		git('add', name);
+		({ offenses } = findOffenses(repo));
+		expect(offenses.find((line) => line.startsWith(name))).toBeUndefined();
 	});
 
 	it('reads the staged blobs in one batch and maps an unknown path to null', () => {

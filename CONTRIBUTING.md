@@ -162,8 +162,8 @@ and has no config:
   U+009F, a byte-order mark anywhere, U+200B and the line terminators U+2028
   and U+2029 named with a line and a codepoint), because git's own text
   heuristic is a ratio that a single stray byte in an ordinary-sized file
-  passes. The working copy is scanned, and so is the staged blob of any path
-  whose working copy differs from the index, since a byte fixed on disk after
+  passes. The working copy is scanned; where it is clean but differs from the
+  index, the staged blob is scanned too, since a byte fixed on disk after
   `git add` is still what the commit writes. Node accepts a raw control byte
   inside a string literal, so such a module runs and reads correctly while,
   once git does call it binary, every diff, blame and patch on it degrades to
