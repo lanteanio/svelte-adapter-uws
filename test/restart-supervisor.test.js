@@ -134,6 +134,25 @@ describe('restart supervisor: stable-up budget reset', () => {
 		expect(exhausted).toEqual(['io#0']);
 	});
 
+	it('a worker killed for never attaching is never stamped, so it exhausts even though each life outlasts stableMs', () => {
+		// The primary stamps `noteReady` on relay-attached, not on ready. A worker
+		// that reports ready and never attaches is killed by the watchdog only
+		// after the steady window - the same length as stableMs - so if it were
+		// stamped at ready, every one of its exits would read as a stably up
+		// worker dying, reset the budget, and it would flap forever. Unstamped,
+		// each kill is one more attempt against the slot until the cap.
+		const { sup, clock, exhausted, advance } = harness({ maxAttempts: 3, stableMs: 30000 });
+		sup.register(io(0));
+		for (let i = 1; i <= 3; i++) {
+			advance(35000);        // ready, serving, never attached, then killed
+			expect(sup.noteExit(io(0)).attempts).toBe(i);
+			clock.fireOldest();    // respawn -> noteSpawn; the replacement repeats it
+		}
+		advance(35000);
+		expect(sup.noteExit(io(0))).toEqual({ exhausted: true, attempts: 4 });
+		expect(exhausted).toEqual(['io#0']);
+	});
+
 	it('a slot up for at least stableMs resets its budget on the next crash', () => {
 		const { sup, clock, advance } = harness();
 		sup.register(io(0));

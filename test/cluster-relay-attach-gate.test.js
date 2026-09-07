@@ -79,4 +79,24 @@ describe('relay ring attach gate', () => {
 		expect(announceIndex, 'the worker never announces its attach').toBeGreaterThan(-1);
 		expect(announceIndex, 'the attach is announced before the reader starts').toBeGreaterThan(attachIndex);
 	});
+
+	it('stamps the restart budget on the attach, never on ready', () => {
+		// The attach regime kills a ready-but-unattached worker only after the
+		// steady window, and the supervisor's stable window is the same length.
+		// A budget stamped at `ready` therefore reads every such kill as a stably
+		// up worker dying, resets the attempts, and a deterministic attach failure
+		// flaps forever without ever exhausting. So the one `noteReady` in the
+		// primary sits inside the relay-attached branch, and the two ready
+		// transitions (reuseport/compute `ready`, acceptor `descriptor`) carry
+		// none.
+		const stamps = INDEX_SOURCE.match(/restartSupervisor\.noteReady\(/g) ?? [];
+		expect(stamps, 'exactly one uptime stamp in the primary').toHaveLength(1);
+		expect(INDEX_SOURCE).toMatch(/msg\.type === 'relay-attached'[\s\S]{0,900}?restartSupervisor\.noteReady\(meta\.slot\)/);
+		const readyBranch = INDEX_SOURCE.slice(
+			INDEX_SOURCE.indexOf("msg.type === 'descriptor' && cluster_mode === 'acceptor'"),
+			INDEX_SOURCE.indexOf("msg.type === 'heartbeat-ack'")
+		);
+		expect(readyBranch.length, 'the ready branches were not carved').toBeGreaterThan(200);
+		expect(readyBranch).not.toContain('noteReady(');
+	});
 });

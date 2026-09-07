@@ -500,6 +500,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different statement from allowing a serving worker to miss relay traffic
   forever.
 
+- **The restart budget is stamped on the attach, not on ready.** The attach
+  regime above kills only after the steady window, and
+  the supervisor's stable window is the same length, so a worker stamped at
+  `ready` would read as stably up at every such kill, reset its attempts, and
+  a deterministic attach failure would restart once per window for as long as
+  the process lived. Stamped on the attach, each kill is one more attempt
+  against the slot and the failure walks to `ADAPTER-ERR-WORKER-RESTART-LIMIT`
+  like any other crash loop. A healthy worker attaches in the tick after it
+  goes ready, so the stamp moves by one tick and nothing else changes for it.
+
 - **`vite dev` applies custom 101 response headers instead of warning that it
   cannot.** `upgradeResponse(userData, headers)` put application headers on the
   handshake in production and dropped them in development, with a warning
