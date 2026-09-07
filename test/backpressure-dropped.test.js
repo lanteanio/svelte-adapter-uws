@@ -62,11 +62,19 @@ describe('exact native backpressure drop telemetry', () => {
 		expect(dropped.value.type).toBe('ArrowFunctionExpression');
 		expect(dropped.value.params.map((param) => param.name)).toEqual(['_ws', 'message']);
 
-		const calls = [];
-		walk(dropped.value.body, (node) => {
-			if (node.type === 'CallExpression') calls.push(node);
-		});
+		// Only a call that IS a statement of the callback counts: the arrow's
+		// expression body, or an expression statement in its block. A walk that
+		// collected every CallExpression would still find the call inside
+		// `false && recordBackpressureDrop(counters, message)`, where it is the
+		// right operand of a logical expression and never runs - the same
+		// blindness a substring pin has, in the one place this file is the only
+		// guard.
+		const body = dropped.value.body;
+		const calls = body.type === 'BlockStatement'
+			? body.body.filter((statement) => statement.type === 'ExpressionStatement').map((statement) => statement.expression)
+			: [body];
 		expect(calls.some((call) =>
+			call.type === 'CallExpression' &&
 			call.callee.type === 'Identifier' &&
 			call.callee.name === 'recordBackpressureDrop' &&
 			call.arguments[0]?.type === 'Identifier' && call.arguments[0].name === 'counters' &&

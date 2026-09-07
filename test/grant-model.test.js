@@ -16,7 +16,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { hasUWS } from './helpers/real-runtime.js';
-import { expectStatement } from './helpers/source-pins.js';
+import { expectStatement, expectStatementBlock } from './helpers/source-pins.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -293,8 +293,19 @@ describe('grant-model wiring - source guards', () => {
 		// passing it, that caller is asking for the stricter gate on purpose.
 		const presenceSrc = readFileSync(path.join(ROOT, 'src/plugins/presence/server.js'), 'utf8');
 		const cursorSrc = readFileSync(path.join(ROOT, 'src/plugins/cursor/server.js'), 'utf8');
-		expectStatement(presenceSrc, 'platform.checkSubscribe(ws, topic, { requireGrant: true })', 'presence asks for the stricter gate');
-		expectStatement(cursorSrc, 'platform.checkSubscribe(ws, topic, { requireGrant: true })', 'cursor asks for the stricter gate');
+		// The call is the callback handed to the revocation guard, so its own line
+		// says nothing about whether it runs: `() => true ||` on the line above,
+		// or `const allowed = true;` with the guard voided, leaves it byte-identical.
+		// The block pins the line that owns the call and the line that consumes
+		// the verdict together with it.
+		const strictTap = [
+			'const allowed = await authorizeDerivedSubscribe(ws, topic, () =>',
+			'platform.checkSubscribe(ws, topic, { requireGrant: true })',
+			');',
+			'if (!allowed) return;'
+		];
+		expectStatementBlock(presenceSrc, strictTap, 'presence asks for the stricter gate and acts on its answer');
+		expectStatementBlock(cursorSrc, strictTap, 'cursor asks for the stricter gate and acts on its answer');
 		expect(platformSrc).toContain('const requireGrant = Boolean(options && options.requireGrant)');
 	});
 
