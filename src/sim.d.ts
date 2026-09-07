@@ -68,11 +68,12 @@ export interface SimClusterApi {
 	 *  so the boot-deadline watchdog (not the steady-state timeout) escalates it. */
 	initWedgeWorker(id: number): void;
 	/** Force a worker into a re-boot that reports ready and never reports its relay
-	 *  reader live. It keeps acking heartbeats and is handed no relay frame, so neither
-	 *  the steady-state timeout nor the boot deadline sees it; the attach regime
-	 *  escalates it once the ready-to-attach gap outlives the steady timeout, and the
-	 *  unattached ready edge does not reset the restart budget. Pass `{ recover: false }`
-	 *  to model a worker whose every respawn fails to attach, which exhausts the budget. */
+	 *  reader live. It keeps acking heartbeats, so neither the steady-state timeout nor
+	 *  the boot deadline sees it; the attach regime escalates it once the ready-to-attach
+	 *  gap outlives the steady timeout, and the unattached ready edge does not reset the
+	 *  restart budget. What is modelled is the detection: the simulated bus still hands
+	 *  the worker relay frames while it is in this state. Pass `{ recover: false }` to
+	 *  model a worker whose every respawn fails to attach, which exhausts the budget. */
 	attachFailWorker(id: number, opts?: { recover?: boolean }): void;
 	advance(rounds?: number): Promise<void>;
 	/** Advance the virtual clock by `ms`, firing time-driven supervisor behaviour. */

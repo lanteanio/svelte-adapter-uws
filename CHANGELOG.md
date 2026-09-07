@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Anyone running `svelte-adapter-uws/sim` multi-worker scenarios; the production primary's behaviour is unchanged.
   - **Action:** None. Existing scenarios and seeds reproduce as before; the new fault is opt-in per scenario.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Additive. The simulator's restart budget now resets on the attach rather than on ready, which is what the primary does; no existing scenario goes ready without attaching, so no recorded run changes.
+  - **Compatibility:** Additive. The simulator's restart budget now resets on the attach rather than on ready, the edge the primary stamps it on; no existing scenario goes ready without attaching, so no recorded run changes. The fault models the detection only: the simulated bus still delivers relay frames to a worker in that state.
   - **Detail:** [Added engineering detail](#added).
 - **Added: the control/ack channel is bounded per connection.** It amplifies - a client names a topic in a few bytes and is answered with a whole frame - so a connection may now be sent 4 MiB of protocol frames per 10-second window, and one that exceeds it is closed with 4429 rather than served.
   - **Affects:** Every deployment. Measured at the worst legal shape, one 8 KB `subscribe-batch` is answered with about 97 KB across 1,345 frames, and nothing rate-limited the repetition: every `messageAdmission` ceiling is disabled unless configured.

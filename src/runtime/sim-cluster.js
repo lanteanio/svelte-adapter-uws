@@ -366,13 +366,14 @@ export function createSupervisor(opts) {
 
 	/** Fault action: force a worker into a re-boot that reports ready and never reports
 	 *  its relay reader live - the `relay-attached` post is a postMessage inside a
-	 *  swallowing try/catch in the worker's boot tail, so a failed post leaves exactly
-	 *  this: a worker that acks every heartbeat and is handed no relay frame at all.
-	 *  Neither the steady timeout (it keeps acking) nor the boot deadline (it is ready)
-	 *  sees it; the attach regime does, once the ready-to-attach gap outlives the steady
-	 *  timeout, and the respawn boots and attaches cleanly. Unattached, the ready edge
-	 *  does not reset the budget, so a worker that fails to attach on every boot
-	 *  exhausts instead of flapping forever. */
+	 *  swallowing try/catch in the worker's boot tail, so a failed post leaves a worker
+	 *  that acks every heartbeat with no relay reader. Neither the steady timeout (it
+	 *  keeps acking) nor the boot deadline (it is ready) sees it; the attach regime
+	 *  does, once the ready-to-attach gap outlives the steady timeout, and the respawn
+	 *  boots and attaches cleanly. Unattached, the ready edge does not reset the budget,
+	 *  so a worker that fails to attach on every boot exhausts instead of flapping
+	 *  forever. Only the detection is modelled: the simulated bus does not withhold
+	 *  relay frames from the worker while it is in this state. */
 	function attachFail(id, { recover = true } = {}) {
 		const m = metas.get(id);
 		if (!m || m.state === 'dead') return;
