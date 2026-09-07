@@ -213,9 +213,9 @@ describe('normalizeStaticHeaders refuses header-splitting input', () => {
 			'DENY\rx-injected: 1',
 			'DENY\0',
 			'\r\n\r\n<html>owned</html>',
-			'DENYx',
-			'DENYx',
-			'DENYx'
+			'DENY\u000bx',
+			'DENY\u000cx',
+			'DENY\u007fx'
 		]) {
 			expect(
 				() => normalizeStaticHeaders({ 'x-frame-options': evil }),

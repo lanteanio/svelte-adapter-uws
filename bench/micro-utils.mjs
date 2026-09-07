@@ -79,7 +79,7 @@ const TOPIC_INPUTS = [
 	'chat', 'todos', 'cursor', 'presence:room1', '__replay:chat',
 	'a', 'b', 'long-topic-name-with-some-detail-12345',
 	// invalid cases:
-	'', null, 123, 'hascontrol'
+	'', null, 123, 'has\u0001control'
 ];
 
 function median(xs) {

@@ -155,12 +155,15 @@ and has no config:
 - **check-formatting** - every tracked file matches what `.editorconfig`
   declares for it: indent style, final newline, trailing whitespace, and the
   committed line ending. It reports and refuses; it never rewrites.
-- **check-source-bytes** - no tracked file git records as binary unless
-  `.gitattributes` declares it so, and the report names the control character
-  that made it one. Node accepts a raw control byte inside a string literal, so
-  such a module runs and reads correctly while every diff, blame and patch on it
-  degrades to `Bin n -> m bytes` - and `check-formatting` skips it, because a
-  file git records as binary has no text contract to check. Write the byte as an
+- **check-source-bytes** - no tracked text file carries a raw control
+  character, and none is recorded as binary by git unless `.gitattributes`
+  declares it so. Every text-declared path is scanned byte by byte (tab, LF and
+  CRLF allowed; a lone CR, NUL, DEL and the rest named with a line and a
+  codepoint), because git's own text heuristic is a ratio that a single stray
+  byte in an ordinary-sized file passes. Node accepts a raw control byte inside
+  a string literal, so such a module runs and reads correctly while, once git
+  does call it binary, every diff, blame and patch on it degrades to
+  `Bin n -> m bytes` and `check-formatting` skips it. Write the byte as an
   escape: the same value at runtime, and the file stays text.
 - **check-tracked-imports** - every relative file import in `src/` and
   `scripts/` resolves to a file that is actually in git. A module can sit on
