@@ -17,6 +17,17 @@
  * example). Every send is best-effort and contained: a missing binary or a
  * failed spawn can never take the server down.
  *
+ * The manager attributes a datagram to a unit through the sender's cgroup at
+ * receipt, and a sender that has already exited may not be attributable. On
+ * systemd 246 and later the helper waits until the manager has processed the
+ * message before it exits (its `--no-block` option, added in that release,
+ * is what would disable the wait, and it is never passed here), so the child
+ * outlives the attribution. Below 246 the helper exits at once and READY or
+ * WATCHDOG can be dropped; the README states that floor and the fallback of
+ * `Type=simple` without a watchdog for an older manager. `--pid=` names the
+ * unit's main process and does not change how the sender is attributed, so
+ * it is not the answer to that race and is not sent.
+ *
  * Zero-config: everything derives from the environment systemd itself
  * provides. No NOTIFY_SOCKET (any non-systemd host, dev, CI, containers
  * without the passthrough) - complete no-op. WATCHDOG_USEC absent - READY
