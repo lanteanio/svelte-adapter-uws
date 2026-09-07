@@ -61,8 +61,8 @@ const ALLOWED = new Set([0x09, 0x0a]);
 
 /**
  * The multi-byte UTF-8 sequences that are refused, keyed by their code point.
- * U+0080..U+009F are the C1 controls (C2 80..C2 9F); U+200B, U+2028 and
- * U+2029 are E2 80 8B/A8/A9; U+FEFF is EF BB BF.
+ * U+0080..U+009F are the C1 controls (0xC2 0x80..0xC2 0x9F); U+200B, U+2028
+ * and U+2029 are 0xE2 0x80 0x8B/0xA8/0xA9; U+FEFF is 0xEF 0xBB 0xBF.
  */
 const INVISIBLE = new Map([
 	[0x200b, [0xe2, 0x80, 0x8b]],

@@ -57,8 +57,8 @@ describe('the byte scan', () => {
 		expect(controlCharacters(utf8('ok\nzero\u200bwidth\n'))).toEqual([{ line: 2, code: 0x200b }]);
 		expect(controlCharacters(utf8('a\u2028b\u2029c'))).toEqual([{ line: 1, code: 0x2028 }, { line: 1, code: 0x2029 }]);
 		// The neighbours of those sequences are ordinary text: U+00A0, an em dash
-		// (E2 80 94), the zero-width joiner emoji carry, a CJK character and an
-		// umlaut share lead bytes with the refused set and must not be hits.
+		// (0xE2 0x80 0x94), the zero-width joiner emoji carry, a CJK character and
+		// an umlaut share lead bytes with the refused set and must not be hits.
 		expect(controlCharacters(utf8('a\u00a0b \u2014 \u{1f468}\u200d\u{1f469} 中 ü'))).toEqual([]);
 	});
 
