@@ -5899,17 +5899,17 @@ Dedup is skipped for:
 - Any request with a `Cookie` or `Authorization` header (personalized responses must not be shared)
 - POST, PUT, PATCH, DELETE (mutations are excluded from dedup so each call reaches the handler)
 - Responses with a `Set-Cookie` header (personalized)
-- Response bodies larger than 512 KB (too large to buffer and share)
-- Requests with an `X-No-Dedup: 1` header (opt-out escape hatch)
+- Response bodies larger than 512 KB, decided before the body is held: a declared length past the cap streams at once, an undeclared body streams once it passes the cap
 
 For anonymous GET/HEAD requests that pass every skip condition above, in-flight
-deduplication is enabled without an option. The map holds at most 500 keys; a
-personalized, oversized, varying, opted-out, or over-cap request bypasses it.
+deduplication is enabled without an option; the map holds at most 500 keys. There
+is no anonymous opt-out header (it could be stamped on every request to defeat
+the fan-in); tooling that must reach the handler sends any `Cookie`.
 
 **Vary and personalization contract:** The adapter deduplicates by method + URL only. It cannot inspect every possible input that might affect your response (user-agent quirks, custom headers, etc.). The contract is:
 
 - If your route handler produces different output based on a request header or other input, emit a `Vary` header listing those headers. The adapter checks the `Vary` header after rendering and discards the dedup entry if `Vary` is present, preventing that response from being shared.
-- If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), add `X-No-Dedup: 1` to opt out entirely.
+- If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), emit a `Vary` header naming any request header, which is enough to keep the response out of the shared buffer.
 
 An anonymous GET/HEAD route needs no opt-in only when it produces the same
 output for every input the dedup key does not represent. Emit `Vary` or use

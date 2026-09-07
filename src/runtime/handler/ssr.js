@@ -9,7 +9,7 @@ import { randomUuid } from '../runtime.js';
 import { PayloadTooLargeError, send413, send500 } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
-import { isDedupBufferable } from './ssr-dedup.js';
+import { declaresBodyPastCap, isDedupBufferable, readBodyUpTo } from './ssr-dedup.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
 
 // Maximum number of in-flight dedup keys tracked simultaneously.
@@ -342,25 +342,50 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 						return;
 					}
 
-					// Buffer the body. Responses above the size cap are not shared.
-					const ab = await response.arrayBuffer();
-					if (state.aborted) { resolveShared(null); return; }
+					// Sharing is decided BEFORE the body is materialised. A declared
+					// length past the cap streams at once; otherwise the body is
+					// read only up to the cap, and a body that passes it is not
+					// shared and streams on from where the read stopped. Reading
+					// the whole body first and asking afterwards would hold every
+					// large uncredentialed response in memory in full, per request,
+					// which is what the cap exists to prevent.
+					if (declaresBodyPastCap(response, MAX_SSR_DEDUP_BODY)) {
+						resolveShared(null);
+						await writeResponse(res, response, state, respAcceptEncoding);
+						return;
+					}
+					const read = await readBodyUpTo(response.body, MAX_SSR_DEDUP_BODY);
+					if (state.aborted) {
+						resolveShared(null);
+						if (!read.complete) read.stream.cancel().catch(() => {});
+						return;
+					}
+					if (!read.complete) {
+						resolveShared(null);
+						await writeResponse(
+							res,
+							new Response(read.stream, {
+								status: response.status,
+								statusText: response.statusText,
+								headers: response.headers
+							}),
+							state,
+							respAcceptEncoding
+						);
+						return;
+					}
 
-					const shared = ab.byteLength <= MAX_SSR_DEDUP_BODY
-						? /** @type {SharedResponse} */ ({
-							status: response.status,
-							statusText: response.statusText,
-							headers: /** @type {[string, string][]} */ ([...response.headers]),
-							body: new Uint8Array(ab)
-						})
-						: null;
-
-					resolveShared(shared);
+					resolveShared(/** @type {SharedResponse} */ ({
+						status: response.status,
+						statusText: response.statusText,
+						headers: /** @type {[string, string][]} */ ([...response.headers]),
+						body: read.bytes
+					}));
 
 					// Serve the leader's own response from the same buffer
 					await writeResponse(
 						res,
-						new Response(ab, {
+						new Response(read.bytes, {
 							status: response.status,
 							statusText: response.statusText,
 							headers: response.headers

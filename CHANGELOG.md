@@ -197,6 +197,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The watch ends with `ADAPTER-ERR-TLS-WATCH-LOST` (or the primary id) and the same sticky degraded state as any other dead watch; a directory replaced by a new one at the same path is read once more first, so a certificate that arrived with the replacement is served, and on the primary that reload is broadcast. Windows delivers no event for a directory moved aside, so that case stays as before: silent until restart.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the request-dedup leader decides sharing before it holds the body.** It read the whole response and only then compared it with the 512 KB cap, so every anonymous GET of a big file sat in memory in full; a declared length past the cap now streams at once and an undeclared body is read only up to the cap.
+  - **Affects:** Deployments serving large bodies (media, downloads, generated exports) from a route to clients without a `Cookie` or `Authorization` header. Measured on the field report's shape, two anonymous viewers of a 128 MB file exceeded a 1 GiB container.
+  - **Action:** None. Bodies within the cap are shared exactly as before.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** A body past the cap is never shared, so concurrent anonymous requests for it each render, as they already did; what changes is that the leader streams it from the first chunk instead of after the last. A body that passes the cap mid-read streams on from where the read stopped, without re-rendering or losing a byte.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a streamed body reaches the client whole; the older addon pin cut it.** The 0.5 line's native build (`uWebSockets.js` v20.67.0) loses the writable wakeup at the first backpressure event, which any body past the socket buffer produces at any client speed; this line pins v20.69.0, which carries the upstream fix.
+  - **Affects:** On the 0.5.x line, any streamed response larger than the socket's send buffer, a few hundred kilobytes on a real link at any client speed, gigabit included: every returning visitor or authenticated user downloading media or exports (a cookie skips the buffering dedup path and takes the streaming write). Reproduced on Linux with v20.67.0 at 180 to 260 KB of a 1 MiB body; the same loop completes under v20.69.0.
+  - **Action:** On 0.6.0-next, none. On 0.5.x, install `uWebSockets.js` v20.69.0 or newer alongside the adapter until a 0.5.x patch moves the pin.
+  - **Requires:** No new dependency or option on this line.
+  - **Compatibility:** No adapter code on the write path changes; the writer's drain contract is unchanged and proven under backpressure on the pinned build.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a custom 101 header named `Connection`, `Upgrade` or `Sec-WebSocket-Accept` is refused instead of written beside the server's own.** The upgrade-header check refused unsafe bytes and non-token names but not the names the handshake writes itself, so an application value went out as a second line and a conforming client refused the handshake silently.
   - **Affects:** Applications returning `upgradeResponse()` headers named `Connection`, `Upgrade`, `Sec-WebSocket-Accept`, `Sec-WebSocket-Extensions` or `Sec-WebSocket-Protocol`, in any letter case, on the production runtime, `createTestServer` or `vite dev`.
   - **Action:** Remove the header; the server writes the first three on every handshake and negotiates the last two from the client's offer. A subprotocol is selected by the client's offer, not by a response header set from the hook.
@@ -1030,6 +1042,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds the degradation through the final read; the primary also keeps its
   watcher reference after the report, because the final read's timer is the
   watcher's and only `stop()` at shutdown clears it.
+
+- **The dedup leader decides sharing before it holds the body.** The leader
+  path did `await response.arrayBuffer()` and compared the result with
+  `MAX_SSR_DEDUP_BODY` afterwards, so the cap bounded what was SHARED and
+  nothing bounded what was HELD: every uncredentialed GET or HEAD that reached
+  the branch materialised its whole body per request before a byte was
+  written, which is exactly what a public media route serves to a first-time
+  visitor. Two pieces replace it in `ssr-dedup.js`: `declaresBodyPastCap`
+  sends a response whose `Content-Length` is past the cap straight to the
+  streaming write, and `readBodyUpTo` reads an undeclared body only until it
+  ends or its bytes pass the cap, handing back either the whole body (shared
+  as before) or a stream that replays the chunks already read and then
+  continues from the source, released as they replay. A leader that passes
+  the cap therefore streams the body it will not share, and a waiter that
+  attached to it falls through to its own render as it always did. Held by a
+  fixture route that emits its first chunk at once and the rest after a
+  pause: the first bytes of a body past the cap arrive during the pause
+  (buffering would deliver nothing until after it), two concurrent anonymous
+  requests for it both complete and both render, and two for a body within
+  the cap still render once.
+
+- **The streamed write holds under backpressure on the pinned build.** The
+  chunk writer parks on a drain promise when `res.write` reports backpressure
+  and the socket's writable event wakes it. Measured in a Linux container with
+  the TCP buffers shrunk so a pausing client drives real backpressure: under
+  the addon build the 0.5.x line pins (v20.67.0, native uWS v20.77.0) the
+  writable wakeup is lost after the first or second backpressure event, the
+  writer waits out its 30 s deadline and closes the socket on a body cut at
+  180 to 260 KB of 1 MiB; under the pinned v20.69.0 (native v20.79.0) the
+  same loop delivers 2 MiB and 4 MiB bodies through thirty to sixty
+  backpressure events, over plain HTTP and TLS. Draining the socket from
+  inside the handler does not rescue the older build either, so the fix is
+  the pin and nothing on the write path changes. Backpressure is a
+  socket-buffer event, not a client-speed one: on a real link a body a few
+  hundred kilobytes long produces it at gigabit speeds, and the field report
+  saw the cut with a fast client; loopback needs a pausing reader only
+  because its buffers hold megabytes. The suite therefore streams 16 MiB to a
+  client that pauses after every read, over plain HTTP and TLS, and requires
+  the terminating chunk: a build that loses the wakeup fails it on the byte
+  count after the deadline instead of hanging.
 
 - **The handshake's own header names are not the application's to write.**
   `findUnsafeUpgradeHeader` said which BYTES a 101 header may carry and
