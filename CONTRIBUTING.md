@@ -158,11 +158,15 @@ and has no config:
 - **check-source-bytes** - no tracked text file carries a raw control
   character, and none is recorded as binary by git unless `.gitattributes`
   declares it so. Every text-declared path is scanned byte by byte (tab, LF and
-  CRLF allowed; a lone CR, NUL, DEL and the rest named with a line and a
-  codepoint), because git's own text heuristic is a ratio that a single stray
-  byte in an ordinary-sized file passes. Node accepts a raw control byte inside
-  a string literal, so such a module runs and reads correctly while, once git
-  does call it binary, every diff, blame and patch on it degrades to
+  CRLF allowed; a lone CR, NUL, DEL, the rest of C0, the C1 controls U+0080 to
+  U+009F, a byte-order mark anywhere, U+200B and the line terminators U+2028
+  and U+2029 named with a line and a codepoint), because git's own text
+  heuristic is a ratio that a single stray byte in an ordinary-sized file
+  passes. The working copy is scanned, and so is the staged blob of any path
+  whose working copy differs from the index, since a byte fixed on disk after
+  `git add` is still what the commit writes. Node accepts a raw control byte
+  inside a string literal, so such a module runs and reads correctly while,
+  once git does call it binary, every diff, blame and patch on it degrades to
   `Bin n -> m bytes` and `check-formatting` skips it. Write the byte as an
   escape: the same value at runtime, and the file stays text.
 - **check-tracked-imports** - every relative file import in `src/` and
