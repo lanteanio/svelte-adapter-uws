@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Text only, and the meanings are unchanged - "never per-recipient deliveries" and "dropped under backpressure" say the same thing without naming the runtime. The declaration in `src/index.d.ts` keeps this adapter's specifics, and now states one an operator would otherwise meet on a dashboard: a publish that excludes a socket is delivered by a per-socket walk rather than one native call, so it is counted by `ws_publishes_total` and absent from the outcome breakdown - the two do not sum.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: one connection may hold 65,536 subscriptions, down from 1,000,000.** A landed subscription is a native topic-tree entry, measured at about 700 bytes resident each, so one admitted connection could hold about 700 MB that the connection ceiling cannot see; the 65,537th subscribe is denied with `RATE_LIMITED` and everything held stays.
+  - **Affects:** Only a client subscribed to more than 65,536 distinct topics at once on one connection; the pending-attempt cap, the request cap and every other retained-state cap are unchanged.
+  - **Action:** None for any client under the cap. A client that legitimately needs more topics than that on one connection should fan out per entity group rather than per entity, which the wire lanes are built for.
+  - **Requires:** No new dependency or option; the cap is not exposed.
+  - **Compatibility:** The denial is the same `subscribe-denied` with reason `RATE_LIMITED` the old cap answered, on the production runtime, `createTestServer` and `vite dev` alike; nothing already subscribed is touched.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a `staticHeaders` value carrying a newline is refused at build time.** A CR, LF or NUL in a configured value reached `res.writeHeader` verbatim, where it ends the header field and starts whatever follows - header injection, or a second response; names are now held to the RFC 9110 token grammar too.
   - **Affects:** Builds configuring `staticHeaders`. A value or name that could split a response now fails the build instead of shipping.
   - **Action:** None for a valid configuration. A build that starts failing was emitting a header a client could not have read correctly - remove the control character from the value, or correct a name that is not a bare HTTP token.
@@ -395,6 +401,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One connection holds at most 65,536 subscriptions.**
+  `MAX_SUBSCRIPTIONS_PER_CONNECTION` was a million like the other retained-state
+  caps, on the position that per-connection caps are bug tripwires and the
+  connection ceiling bounds the aggregate. That position holds only while one
+  connection is cheap, and a landed subscription is not: it is a native uWS
+  topic-tree entry as well as a Set entry and a string, measured on the test
+  server at about 706 bytes of resident memory each (20,000 landed
+  subscriptions on one connection, 13.4 MB RSS delta, 94 bytes of it heap). At
+  the old cap one admitted connection could hold about 700 MB, which
+  `maxConnections` cannot see, and the control-egress budget throttles the
+  fill only to roughly 80,000 acks per ten seconds, so a hostile client reached
+  it in minutes. The new cap is about 46 MB at worst per connection and
+  sixty-four times a thousand-topic client. The refusal path, the reason code
+  and the surfaces are unchanged; only the constant moves, and the caps table
+  in the README says why this one row is not a million.
 - **Four metric help strings name what is counted, not the layer that counted
   it.** `ws_publishes_total` said "fan-out happens in C++",
   `ws_publish_outcomes_total` said "Native publish calls", and the two dropped

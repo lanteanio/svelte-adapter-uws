@@ -77,7 +77,7 @@ const SHARED = [
 ];
 
 const POLICY = 'src/runtime/utils/subscribe-policy.js';
-const SUBSCRIPTION_CAP = 1_000_000;
+const SUBSCRIPTION_CAP = 65_536;
 const POLICY_NAMES = [
 	'deniesWireSystemTopicSubscribe',
 	'deniesWireSubscribePreHook',
@@ -968,7 +968,7 @@ describe('the oracle itself rejects the padding classes found by review', () => 
 				if (exceedsSubscriptionCap({ held: true, size: 0, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
 					throw new Error('padding');
 				}
-				if (isNew && subs.size >= (10 ** 6)) return 'RATE_LIMITED';
+				if (isNew && subs.size >= (2 ** 16)) return 'RATE_LIMITED';
 			}
 		`);
 		const imports = new Map([['exceedsSubscriptionCap', 'exceedsSubscriptionCap']]);
@@ -983,8 +983,8 @@ describe('the oracle itself rejects the padding classes found by review', () => 
 			export function subscribe(ud, topic) {
 				const subs = ud[WS_SUBSCRIPTIONS];
 				const held = subs.has(topic);
-				const base = 10;
-				const foldedCap = base ** 6;
+				const base = 2;
+				const foldedCap = base ** 16;
 				const count0 = subs.size;
 				const count = count0;
 				if (foldedCap <= count) return 'RATE_LIMITED';

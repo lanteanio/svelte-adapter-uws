@@ -1414,13 +1414,13 @@ A denial is deliberately distinguishable from a delivery failure: nothing was se
 
 ### Capacity model
 
-Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 for the retained-state caps) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate live-connection memory is bounded separately by the opt-in `upgradeAdmission.maxConnections`; per-connection caps are not the right place to defend against a 1M-connection DoS.
+Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 for the retained-state caps, except subscriptions per connection at 65,536, since each landed subscription is also a native topic-tree entry of about 700 bytes and one admitted connection must not be able to hold hundreds of megabytes) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate live-connection memory is bounded separately by the opt-in `upgradeAdmission.maxConnections`; per-connection caps are not the right place to defend against a 1M-connection DoS.
 
 One row is deliberately far tighter than the rest: subscribe attempts **in authorization** are capped at 4,096 rather than 1,000,000, because each one is a live invocation of your `subscribe` / `subscribeBatch` hook - typically a database or session-store query - and not a Set entry. It bounds concurrency, not ownership, so it is transient by construction: every attempt that settles frees its slot, the refusal is the retryable `RATE_LIMITED`, and the stock client re-asks for a topic refused that way on a jittered exponential backoff, giving up after a few attempts and leaving the denial on the `denials` store. The landed-subscription cap in the row above is what bounds how many topics one connection may end up holding.
 
 | Site                                            | Default cap                        | Behaviour at saturation                                               | Override                                             |
 | ----------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
-| Subscriptions per connection                    | 1,000,000                          | `subscribe-denied` with reason `'RATE_LIMITED'`                       | not exposed                                          |
+| Subscriptions per connection                    | 65,536                             | `subscribe-denied` with reason `'RATE_LIMITED'`                       | not exposed                                          |
 | Subscribe attempts in authorization per connection | 4,096                           | `subscribe-denied` with reason `'RATE_LIMITED'`; the attempt never reaches the hook | not exposed                            |
 | Pending `platform.request` calls per connection | 1,000,000                          | promise rejects with "pending requests exceeded"                      | not exposed                                          |
 | `sendCoalesced` keys per connection             | 1,000,000                          | drop oldest insertion-order entry on insert                           | not exposed                                          |
@@ -1815,8 +1815,8 @@ export function subscribe(ws, topic, { platform }) {
   if (topic.startsWith("admin") && role !== "admin") return false;
 }
 
-// Called when a client unsubscribes from a topic (optional)
-// Use this to clean up per-topic state (presence, groups, etc.)
+// Called when a client unsubscribes from a topic (optional). Clean up per-topic
+// state here; it is synchronous and fire-and-forget, a returned promise is not awaited.
 export function unsubscribe(ws, topic, { platform }) {
   console.log(`Unsubscribed from ${topic}`);
 }

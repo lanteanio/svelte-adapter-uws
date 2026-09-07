@@ -597,15 +597,15 @@ const SCENARIOS = [
 		},
 		async run(surface) {
 			const belowResults = [];
-			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999].entries()) {
+			for (const [index, size] of [16, 17, 500, 4096, 32_768, 65_535].entries()) {
 				const client = await surface.client();
 				belowResults.push(await client.capProbe(`cap-below-${index}`, size));
 			}
 			const at = await surface.client();
-			const atResult = await at.capProbe('cap-at', 1_000_000);
+			const atResult = await at.capProbe('cap-at', 65_536);
 			const held = await surface.client();
 			expect((await held.grant('cap-held')).granted).toBe(true);
-			const heldResult = await held.capProbe('cap-held', 1_000_000);
+			const heldResult = await held.capProbe('cap-held', 65_536);
 			return { below: belowResults, at: atResult, held: heldResult };
 		}
 	},
@@ -627,13 +627,13 @@ const SCENARIOS = [
 			'17:FORBIDDEN',
 			'500:FORBIDDEN',
 			'4096:FORBIDDEN',
-			'65536:FORBIDDEN',
-			'999999:FORBIDDEN',
-			'1000000:RATE_LIMITED'
+			'32768:FORBIDDEN',
+			'65535:FORBIDDEN',
+			'65536:RATE_LIMITED'
 		],
 		async run(surface) {
 			const results = [];
-			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999, 1_000_000].entries()) {
+			for (const [index, size] of [16, 17, 500, 4096, 32_768, 65_535, 65_536].entries()) {
 				const client = await surface.client();
 				expect(await client.capArm(size), `cap-arm ${size} was not acknowledged`).toBe(true);
 				const single = await client.subscribeAnswer(`wire-cap-single-${index}`, 700 + index);
@@ -710,13 +710,13 @@ const OPEN_SCENARIOS = [
 			'17:subscribed/subscribed',
 			'500:subscribed/subscribed',
 			'4096:subscribed/subscribed',
-			'65536:subscribed/subscribed',
-			'999999:subscribed/subscribed',
-			'1000000:subscribe-denied/subscribe-denied'
+			'32768:subscribed/subscribed',
+			'65535:subscribed/subscribed',
+			'65536:subscribe-denied/subscribe-denied'
 		],
 		async run(surface) {
 			const results = [];
-			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999, 1_000_000].entries()) {
+			for (const [index, size] of [16, 17, 500, 4096, 32_768, 65_535, 65_536].entries()) {
 				const client = await surface.client();
 				expect(await client.capArm(size), `cap-arm ${size} was not acknowledged`).toBe(true);
 				const batchTopic = `open-cap-batch-${index}`;

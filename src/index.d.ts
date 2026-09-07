@@ -2458,6 +2458,11 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * Use this to clean up per-topic state like presence or group membership
 	 * without waiting for the socket to close.
+	 *
+	 * Synchronous and fire-and-forget, unlike `subscribe`: the adapter neither
+	 * awaits nor tracks a returned promise, so nothing bounds work suspended in
+	 * one and a rejection is not handled for you. Keep the hook synchronous, or
+	 * hand its async part to something that owns the promise.
 	 */
 	unsubscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => void;
 

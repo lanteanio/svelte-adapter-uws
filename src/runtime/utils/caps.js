@@ -8,8 +8,20 @@
 // `upgradeAdmission.maxConnections`; per-conn caps are not the right place
 // to defend against a 1M-connection DoS.
 
-/** Max distinct topics one connection may be subscribed to before further subscribes are denied with `RATE_LIMITED`. */
-export const MAX_SUBSCRIPTIONS_PER_CONNECTION = 1_000_000;
+/**
+ * Max distinct topics one connection may be subscribed to before further
+ * subscribes are denied with `RATE_LIMITED`.
+ *
+ * The one retained-state cap that is not a million, because a landed
+ * subscription is not only a Set entry: it is a native uWS topic-tree entry
+ * as well, measured at about 700 bytes of resident memory each on the test
+ * server, so one admitted connection at a million subscriptions would hold
+ * about 700 MB that `upgradeAdmission.maxConnections` cannot see. 65,536 is
+ * about 46 MB at worst per connection and sixty-four times a thousand-topic
+ * client, which is already far past any healthy single-connection use; a
+ * capped client is answered loudly and keeps everything it has.
+ */
+export const MAX_SUBSCRIPTIONS_PER_CONNECTION = 65_536;
 
 /** Max in-flight server-initiated `platform.request` calls per connection before further requests reject immediately. */
 export const MAX_PENDING_REQUESTS_PER_CONNECTION = 1_000_000;
