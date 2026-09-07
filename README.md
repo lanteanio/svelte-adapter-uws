@@ -5912,8 +5912,8 @@ the fan-in); tooling that must reach the handler sends any `Cookie`.
 - If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), emit a `Vary` header naming any request header, which is enough to keep the response out of the shared buffer.
 
 An anonymous GET/HEAD route needs no opt-in only when it produces the same
-output for every input the dedup key does not represent. Emit `Vary` or use
-`X-No-Dedup: 1` whenever that prerequisite is not true.
+output for every input the dedup key does not represent. Emit `Vary` whenever
+that prerequisite is not true.
 
 **Measured:** In three 200-request bursts with a 5 ms synthetic render delay,
 the no-dedup fixture averaged 200 render calls and the dedup fixture averaged
