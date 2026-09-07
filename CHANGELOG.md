@@ -179,11 +179,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Refused as `ADAPTER-ERR-CLUSTER-CONFIG-PORT` with the other capacity misconfigurations, before any worker spawns, so the failure is at boot rather than in the routing layer.
   - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: a certificate watch that dies after starting no longer takes the process down.** Nothing listened for the watcher's `error` event, and an unhandled one is rethrown - so a certificate directory that was removed or replaced raised an uncaught exception on a healthy serving process, and on a cluster primary that is the whole fleet.
+- **Fixed: a certificate watch that dies after starting no longer takes the process down.** Nothing listened for the watcher's `error` event, and an unhandled one is rethrown, so a watch the platform reported as failed after start raised an uncaught exception on a healthy serving process, and on a cluster primary that ends the whole fleet.
   - **Affects:** TLS deployments with the certificate watch on, which is the default. A watch that fails to START was always caught; this is the one that fails later, which arrives as an event rather than a throw.
-  - **Action:** None. If the new line appears, find what happened to the certificate directory - a redeployed secret volume that replaces the directory rather than the files in it is the usual cause - and restart.
+  - **Action:** None. If the new line appears, find what stopped the watch - a permission change on the certificate directory, or the platform's watch resources running out - and restart.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** The process now stays up and reports `ADAPTER-ERR-TLS-WATCH-LOST`, or `ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST` on a cluster primary, and enters the same degraded TLS state a watch that never started produces - sticky, so no later success clears it. Its own id rather than the existing watch ids, because no catch-up read follows this one and the operator's next move differs.
+  - **Compatibility:** The process now stays up and reports `ADAPTER-ERR-TLS-WATCH-LOST`, or `ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST` on a cluster primary, and enters the same degraded TLS state a watch that never started produces - sticky, so no later success clears it. Its own id rather than the existing watch ids, because the operator's next move differs.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: removing or replacing the certificate directory no longer spins or silently kills the watcher.** No platform reports that as an error - Windows narrates the deletion at about a hundred thousand events a second, Linux says one word and goes quiet - so the watcher now checks the directory's identity whenever an event names the directory itself, and ends the watch.
+  - **Affects:** TLS deployments with the certificate watch on. On Windows a removed directory was a permanent CPU burn, a log line every debounce window and, on a cluster primary, a reload broadcast to every worker on the same cadence; on Linux it was a watch that looked healthy and would never see another renewal.
+  - **Action:** None. If the line appears, restart the process once the directory is back where the configuration points.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The watch ends with `ADAPTER-ERR-TLS-WATCH-LOST` (or the primary id) and the same sticky degraded state as any other dead watch; a directory replaced by a new one at the same path is read once more first, so a certificate that arrived with the replacement is served, and on the primary that reload is broadcast. Windows delivers no event for a directory moved aside, so that case stays as before: silent until restart.
   - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
@@ -885,9 +891,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The certificate watcher listens for its own error event.** A watch fails
   two ways. Failing to START throws, and both callers already wrap `start()`
-  to degrade instead of crashing. Failing AFTER it started - the directory
-  removed or replaced, permissions changed, the platform's watch resources
-  exhausted - arrives as an `error` EVENT, which no one was listening for; an
+  to degrade instead of crashing. Failing AFTER it started - a permission
+  change, the platform's watch resources exhausted - arrives as an `error`
+  EVENT when the platform reports it at all, and no one was listening; an
   `error` event with no listener is rethrown by EventEmitter, so a certificate
   watcher could raise an uncaught exception on a process that was serving
   fine, and on a cluster primary that ends the whole fleet.
@@ -903,6 +909,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/tls-reload.test.js` drives the event through the injected `watchFs`
   seam, and pins the EventEmitter contract the whole thing rests on against a
   BARE emitter, so that assertion cannot pass because of the code it justifies.
+
+- **A watched certificate directory that is removed, moved or replaced ends
+  the watch.** No platform reports that through `error`. Measured: on Windows
+  a removed directory makes the watcher narrate its own deletion at about a
+  hundred thousand `rename` events a second for as long as the process runs
+  and never raises `error`, and the events keep coming after a new directory
+  is created at the same path - the handle is on the deleted one. So a removed
+  certificate directory was a permanent timer churn, a failing read and a log
+  line every debounce window and, on a cluster primary, a reload broadcast to
+  every worker on the same cadence. On Linux the same removal delivers one
+  `rename` for the directory itself and then nothing, the recreated directory
+  is a new inode inotify never watched, and `watching` stayed `true` for a
+  watch that would never see another renewal.
+
+- **How the watcher now tells a dead directory from a live one.**
+  What both platforms DO deliver is an event that names the watched directory
+  rather than an entry inside it - inotify spells it as the directory's
+  basename, Windows as its full path - and that spelling is what the watcher
+  now acts on: it stats the directory and compares the inode identity recorded
+  at start. Gone, or a different inode at the same path, is a dead watch,
+  closed and reported through the same lost-watch ids and the same sticky
+  degraded state as a platform-reported death. A replaced directory gets one
+  final debounced read first, because what replaced it is very often the
+  renewal, and on the primary that reload is broadcast. An event that names an
+  entry never stats, so a renewal burst costs nothing new, and the same
+  spelling on a live directory - a `chmod`, a subdirectory appearing - keeps
+  its inode and reloads as before. Nothing detects a directory moved aside on
+  Windows: that produces no event at all.
+  `test/tls-reload.test.js` drives every branch through the injected `watchFs`
+  and `statFs` seams, and two cases remove and rebuild a real directory under
+  a real `fs.watch` so the spelling the seams assume is the one the platform
+  sends; both are mutation-checked.
 
 - **The cluster primary reads its TLS degraded-state policy from the ledger.**
   Which degradations a success can clear is policy, and the primary carried a

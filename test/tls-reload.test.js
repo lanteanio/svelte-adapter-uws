@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseSniHosts, readCertIdentity, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
@@ -354,6 +354,261 @@ describe('createCertWatcher (injected clock + fs)', () => {
 		const watchFs = () => { const e = new Error("ENOENT: no such file or directory, watch '/no/such/dir'"); e.code = 'ENOENT'; throw e; };
 		const w = createCertWatcher({ certPath: '/no/such/dir/live.crt', onChange: () => {}, watchFs });
 		expect(() => w.start()).toThrow(/ENOENT/);
+	});
+});
+
+// A watched directory that is removed, moved or replaced is a dead watch on
+// every platform, and no platform reports it through `error`: inotify drops
+// the watch with the inode and says nothing more, and a Windows directory
+// handle narrates its own deletion at ~100k events a second for as long as
+// the process runs. What every platform does deliver is an event that names
+// the watched directory ITSELF (inotify as its basename, Windows as its full
+// path) rather than an entry inside it. These cases drive that spelling
+// through the injected seams and pin what the watcher decides from the
+// directory's identity; the two real-filesystem cases below them prove the
+// spelling is what the platform actually sends.
+describe('createCertWatcher: a directory that goes away under the watch', () => {
+	function fakeTimers() {
+		let seq = 0;
+		const pending = new Map();
+		return {
+			setTimer: (cb, ms) => { const id = ++seq; pending.set(id, { cb, at: ms }); return id; },
+			clearTimer: (id) => { pending.delete(id); },
+			fireAll: () => { const cbs = [...pending.values()].map((p) => p.cb); pending.clear(); cbs.forEach((cb) => cb()); },
+			size: () => pending.size
+		};
+	}
+	const ALIVE = { dev: 7n, ino: 100n };
+	const enoent = () => Object.assign(new Error("ENOENT: no such file or directory, stat '/certs'"), { code: 'ENOENT' });
+
+	/** A watcher over injected seams; `stats` is the queue of identity answers. */
+	function build(stats, extra = {}) {
+		const t = fakeTimers();
+		let fsCallback = null;
+		let closed = 0;
+		let statCalls = 0;
+		const seen = [];
+		let reloads = 0;
+		const w = createCertWatcher({
+			certPath: '/certs/live.crt', debounceMs: 500,
+			onChange: () => { reloads++; },
+			onError: (err) => seen.push(err),
+			watchFs: (_dir, _opts, cb) => { fsCallback = cb; return { close() { closed++; } }; },
+			statFs: () => {
+				statCalls++;
+				const next = stats.length > 1 ? stats.shift() : stats[0];
+				if (next instanceof Error) throw next;
+				return next;
+			},
+			setTimer: t.setTimer, clearTimer: t.clearTimer,
+			...extra
+		});
+		return { w, t, event: (type, name) => fsCallback(type, name), closed: () => closed, statCalls: () => statCalls, seen, reloads: () => reloads };
+	}
+
+	it('an event naming an entry never stats, and reloads as before', () => {
+		// The one stat is the identity taken at start. Renewal bursts are
+		// entry events, so the reload path costs nothing new.
+		const s = build([ALIVE]);
+		s.w.start();
+		expect(s.statCalls()).toBe(1);
+		s.event('rename', 'live.crt');
+		s.event('change', 'live.crt');
+		s.event('rename', 'privkey.pem');
+		expect(s.statCalls()).toBe(1);
+		expect(s.t.size()).toBe(1);
+		s.t.fireAll();
+		expect(s.reloads()).toBe(1);
+		expect(s.seen).toEqual([]);
+		expect(s.closed()).toBe(0);
+	});
+
+	it('closes the watch and reports it lost when the directory named in the event is gone', () => {
+		// Windows spelling: the directory's own long path, and no error event
+		// ever. This is the first event of the storm, and the close is what
+		// ends the storm.
+		const s = build([ALIVE, enoent()]);
+		s.w.start();
+		s.event('rename', '\\\\?\\C:\\certs');
+		expect(s.closed()).toBe(1);
+		expect(s.seen.length).toBe(1);
+		expect(s.seen[0].code).toBe('ENOENT');
+		// Nothing to read: no reload is scheduled into a directory that is not there.
+		expect(s.t.size()).toBe(0);
+		// The storm keeps arriving; this watch is no longer listening.
+		s.event('rename', '\\\\?\\C:\\certs');
+		s.event('rename', 'live.crt');
+		expect(s.closed()).toBe(1);
+		expect(s.seen.length).toBe(1);
+		expect(s.t.size()).toBe(0);
+	});
+
+	it('the inotify spelling is the basename, and a moved directory is gone the same way', () => {
+		const s = build([ALIVE, enoent()]);
+		s.w.start();
+		s.event('rename', 'certs');
+		expect(s.closed()).toBe(1);
+		expect(s.seen.length).toBe(1);
+		expect(s.t.size()).toBe(0);
+	});
+
+	it('a directory replaced by a new one at the same path is reported lost and read once more', () => {
+		// The path still resolves, so a stat that only asked "does it exist"
+		// would keep a dead watch alive forever. The inode is what changed.
+		const s = build([ALIVE, { dev: 7n, ino: 101n }]);
+		s.w.start();
+		s.event('rename', 'certs');
+		expect(s.closed()).toBe(1);
+		expect(s.seen.length).toBe(1);
+		expect(s.seen[0].message).toMatch(/replaced by a different directory/);
+		// What replaced it is very often the renewal, so it gets the read a
+		// live watch would have given it - once, debounced, after the report.
+		expect(s.t.size()).toBe(1);
+		s.t.fireAll();
+		expect(s.reloads()).toBe(1);
+		// And that is the last thing this watch does.
+		s.event('rename', 'live.crt');
+		expect(s.t.size()).toBe(0);
+		expect(s.reloads()).toBe(1);
+	});
+
+	it('a directory-level event on a live directory is an ordinary reload', () => {
+		// chmod on the directory, or a subdirectory appearing, is spelled the
+		// same way as a deletion on inotify. Same inode: alive, reload.
+		const s = build([ALIVE]);
+		s.w.start();
+		s.event('change', 'certs');
+		s.event('rename', null);
+		s.event('rename', '');
+		expect(s.statCalls()).toBe(4);
+		expect(s.closed()).toBe(0);
+		expect(s.seen).toEqual([]);
+		expect(s.t.size()).toBe(1);
+		s.t.fireAll();
+		expect(s.reloads()).toBe(1);
+	});
+
+	it('a filesystem that reports no inode still detects a removed directory, and never a replaced one', () => {
+		const s = build([{ dev: 7n, ino: 0n }, { dev: 7n, ino: 0n }, enoent()]);
+		s.w.start();
+		s.event('rename', 'certs');
+		expect(s.closed()).toBe(0);
+		expect(s.t.size()).toBe(1);
+		s.event('rename', 'certs');
+		expect(s.closed()).toBe(1);
+		expect(s.seen[0].code).toBe('ENOENT');
+	});
+
+	it('a pending reload is dropped when the directory is gone, and stop() clears the final read of a replaced one', () => {
+		const gone = build([ALIVE, enoent()]);
+		gone.w.start();
+		gone.event('rename', 'live.crt');
+		expect(gone.t.size()).toBe(1);
+		gone.event('rename', 'certs');
+		expect(gone.t.size()).toBe(0);
+		gone.t.fireAll();
+		expect(gone.reloads()).toBe(0);
+
+		const replaced = build([ALIVE, { dev: 7n, ino: 101n }]);
+		replaced.w.start();
+		replaced.event('rename', 'certs');
+		expect(replaced.t.size()).toBe(1);
+		replaced.w.stop();
+		expect(replaced.t.size()).toBe(0);
+		replaced.t.fireAll();
+		expect(replaced.reloads()).toBe(0);
+	});
+
+	it('an identity that cannot be taken at start does not fail the start', () => {
+		// The directory vanished between the watch and the stat; the watch is
+		// already dead and its first event says so.
+		const s = build([enoent()]);
+		expect(() => s.w.start()).not.toThrow();
+		s.event('rename', 'certs');
+		expect(s.closed()).toBe(1);
+		expect(s.seen.length).toBe(1);
+	});
+});
+
+// The same two outcomes against the real filesystem and the real fs.watch, so
+// the spelling the mocked cases assume is the one the platform sends. These
+// wait on real events; the debounce is short so a replaced directory's final
+// read is observed too.
+describe('createCertWatcher against a real directory', () => {
+	async function until(predicate, ms = 5000) {
+		const deadline = Date.now() + ms;
+		while (!predicate()) {
+			if (Date.now() > deadline) throw new Error('condition not met within ' + ms + 'ms');
+			await new Promise((r) => setTimeout(r, 10));
+		}
+	}
+
+	function scratch() {
+		const root = mkdtempSync(join(tmpdir(), 'tls-watch-dir-'));
+		const dir = join(root, 'certs');
+		mkdirSync(dir);
+		writeFileSync(join(dir, 'live.crt'), 'boot');
+		return { root, dir };
+	}
+
+	it('removing the watched directory ends the watch with one report', async () => {
+		const { root, dir } = scratch();
+		const seen = [];
+		let reloads = 0;
+		const w = createCertWatcher({
+			certPath: join(dir, 'live.crt'), debounceMs: 20,
+			onChange: () => { reloads++; }, onError: (err) => seen.push(err),
+			setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (t) => clearTimeout(t)
+		});
+		w.start();
+		try {
+			rmSync(dir, { recursive: true, force: true });
+			await until(() => seen.length > 0);
+			expect(seen.length).toBe(1);
+			expect(seen[0].code).toBe('ENOENT');
+			// Whatever the platform keeps sending, the report stays at one and
+			// nothing reads a directory that is not there.
+			await new Promise((r) => setTimeout(r, 150));
+			expect(seen.length).toBe(1);
+			expect(reloads).toBe(0);
+		} finally {
+			w.stop();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it('replacing the watched directory ends the watch with one report and one final read', async () => {
+		const { root, dir } = scratch();
+		const seen = [];
+		let reloads = 0;
+		const w = createCertWatcher({
+			certPath: join(dir, 'live.crt'), debounceMs: 20,
+			onChange: () => { reloads++; }, onError: (err) => seen.push(err),
+			setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (t) => clearTimeout(t)
+		});
+		w.start();
+		try {
+			// Removed and rebuilt in one synchronous stretch, so the platform's
+			// events for the removal are delivered against the replacement -
+			// the shape a restore or a volume remount lands in. (Moving the
+			// directory aside instead is silent on Windows: no event, no
+			// storm, and nothing for any watcher to decide on.)
+			rmSync(dir, { recursive: true, force: true });
+			mkdirSync(dir);
+			writeFileSync(join(dir, 'live.crt'), 'renewed');
+			await until(() => seen.length > 0);
+			expect(seen.length).toBe(1);
+			await until(() => reloads > 0);
+			expect(reloads).toBe(1);
+			// The watch is closed: a write into the new directory reaches nothing.
+			writeFileSync(join(dir, 'live.crt'), 'renewed again');
+			await new Promise((r) => setTimeout(r, 150));
+			expect(reloads).toBe(1);
+			expect(seen.length).toBe(1);
+		} finally {
+			w.stop();
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

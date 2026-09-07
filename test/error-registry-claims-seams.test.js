@@ -274,6 +274,99 @@ describe('ADAPTER-ERR-TLS-PRIMARY-WATCH', () => {
 	});
 });
 
+describe('ADAPTER-ERR-TLS-WATCH-LOST and ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST', () => {
+	// Both entries name two ways a started watch dies: the platform reports it
+	// as an error, or the watcher itself finds the certificate directory gone or
+	// replaced. Each producer is driven here through the watcher's injected
+	// seams, so the cause text cannot describe a path the code does not have.
+	function timers() {
+		const pending = [];
+		return {
+			setTimer: (cb) => { pending.push(cb); return pending.length; },
+			clearTimer: () => {},
+			fire: () => { const cbs = pending.splice(0); cbs.forEach((cb) => cb()); }
+		};
+	}
+
+	function watcher(statFs) {
+		const t = timers();
+		let fsCallback = null;
+		const fake = { closed: 0, listeners: new Map(), close() { this.closed++; }, on(ev, fn) { this.listeners.set(ev, fn); } };
+		const reported = [];
+		let reloads = 0;
+		const w = createCertWatcher({
+			certPath: join(scratch, 'certs', 'cert.pem'),
+			onChange: () => { reloads++; },
+			onError: (err) => reported.push(err),
+			watchFs: (_dir, _opts, cb) => { fsCallback = cb; return fake; },
+			statFs,
+			setTimer: t.setTimer, clearTimer: t.clearTimer
+		});
+		w.start();
+		return { fake, reported, event: (type, name) => fsCallback(type, name), reloads: () => reloads, fire: t.fire };
+	}
+
+	for (const id of [ADAPTER_ERROR_IDS.TLS_WATCH_LOST, ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH_LOST]) {
+		it(`${id}: the cause names both producers and the code has both`, () => {
+			const entry = entryFor(id);
+			expect(entry.cause).toMatch(/error/);
+			expect(entry.cause).toMatch(/removed, moved or replaced/);
+			expect(entry.cause).toMatch(/identity/);
+
+			// Producer one: the platform's own error event.
+			const byError = watcher(() => ({ dev: 1n, ino: 5n }));
+			byError.fake.listeners.get('error')(Object.assign(new Error('watch died'), { code: 'EPERM' }));
+			expect(byError.reported.length).toBe(1);
+			expect(byError.fake.closed).toBe(1);
+
+			// Producer two: an event naming the directory itself, and the directory
+			// is gone. No error event is ever raised on this path.
+			let stats = 0;
+			const byIdentity = watcher(() => {
+				if (stats++ === 0) return { dev: 1n, ino: 5n };
+				throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+			});
+			byIdentity.event('rename', 'certs');
+			expect(byIdentity.reported.length).toBe(1);
+			expect(byIdentity.reported[0].code).toBe('ENOENT');
+			expect(byIdentity.fake.closed).toBe(1);
+		});
+
+		it(`${id}: the consequence's one final read of a replaced directory is real, and a removed one gets none`, () => {
+			const entry = entryFor(id);
+			expect(entry.consequence).toMatch(/read once more/);
+
+			let stats = 0;
+			const replaced = watcher(() => ({ dev: 1n, ino: stats++ === 0 ? 5n : 6n }));
+			replaced.event('rename', 'certs');
+			expect(replaced.reported.length).toBe(1);
+			replaced.fire();
+			expect(replaced.reloads(), 'the replacement is read once').toBe(1);
+
+			let gone = 0;
+			const removed = watcher(() => {
+				if (gone++ === 0) return { dev: 1n, ino: 5n };
+				throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+			});
+			removed.event('rename', 'certs');
+			removed.fire();
+			expect(removed.reloads(), 'nothing reads a directory that is not there').toBe(0);
+		});
+
+		it(`${id}: the entry does not promise a retry the code does not have`, () => {
+			const entry = entryFor(id);
+			expect(entry.automaticRecovery).toMatch(/^None\./);
+			expect(entry.automaticRecovery).toMatch(/not re-armed/);
+		});
+	}
+
+	it('the primary console line carries the indexed prefix and the stable id', () => {
+		const line = adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH_LOST);
+		expect(line.startsWith('[tls] primary cert watch stopped after running')).toBe(true);
+		expect(line).toContain('[ADAPTER-ERR-TLS-PRIMARY-WATCH-LOST]');
+	});
+});
+
 describe('ADAPTER-ERR-TLS-DEGRADED-EXPIRY', () => {
 	// The entry's cause has two conditions that must BOTH hold before the line
 	// exists: the degraded state, and a recorded expiry inside the alert

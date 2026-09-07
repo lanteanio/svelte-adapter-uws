@@ -159,6 +159,19 @@ describe('ADAPTER-ERR-TLS-WATCH: the degraded-state ledger', () => {
 			expect(source).toMatch(/function primaryTlsDegraded[\s\S]*?primaryTlsLedger\.failed\(/);
 			expect(source).toMatch(/function primaryTlsRecovered[\s\S]*?primaryTlsLedger\.recovered\(/);
 		});
+
+		it('only the ledger disarms the sentinel', () => {
+			// The sentinel is what the sticky watch reason keeps armed, and the
+			// ledger is the only party that knows whether a success may disarm it.
+			// A `primaryTlsDisarm()` call anywhere else - a recovery site that
+			// disarms on its own after asking the ledger, say - would end the
+			// sentinel through a dead watch, which is the defect the ledger exists
+			// to prevent. So the name appears exactly twice: its definition, and
+			// its handover to the ledger as `disarmSentinel`.
+			const mentions = source.match(/primaryTlsDisarm\b/g) ?? [];
+			expect(mentions.length).toBe(2);
+			expect(source).toMatch(/disarmSentinel:\s*primaryTlsDisarm\b/);
+		});
 	});
 
 	it('without a dead watch, repeated failures collapse into one recovery', () => {

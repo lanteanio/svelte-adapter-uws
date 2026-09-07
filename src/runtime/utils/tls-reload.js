@@ -23,8 +23,8 @@
 // seeded harness (check-determinism).
 
 import { X509Certificate, createPrivateKey } from 'node:crypto';
-import { readFileSync, watch as fsWatch } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, statSync as fsStatSync, watch as fsWatch } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { setTimer as seamSetTimer, clearTimer as seamClearTimer } from '../runtime.js';
 
 /**
@@ -295,22 +295,40 @@ export function applyServerNames(app, source, prev) {
  * deterministic under test and routed through the injectable timer.
  *
  * `start()` throws what the platform throws when the watch cannot be
- * established at all; `onError` reports a watch that dies AFTER starting, which
- * arrives as an event rather than a throw and is otherwise fatal (see below).
- * Both mean the same thing to a caller - no renewal will be seen again - and
- * neither is retried.
+ * established at all; `onError` reports a watch that dies AFTER starting.
+ * That death reaches the watcher two ways, and both end the same: the watch
+ * is closed, the caller hears about it once, and nothing re-arms it.
  *
- * @param {{ certPath: string, onChange: () => void, onError?: (err: any) => void, dir?: string, debounceMs?: number, watchFs?: typeof import('node:fs').watch, setTimer?: Function, clearTimer?: Function }} config
+ * The platform may report its own failure as an `error` event, which with no
+ * listener is rethrown and otherwise fatal (see `start`). Or it may not: a
+ * watched directory that is removed, moved or replaced is a dead watch on
+ * every platform - inotify watches the inode and drops the watch with it, and
+ * a Windows directory handle keeps narrating its own deletion - and none of
+ * them says so through `error`. What they do say is an event that names the
+ * WATCHED DIRECTORY ITSELF rather than an entry inside it (inotify spells it
+ * as the directory's basename, Windows as its full path), so that spelling is
+ * the trigger for a check of the directory's identity: gone, or a different
+ * inode at the same path, means the watch is dead. A replaced directory gets
+ * one final debounced read, because what replaced it is very often the
+ * renewal itself; a removed one gets none. Nothing else costs a stat - an
+ * event naming an entry never does - and the storm a deleted Windows
+ * directory produces is closed on its first event.
+ *
+ * @param {{ certPath: string, onChange: () => void, onError?: (err: any) => void, dir?: string, debounceMs?: number, watchFs?: typeof import('node:fs').watch, statFs?: typeof import('node:fs').statSync, setTimer?: Function, clearTimer?: Function }} config
  * @returns {{ start: () => void, stop: () => void }}
  */
 export function createCertWatcher(config) {
 	const dir = config.dir || dirname(config.certPath);
+	const base = basename(dir);
 	const debounceMs = typeof config.debounceMs === 'number' && config.debounceMs >= 0 ? config.debounceMs : 500;
 	const watchFs = config.watchFs || fsWatch;
+	const statFs = config.statFs || fsStatSync;
 	const setTimer = config.setTimer || seamSetTimer;
 	const clearTimer = config.clearTimer || seamClearTimer;
 	let watcher = null;
 	let timer = null;
+	/** The watched directory's inode identity at start, or null when the platform reports none. */
+	let identity = null;
 
 	function schedule() {
 		if (timer) clearTimer(timer);
@@ -319,33 +337,91 @@ export function createCertWatcher(config) {
 		timer = setTimer(() => { timer = null; config.onChange(); }, debounceMs);
 	}
 
+	/** @returns {{ dev: bigint, ino: bigint } | null} null on a filesystem that reports no inode */
+	function identityOf() {
+		const st = statFs(dir, { bigint: true });
+		if (typeof st.ino !== 'bigint' || st.ino === 0n) return null;
+		return { dev: st.dev, ino: st.ino };
+	}
+
+	/**
+	 * Whether an event names an entry inside the directory. A non-recursive
+	 * watch delivers a bare entry name for those; the directory's own basename,
+	 * its full path, or no name at all is the platform talking about the
+	 * watched directory itself.
+	 * @param {string | null | undefined} name
+	 */
+	function namesAnEntry(name) {
+		if (typeof name !== 'string' || name.length === 0 || name === base) return false;
+		for (let i = 0; i < name.length; i++) {
+			const c = name.charCodeAt(i);
+			if (c === 47 || c === 92) return false;
+		}
+		return true;
+	}
+
+	/** The watch is dead: close it, drop what was pending, tell the caller once. */
+	function lost(started, err) {
+		if (watcher !== started) return;
+		watcher = null;
+		if (timer) { clearTimer(timer); timer = null; }
+		try { started.close(); } catch { /* already gone */ }
+		if (config.onError) config.onError(err);
+	}
+
+	function onEvent(started, name) {
+		if (watcher !== started) return;
+		if (namesAnEntry(name)) { schedule(); return; }
+		// The event is about the directory itself. That is also what a chmod
+		// or a subdirectory count change on a live directory looks like, so
+		// the identity decides, not the spelling.
+		let now;
+		try {
+			now = identityOf();
+		} catch (err) {
+			lost(started, err);
+			return;
+		}
+		if (identity !== null && now !== null && (now.dev !== identity.dev || now.ino !== identity.ino)) {
+			const err = new Error(`the watched certificate directory was replaced by a different directory at the same path, watch '${dir}'`);
+			lost(started, err);
+			// What replaced it is present and readable, and is very often the
+			// renewal - so it gets the read a live watch would have given it.
+			// The timer outlives the watcher; stop() still clears it.
+			schedule();
+			return;
+		}
+		schedule();
+	}
+
 	return {
 		start() {
 			if (watcher) return;
 			// persistent:false so the watcher never holds the event loop open.
-			const started = watchFs(dir, { persistent: false }, () => schedule());
+			const started = watchFs(dir, { persistent: false }, (_type, name) => onEvent(started, name));
 			watcher = started;
-			// An FSWatcher reports a failure that happens AFTER it started - the
-			// directory going away, a permission change, the platform's watch
-			// limit - as an `error` EVENT, and an `error` event with no listener
-			// is rethrown by EventEmitter. Unhandled, that is an uncaught
-			// exception raised by a certificate watcher, which on a cluster
-			// primary takes the whole fleet with it. So the listener is attached
-			// whether or not the caller passes `onError`: not crashing is the
-			// point, and being told is the option.
+			try {
+				identity = identityOf();
+			} catch {
+				// The directory went away between the watch and the stat. The
+				// watch is already dead, and its first event says so.
+				identity = null;
+			}
+			// An FSWatcher reports a failure that happens AFTER it started - a
+			// permission change, the platform's watch limit - as an `error`
+			// EVENT, and an `error` event with no listener is rethrown by
+			// EventEmitter. Unhandled, that is an uncaught exception raised by a
+			// certificate watcher, which on a cluster primary takes the whole
+			// fleet with it. So the listener is attached whether or not the
+			// caller passes `onError`: not crashing is the point, and being told
+			// is the option.
 			//
 			// Nothing re-arms a watch that has died, so it is closed here rather
 			// than left to fire again, and the caller hears about it once. A
 			// late error from a watcher that `stop()` already replaced is
 			// dropped - that one is not this watch any more.
 			if (started && typeof started.on === 'function') {
-				started.on('error', (err) => {
-					if (watcher !== started) return;
-					watcher = null;
-					if (timer) { clearTimer(timer); timer = null; }
-					try { started.close(); } catch { /* already gone */ }
-					if (config.onError) config.onError(err);
-				});
+				started.on('error', (err) => lost(started, err));
 			}
 		},
 		stop() {
