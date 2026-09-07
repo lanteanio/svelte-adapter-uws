@@ -12,7 +12,7 @@
 import { WS_CAPS, WS_SHARED_COHORTS } from '../utils.js';
 import { wireIdAnnounce } from '../wire.js';
 import { counters } from './state.js';
-import { bumpOut } from './pressure-metrics.js';
+import { sendControl, CONTROL_DELIVERED, CONTROL_REFUSED } from './control-egress.js';
 import { wireStatePoisoned } from './wire-state.js';
 import { acquireSharedWireId, releaseSharedWireId } from './shared-wire-id.js';
 
@@ -45,17 +45,19 @@ export function joinSharedCohort(ws, ud, topic, capability) {
 	const caps = ud[WS_CAPS];
 	if (caps && caps.has(capability) && !wireStatePoisoned(ud, capability)) {
 		const id = acquireSharedWireId(topic);
-		const announce = wireIdAnnounce(topic, id);
-		let result;
-		try { result = ws.send(announce, false, false); }
-		catch { counters.closedWsAborts++; releaseSharedWireId(topic); return; }
-		if (result === 2) {
-			// Dropped announce: undo the reference and serve this connection JSON.
+		// The announce is a control frame the subscribe bought; it is charged to
+		// the connection's control budget like every other one.
+		const sent = sendControl(ws, wireIdAnnounce(topic, id));
+		if (sent !== CONTROL_DELIVERED) {
+			// Undo the reference the announce would have held. Refused past the
+			// backpressure limit, the connection is still there and is served
+			// JSON; gone or just cut, there is nothing left to subscribe.
 			releaseSharedWireId(topic);
-			try { ws.subscribe(json); } catch { counters.closedWsAborts++; }
+			if (sent === CONTROL_REFUSED) {
+				try { ws.subscribe(json); } catch { counters.closedWsAborts++; }
+			}
 			return;
 		}
-		bumpOut(ws, announce);
 		let cohorts = ud[WS_SHARED_COHORTS];
 		if (!cohorts) { cohorts = new Set(); ud[WS_SHARED_COHORTS] = cohorts; }
 		cohorts.add(topic);

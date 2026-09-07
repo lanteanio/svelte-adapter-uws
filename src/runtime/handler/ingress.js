@@ -70,12 +70,16 @@ function registry() {
  * @param {string} kind - the binding kind (e.g. `'smooth.command:1'`)
  * @param {{
  *   decode: (payload: Uint8Array, schemaVersion: number, seq: number, state: any) => any,
- *   route: (ws: any, target: any, value: any, platform: any, seq: number) => unknown | Promise<unknown>,
+ *   route: (ws: any, target: any, value: any, platform: any, seq: number, sendControl: (ws: any, payload: string) => unknown) => unknown | Promise<unknown>,
  *   state?: { onAttach?: (ws: any) => any }
  * }} handler
  *   `decode` turns a frame payload into the routed value (return null/undefined
  *   to drop the frame); `route` delivers it; the optional `state` factory makes
- *   one per-binding decoder state (stateless codecs omit it).
+ *   one per-binding decoder state (stateless codecs omit it). A route that
+ *   answers the client with a control frame of its own (a denial) sends it
+ *   through `sendControl`, the calling surface's budgeted control sender,
+ *   never through `ws.send` - a denial is an answer the client bought with a
+ *   few bytes, which is exactly what the control-egress budget bounds.
  */
 export function registerIngress(kind, handler) {
 	if (typeof kind === 'string' && handler && typeof handler.decode === 'function' && typeof handler.route === 'function') {
@@ -167,8 +171,10 @@ export function bindIngress(ud, ws, id, kind, target) {
  * @param {any} ud - ws.getUserData()
  * @param {ArrayBuffer | Uint8Array} message
  * @param {any} platform
+ * @param {(ws: any, payload: string) => unknown} sendControl - the calling
+ *   surface's budgeted control sender, handed to the route for its denials
  */
-export function dispatchIngressFrame(ws, ud, message, platform) {
+export function dispatchIngressFrame(ws, ud, message, platform, sendControl) {
 	const map = ud[WS_INGRESS_BINDINGS];
 	if (!map) return;
 	const bytes = message instanceof Uint8Array ? message : new Uint8Array(message);
@@ -187,7 +193,7 @@ export function dispatchIngressFrame(ws, ud, message, platform) {
 	}
 	if (value === null || value === undefined) return;
 	try {
-		const routed = binding.route(ws, binding.target, value, platform, parsed.seq);
+		const routed = binding.route(ws, binding.target, value, platform, parsed.seq, sendControl);
 		if (routed && typeof routed.then === 'function') {
 			return Promise.resolve(routed).catch(() => undefined);
 		}

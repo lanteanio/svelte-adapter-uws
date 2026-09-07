@@ -414,6 +414,15 @@ application). Revision 1 defines these `code` values:
   subscription is NOT installed. The client MUST send a `ref` on any subscribe
   that asks for recovery.
 
+A server bounds the bytes of control frames it will send one connection per
+unit of time - every frame in this section is an answer the client asked for, so
+the channel amplifies - and a connection that exhausts that bound is CLOSED with
+WebSocket close code `4429`, with no `error` frame before it. A client SHOULD
+treat `4429` as throttling: reconnect on a slower schedule rather than treat it
+as terminal, and stop whatever was driving the control traffic. The bundled
+client does exactly this. `4429` is a close code, not an `error` code, so it is
+not in the registry below and adds nothing to any frame.
+
 The `code` set is a registry (appendix C.4): a client MUST ignore an `error`
 frame whose `code` it does not recognize (per section 1.4). Codes are additive
 within a revision - a new one does not change any existing frame's shape, and

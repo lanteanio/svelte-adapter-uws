@@ -1,8 +1,7 @@
 import { WS_TOPIC_IDS, WS_WIRE_STATE } from '../utils.js';
 import { allocWireId, wireIdAnnounce } from '../wire.js';
-import { counters } from './state.js';
-import { bumpOut } from './pressure-metrics.js';
 import { wsDebug } from './config.js';
+import { sendControl, CONTROL_DELIVERED } from './control-egress.js';
 
 /**
  * Resolve (allocating on first use) the per-connection binary topic-id for a
@@ -14,27 +13,24 @@ import { wsDebug } from './config.js';
  * Per-connection and reset on reconnect (a reconnect is a new connection with
  * fresh userData).
  *
- * Returns -1 when the announce frame itself was dropped by backpressure
- * (ws.send returned 2): the client never learns the mapping, and the mapping
- * is never re-announced, so every later binary frame for this topic would be
- * undecodable on this connection. Callers must send the JSON envelope for the
- * current frame and poison the capability (see poisonWireState). A send
- * result of 0 (enqueued behind backpressure) still delivers in order and is
- * success here; only 2 is a drop.
+ * The announce is a control frame the client's subscribe bought, so it goes
+ * out through the budgeted control sender like every other one.
+ *
+ * Returns -1 when the announce did not reach the socket - refused past the
+ * backpressure limit, or the connection gone or just cut: the client never
+ * learns the mapping, and the mapping is never re-announced, so every later
+ * binary frame for this topic would be undecodable on this connection. Callers
+ * must send the JSON envelope for the current frame and poison the capability
+ * (see poisonWireState). A frame queued behind backpressure still delivers in
+ * order and is success here.
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  * @param {any} ud - ws.getUserData()
  * @param {string} topic
- * @returns {number} the topic id, or -1 when the announce was dropped
+ * @returns {number} the topic id, or -1 when the announce was not delivered
  */
 export function ensureWireId(ws, ud, topic) {
 	const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
-	if (isNew) {
-		const announce = wireIdAnnounce(topic, id);
-		let result;
-		try { result = ws.send(announce, false, false); } catch { counters.closedWsAborts++; return id; }
-		if (result === 2) return -1;
-		bumpOut(ws, announce);
-	}
+	if (isNew && sendControl(ws, wireIdAnnounce(topic, id)) !== CONTROL_DELIVERED) return -1;
 	return id;
 }
 

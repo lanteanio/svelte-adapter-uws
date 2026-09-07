@@ -13,9 +13,14 @@
 // the queue in MEMORY, which is why this is a CPU and bandwidth problem.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
-import { createByteBudget } from '../src/runtime/utils/byte-budget.js';
+import { createByteBudget, controlFrameBytes } from '../src/runtime/utils/byte-budget.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
+import { encodeValue } from '../src/runtime/wire-value.js';
+import { GAME_INGRESS_SCHEMA_VERSION } from '../src/runtime/handler/game-ingress.js';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
+import { expectStatement } from './helpers/source-pins.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
 
@@ -157,4 +162,105 @@ describeUWS('the control-egress budget against the real runtime', () => {
 			.toBeLessThan(MAX_CONTROL_EGRESS_BYTES / 4);
 		ws.close();
 	}, 60000);
+
+	it('cuts a connection that floods the binary game lane with frames it holds no grant for', async () => {
+		// The other amplifier on this channel: a twelve-byte `0x03` game frame
+		// from a connection with no publish grant is answered with a fifty-byte
+		// `game-denied`. The denial is built in a module shared by every surface,
+		// so it reaches the socket through the surface's own sender or not at
+		// all - this drives the production one.
+		const { ws, state } = await connect(server.wsUrl);
+		await denialFlood(ws, state);
+		expect(state.closeCode, 'the connection must be cut').toBe(CONTROL_FLOOD_CLOSE_CODE);
+		expect(state.frames, 'the denials flowed before the cut, so the lane was the one answering')
+			.toBeGreaterThan(1000);
+		expect(state.bytes, 'the cut must land near the budget, not far past it')
+			.toBeLessThan(MAX_CONTROL_EGRESS_BYTES * 2);
+	}, 60000);
+});
+
+/**
+ * Bind the game lane and flood it with grant-less frames until the server
+ * cuts the connection or the cap is reached. Shared by the production and the
+ * published-test-server cases, which must both cut.
+ */
+async function denialFlood(ws, state) {
+	const until = async (pred, label) => {
+		for (let i = 0; i < 200 && !pred(); i++) await settle(10);
+		if (!pred()) throw new Error(label + ' never arrived');
+	};
+	ws.send(JSON.stringify({ type: 'hello', caps: ['wire.ingress:1'] }));
+	await until(() => state.last.some((t) => t.includes('"ingress-ok"')), 'ingress-ok');
+	ws.send(JSON.stringify({ type: 'ingress-bind', id: 1, kind: 'game:1' }));
+	await until(() => state.last.some((t) => t.includes('"ingress-bound"')), 'ingress-bound');
+	// Bind confirmed; the connection never sent `arm`, so it holds no grant and
+	// every frame below is refused.
+	const frame = Buffer.from(buildBinaryFrame(GAME_INGRESS_SCHEMA_VERSION, 1, 1, encodeValue(['move', { x: 1 }, 7])));
+	for (let chunk = 0; chunk < 60 && state.closeCode === null; chunk++) {
+		if (ws.readyState !== WebSocket.OPEN) break;
+		for (let n = 0; n < 5000; n++) ws.send(frame);
+		await settle(20);
+	}
+	await settle(500);
+}
+
+describeUWS('the control-egress budget on the published test server', () => {
+	it('cuts a game-lane denial flood the same way the production handler does', async () => {
+		// Same budget, same constants, same shared route - and a bound present
+		// in production and absent here is exactly the bug a regression test
+		// written against this server would then fail to see.
+		const { createTestServer } = await import('../src/testing.js');
+		const server = await createTestServer({ handler: { message() {} } });
+		try {
+			const { ws, state } = await connect(server.wsUrl);
+			await denialFlood(ws, state);
+			expect(state.closeCode).toBe(CONTROL_FLOOD_CLOSE_CODE);
+			expect(state.frames).toBeGreaterThan(1000);
+			expect(state.bytes).toBeLessThan(MAX_CONTROL_EGRESS_BYTES * 2);
+		} finally {
+			await server.close();
+		}
+	}, 60000);
+});
+
+describe('the control frame charge', () => {
+	it('is the frame\'s size on the wire, not its length in code units', () => {
+		// A denial echoes the topic it refuses; a topic of three-byte characters
+		// leaves as three bytes per character. Charging `length` would let such
+		// a connection move three times the ceiling before it is cut.
+		const ascii = '{"type":"subscribe-denied","topic":"room:1"}';
+		expect(controlFrameBytes(ascii)).toBe(ascii.length);
+		const wide = '{"type":"subscribe-denied","topic":"raum:über"}';
+		expect(controlFrameBytes(wide)).toBe(Buffer.byteLength(wide, 'utf8'));
+		expect(controlFrameBytes(wide)).toBeGreaterThan(wide.length);
+	});
+});
+
+describe('every surface hands its control sender to the shared routes', () => {
+	// The game denial and the wire-id announces are built in modules shared by
+	// the three socket surfaces, which cannot import any one surface's sender
+	// without dragging that surface's plumbing into the others. So the sender
+	// travels as an argument, and these pins hold each surface to passing it and
+	// each shared module to sending through nothing else. A raw `ws.send` in one
+	// of these files is an uncharged control frame on every surface at once.
+	const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+	it('the three ingress dispatch sites pass the surface sender', () => {
+		expectStatement(read('../src/runtime/handler.js'),
+			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControl);', 'handler.js');
+		expectStatement(read('../src/testing.js'),
+			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControlT);', 'testing.js');
+		expectStatement(read('../src/vite.js'),
+			'dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform, sendControlWrappedV);', 'vite.js');
+	});
+
+	it('the dev plugin refuses an overloaded message through the same sender', () => {
+		expectStatement(read('../src/vite.js'), 'sendControlWrappedV(wrapped, messageOverloadedFrame(rejection));', 'vite.js');
+	});
+
+	it('the shared modules that answer a client hold no raw send', () => {
+		for (const rel of ['../src/runtime/handler/game-ingress.js', '../src/runtime/handler/wire-state.js', '../src/runtime/handler/cohort.js']) {
+			expect(read(rel), rel).not.toMatch(/\bws\.send\(/);
+		}
+	});
 });

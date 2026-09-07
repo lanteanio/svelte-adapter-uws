@@ -611,7 +611,7 @@ if (WS_ENABLED) {
 		sendControl(ws, messageOverloadedFrame(rejection));
 	};
 	const runIngressApplicationWork = (ws, context) =>
-		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
+		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControl);
 	const runGameApplicationWork = (ws, context) => {
 		const msg = context.msg;
 		const gud = ws.getUserData();

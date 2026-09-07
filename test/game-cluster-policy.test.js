@@ -7,7 +7,7 @@ import {
 	gameLaneClusterSafe,
 	routeGameFrame
 } from '../src/runtime/handler/game-ingress.js';
-import { WS_PUBLISH_GRANT, WS_STATS } from '../src/runtime/utils.js';
+import { WS_PUBLISH_GRANT } from '../src/runtime/utils.js';
 
 describe('game lane cluster topology guard', () => {
 	it('accepts only the single socket-owning home, by role, not just by I/O count', () => {
@@ -27,21 +27,19 @@ describe('game lane cluster topology guard', () => {
 	it('denies binary ingress before fan-out in an unsafe multi-I/O-worker topology', () => {
 		const sent = [];
 		const publishGame = vi.fn();
-		const ud = {
-			[WS_PUBLISH_GRANT]: 'arena:1',
-			[WS_STATS]: { messagesOut: 0, bytesOut: 0 }
-		};
+		const ud = { [WS_PUBLISH_GRANT]: 'arena:1' };
 		const ws = {
 			getUserData: () => ud,
-			send: (frame) => { sent.push(JSON.parse(frame)); return true; }
+			// A denial that reached the socket directly would be an uncharged
+			// control frame; the route must hand it to the surface's sender.
+			send: () => { throw new Error('the denial bypassed the control sender'); }
 		};
+		const sendControl = (target, frame) => { expect(target).toBe(ws); sent.push(JSON.parse(frame)); };
 
-		routeGameFrame(ws, undefined, { event: 'move', data: { x: 1 }, id: 9 }, { publishGame }, 1, { ioWorkers: 2 });
+		routeGameFrame(ws, undefined, { event: 'move', data: { x: 1 }, id: 9 }, { publishGame }, 1, sendControl, { ioWorkers: 2 });
 
 		expect(publishGame).not.toHaveBeenCalled();
 		expect(sent).toEqual([{ type: 'game-denied', reason: 'FORBIDDEN', id: 9 }]);
-		expect(ud[WS_STATS].messagesOut).toBe(1);
-		expect(ud[WS_STATS].bytesOut).toBeGreaterThan(0);
 	});
 
 	it('threads the resolved I/O count to workers and guards every production entry point', () => {

@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Every deployment. Measured at the worst legal shape, one 8 KB `subscribe-batch` is answered with about 97 KB across 1,345 frames, and nothing rate-limited the repetition: every `messageAdmission` ceiling is disabled unless configured.
   - **Action:** None. A reconnecting client restoring 256 topics spends about 15 KB of the window and a 5,000-topic restore about 300 KB, so a healthy burst is orders of magnitude clear of it.
   - **Requires:** No new dependency or option. The ceiling is fixed rather than configurable.
-  - **Compatibility:** Only frames the adapter emits in answer to a client are charged - acks, denials, protocol errors, `welcome`, `lease-ok`, window grants. Application `send` and `publish` are never charged here and the tenant egress budgets are unchanged. The close is 4429, which the bundled client already classes as throttling and reconnects on; nothing new goes on the wire, because the protocol is frozen at revision 1, and the operator is told through `ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED` instead.
+  - **Compatibility:** Only frames the adapter emits in answer to a client are charged - acks, denials on both the JSON and the binary game lane, `wire-id` announces, protocol errors, `welcome`, `lease-ok`, window grants - measured in UTF-8 bytes on the wire. Application `send` and `publish` are never charged here and the tenant egress budgets are unchanged. The close is 4429, which the bundled client already classes as throttling and reconnects on; nothing new goes on the wire, because the protocol is frozen at revision 1, and the operator is told through `ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED`, carrying the connection's request id, instead.
   - **Detail:** [Added engineering detail](#added).
 - **Changed: a subscription-drift report now says how many connections it summed and how many a close had already settled.** A membership counted twice and a closed connection still in the live set produce the same sum, so the two quantities that separate them now ride on the report instead of being reconstructed by whoever reads it.
   - **Affects:** Anyone reading `subs.total-mismatch` diagnostics; the two existing fields are unchanged and two more are added beside them.
@@ -300,7 +300,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Each connection now carries a 4 MiB budget over a 10-second window, and one
   that exceeds it is closed rather than served. Every control frame the runtime
   emits goes through one `sendControl`, so there is no longer a raw `ws.send`
-  on that path to forget to charge.
+  on that path to forget to charge - the binary game lane's `game-denied` and
+  the `wire-id` announces included, which live in modules shared across the
+  surfaces and therefore take the calling surface's sender as an argument
+  rather than reaching for a socket. Frames are charged at their UTF-8 size,
+  which is what leaves on the wire, and the exhaustion event carries the
+  connection's request id so the client can be found in the access log.
 
 - **What that ceiling is worth, and why it closes.** The number is derived
   rather than picked: a reconnecting client restores in batches of at most 256

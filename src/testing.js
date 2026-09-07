@@ -3,7 +3,7 @@ import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
 import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
-import { createByteBudget, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
+import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
@@ -395,7 +395,7 @@ export async function createTestServer(options = {}) {
 		sendControlT(ws, messageOverloadedFrame(rejection));
 	};
 	const runIngressApplicationWorkT = (ws, context) =>
-		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
+		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControlT);
 	const runGameApplicationWorkT = (ws, context) => {
 		const msg = context.msg;
 		const gud = ws.getUserData();
@@ -737,7 +737,7 @@ export async function createTestServer(options = {}) {
 			budget = createByteBudget(MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, monotonicNow);
 			ud[WS_CONTROL_BUDGET] = budget;
 		}
-		if (!budget(payload.length)) {
+		if (!budget(controlFrameBytes(payload))) {
 			ud[WS_CONTROL_BUDGET] = null;
 			try { ws.end(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted'); }
 			catch { closedWsAbortsT++; }

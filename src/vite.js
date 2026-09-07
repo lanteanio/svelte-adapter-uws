@@ -16,7 +16,7 @@ import {
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority, assertClusterSequenceAuthorityValues } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
-import { createByteBudget, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
+import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
 import { readMetricMirror } from './runtime/utils/metrics.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
@@ -296,12 +296,10 @@ export default function uws(options = {}) {
 		}
 		return true;
 	};
-	const rejectApplicationMessageV = (wrapped, rejection) => {
-		const frame = messageOverloadedFrame(rejection);
-		try { wrapped.send(frame, false, false); bumpOutV(wrapped.getUserData(), frame); } catch {}
-	};
+	const rejectApplicationMessageV = (wrapped, rejection) =>
+		sendControlWrappedV(wrapped, messageOverloadedFrame(rejection));
 	const runIngressApplicationWorkV = (wrapped, context) =>
-		dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform);
+		dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform, sendControlWrappedV);
 	const runGameApplicationWorkV = (wrapped, context) => {
 		const msg = context.msg;
 		const gud = wrapped.getUserData();
@@ -1602,21 +1600,46 @@ export default function uws(options = {}) {
 	 */
 	function sendControlV(ws, payload) {
 		const ud = /** @type {any} */ (ws).__userData;
-		if (ud) {
-			let budget = ud[WS_CONTROL_BUDGET];
-			if (budget === null) return;
-			if (budget === undefined) {
-				budget = createByteBudget(MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, monotonicNow);
-				ud[WS_CONTROL_BUDGET] = budget;
-			}
-			if (!budget(payload.length)) {
-				ud[WS_CONTROL_BUDGET] = null;
-				try { ws.close(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted'); } catch {}
-				return;
-			}
-		}
+		if (!chargeControlV(ud, payload, () => ws.close(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted'))) return;
 		ws.send(payload);
 		bumpOutV(ud, payload);
+	}
+
+	/**
+	 * The same budgeted control send for a caller that holds the connection
+	 * WRAPPER rather than the raw socket - the ingress routes and the message
+	 * admission refusal, which run against the uWS-shaped handle so they can be
+	 * shared with the other surfaces.
+	 * @param {any} wrapped
+	 * @param {string} payload
+	 */
+	function sendControlWrappedV(wrapped, payload) {
+		const ud = wrapped.getUserData();
+		if (!chargeControlV(ud, payload, () => wrapped.end(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted'))) return;
+		try { wrapped.send(payload, false, false); bumpOutV(ud, payload); } catch {}
+	}
+
+	/**
+	 * Charge one control frame to the connection's window. False means the frame
+	 * must not be sent: the connection was cut here, or had been cut already.
+	 * @param {any} ud
+	 * @param {string} payload
+	 * @param {() => void} cut
+	 */
+	function chargeControlV(ud, payload, cut) {
+		if (!ud) return true;
+		let budget = ud[WS_CONTROL_BUDGET];
+		if (budget === null) return false;
+		if (budget === undefined) {
+			budget = createByteBudget(MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, monotonicNow);
+			ud[WS_CONTROL_BUDGET] = budget;
+		}
+		if (!budget(controlFrameBytes(payload))) {
+			ud[WS_CONTROL_BUDGET] = null;
+			try { cut(); } catch {}
+			return false;
+		}
+		return true;
 	}
 
 	function applyHandlers(mod) {
@@ -3152,7 +3175,6 @@ export default function uws(options = {}) {
 									}
 								}
 								sendControlV(ws, '{"type":"resumed"}');
-								bumpOutV(userData, '{"type":"resumed"}');
 								return;
 							}
 							if (msg.type === 'request-n') {

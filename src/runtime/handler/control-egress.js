@@ -27,8 +27,8 @@
 
 import { counters } from './state.js';
 import { monotonicNow } from '../runtime.js';
-import { createByteBudget, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from '../utils/byte-budget.js';
-import { WS_CONTROL_BUDGET } from '../utils/ws-symbols.js';
+import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from '../utils/byte-budget.js';
+import { WS_CONTROL_BUDGET, WS_PLATFORM } from '../utils/ws-symbols.js';
 import { bumpOut } from './pressure-metrics.js';
 import { emitOperationalEvent } from '../diagnostic.js';
 
@@ -82,7 +82,7 @@ export const CONTROL_GONE = 2;
  * @returns {0 | 1 | 2} CONTROL_DELIVERED, CONTROL_REFUSED or CONTROL_GONE
  */
 export function sendControl(ws, payload) {
-	if (!chargeControlEgress(ws, payload.length)) {
+	if (!chargeControlEgress(ws, controlFrameBytes(payload))) {
 		refuseControlFlood(ws);
 		return CONTROL_GONE;
 	}
@@ -130,7 +130,10 @@ function refuseControlFlood(ws) {
 			severity: 'warn',
 			dataClass: 'pseudonymous',
 			message: 'A connection exhausted its control-frame egress budget and was closed.',
-			attributes: { limit: MAX_CONTROL_EGRESS_BYTES, windowMs: CONTROL_EGRESS_WINDOW_MS }
+			// The connection's upgrade request id is what an operator joins against
+			// the access log to find the client; the event is pseudonymous because
+			// that id is on it, and useless without it.
+			attributes: { requestId: userData[WS_PLATFORM]?.requestId ?? null, limit: MAX_CONTROL_EGRESS_BYTES, windowMs: CONTROL_EGRESS_WINDOW_MS }
 		});
 		ws.end(CONTROL_FLOOD_CLOSE_CODE, 'control frame budget exhausted');
 	} catch {

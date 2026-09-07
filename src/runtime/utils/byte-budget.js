@@ -30,6 +30,23 @@ export const CONTROL_EGRESS_WINDOW_MS = 10_000;
 export const CONTROL_FLOOD_CLOSE_CODE = 4429;
 
 /**
+ * What one control frame costs against the budget: its size on the wire.
+ *
+ * The frames are JSON text, and text frames leave as UTF-8, so a topic echoed
+ * back in a denial costs up to three bytes per character that `length` counts
+ * as one. Charging code units would let a connection on a runtime that admits
+ * non-ASCII topics move up to three times the ceiling before it is cut. A UTF-8
+ * measurement of a frame of a few dozen bytes is not a cost anyone can see, and
+ * it keeps "bytes" in the ceiling's name true.
+ *
+ * @param {string} payload
+ * @returns {number}
+ */
+export function controlFrameBytes(payload) {
+	return Buffer.byteLength(payload, 'utf8');
+}
+
+/**
  * A byte allowance over a rolling window, as one closure.
  *
  * Deliberately not the keyed accountant in `utils/egress-account.js`: that one

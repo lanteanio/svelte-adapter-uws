@@ -532,9 +532,18 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// either on any shape, and the shape where no variant reads a property
 	// reports the same magnitude, which is what bounds the rest. No byte is
 	// read, allocated or copied, and no copy primitive entered the body.
+	//
+	// dispatchIngressFrame re-pinned for the control sender it now carries: one
+	// added parameter, passed through as the route's sixth argument so a route
+	// that answers the client with a denial sends it through the calling
+	// surface's budgeted sender rather than a raw socket write. A reference
+	// handed on; the frame bytes are parsed and routed exactly as before. Measured:
+	// reverting handler/ingress.js alone to its previous content restores this
+	// digest and no other, so nothing else in the tree reaches this body. No
+	// byte is read, allocated or copied, and no copy primitive entered.
 	publishWire: 'f98579a4c2e88e5135b0ba177b170b151ea1fda496b3d2a036f36c0eca6604ce',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
-	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
+	dispatchIngressFrame: '31eb28387d69104c3c46a19a5b5ab934f678730e4d143121e62030d6704ddb19',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
 	encodeStatelessWirePayload: 'fcacd501dd3d1bdcc14a5eff364da905f2b5e65999d12c1e8b8ad197ec2fd062',
 	allocate: 'd76794d74a23fee1aa0913a38cc231f8dc42793accba687e0167bedd5d6ab1ba',
@@ -942,7 +951,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// dispatch-body digest and the wire-fanout digest do not move. No statement
 	// executes differently on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered.
-	ingress: 'f15675d6630ed67377f5caf2fad346c63b37286f460b25ae412683c49a5e4133',
+	//
+	// Re-pinned for handler/ingress.js: dispatchIngressFrame takes the calling
+	// surface's control sender and passes it through to the route as one more
+	// argument (a reference handed on; see the named-function seal above).
+	// Measured: reverting ingress.js alone returns this digest to the
+	// ws-symbols value above and the dispatch-body digest to its previous
+	// value, and with ws-symbols.js reverted as well both are back at their
+	// previous values while the platform digest still moves - so nothing else
+	// edited reaches this graph. No byte is read, allocated or copied, and no
+	// copy primitive entered.
+	ingress: 'ccc6d048a7999ce51321dc342103285d0dd38749edffcf283049cc26909fa141',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1687,7 +1706,27 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// writes inside existing lazy-init branches; nothing executes differently on
 	// any frame path, no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	platform: '8d94e7824f28bfcad014eca4b90c58e62076c29a3c33dd66f7e7a3ec0ef57142',
+	//
+	// Re-pinned for the control budget reaching the shared answer paths, and
+	// measured as a set: with handler/ingress.js, handler/control-egress.js,
+	// handler/game-ingress.js, handler/wire-state.js, handler/cohort.js,
+	// handler.js and utils/byte-budget.js all reverted to their previous content
+	// this digest returns to the ws-symbols value above; no single one of them
+	// reverted alone moves it back; and utils/tls-reload.js, error-registry.js,
+	// testing.js and vite.js reverted together move nothing, so the certificate
+	// watcher and the registry text are outside every sealed graph. What
+	// changed, on the control path, which is not a fan-out path: game-ingress.js
+	// sends its denial through the sender it is handed instead of a raw socket
+	// write with its own stats bump; wire-state.js and cohort.js send the
+	// wire-id announce through sendControl and map its three outcomes onto the
+	// drop handling they already had; ingress.js passes the sender through;
+	// handler.js passes it in; control-egress.js charges
+	// `controlFrameBytes(payload)` - a UTF-8 length of a string the sender
+	// already holds, computed without constructing a buffer - and puts the
+	// connection's request id on the exhaustion event; byte-budget.js gains that
+	// one function. Per publish and per fan-out nothing executes differently, no
+	// byte is read, allocated or copied, and no copy primitive entered.
+	platform: '7c01148202a80daefe710b362af609d0cff8216b280c6d960780dff5392bed13',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1955,7 +1994,20 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// any frame path, no byte is read, allocated or copied, and no copy
 	// primitive entered. The budget's error id and registry entry ride the same
 	// change, reaching this graph as frozen literal data through utils/metrics.js.
-	'wire-fanout': '7c700c1c84527ee565c3c9d3582321dd1235277c65b3ce6cdc84ce3df4fe4ad1',
+	//
+	// Re-pinned with the platform digest for the control budget reaching the
+	// shared answer paths, and measured the same way: reverting the same seven
+	// files together (handler/ingress.js, handler/control-egress.js,
+	// handler/game-ingress.js, handler/wire-state.js, handler/cohort.js,
+	// handler.js, utils/byte-budget.js) returns this digest to its previous
+	// value, while no one of them alone does and neither does wire-state.js +
+	// cohort.js as a pair; utils/ws-symbols.js moves it nowhere at all. So this
+	// graph reaches at least two of the seven through utils.js, and the change
+	// it sees is the one described on the platform digest: denials and wire-id
+	// announces sent through the budgeted control sender. The fan-out core
+	// itself and this graph's root module are untouched. No byte is read,
+	// allocated or copied, and no copy primitive entered.
+	'wire-fanout': '7106c5c22737abf526234881ec02a16c659db81cee4d467214eef96f61a736c5',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

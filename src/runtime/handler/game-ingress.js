@@ -23,7 +23,7 @@
 
 import { registerIngress } from './ingress.js';
 import { decodeValue, encodeValue } from '../wire-value.js';
-import { WS_PUBLISH_GRANT, WS_STATS } from '../utils.js';
+import { WS_PUBLISH_GRANT } from '../utils.js';
 import { workerData } from 'node:worker_threads';
 
 /** The ingress kind a client binds to publish `game` frames as `0x03`. */
@@ -116,18 +116,23 @@ export function decodeGameFrame(payload) {
  * answer the sender `game-denied` (`FORBIDDEN` no grant / `INVALID` non-string
  * event). The frame's ingress `seq` is ignored - `publishGame` stamps the
  * authoritative room seq. `ws` is the platform's connection handle (the uWS
- * socket in production/test, the wrapper in dev); both expose `getUserData()` /
- * `send()`, and the outbound denial is counted into `WS_STATS` the same way every
- * platform's bump helper does.
+ * socket in production/test, the wrapper in dev).
+ *
+ * The denial goes out through `sendControl`, the calling surface's budgeted
+ * control sender, which also counts it into that surface's outbound stats. A
+ * twelve-byte frame from a connection with no grant buys a fifty-byte answer,
+ * so the denial is the same amplifier every other control frame is, and the
+ * connection that floods it is cut at the same budget.
  *
  * @param {any} ws
  * @param {any} _target  the binding target - unused (topic comes from the grant)
  * @param {{ event: unknown, data: unknown, id: number | string | undefined }} value
  * @param {any} platform
  * @param {number} _seq  the per-binding ingress seq - unused (the room seq is stamped on fan-out)
+ * @param {(ws: any, payload: string) => unknown} sendControl  the surface's budgeted control sender
  * @param {any} [clusterData] testable worker topology; production uses workerData
  */
-export function routeGameFrame(ws, _target, value, platform, _seq, clusterData = workerData) {
+export function routeGameFrame(ws, _target, value, platform, _seq, sendControl, clusterData = workerData) {
 	let ud;
 	try { ud = ws.getUserData(); } catch { return; }
 	const grantTopic = ud[WS_PUBLISH_GRANT];
@@ -140,11 +145,7 @@ export function routeGameFrame(ws, _target, value, platform, _seq, clusterData =
 		const denied = value.id === undefined
 			? JSON.stringify({ type: 'game-denied', reason })
 			: JSON.stringify({ type: 'game-denied', reason, id: value.id });
-		try {
-			ws.send(denied, false, false);
-			const stats = ud[WS_STATS];
-			if (stats) { stats.messagesOut++; stats.bytesOut += denied.length; }
-		} catch { /* socket closed mid-route */ }
+		sendControl(ws, denied);
 		return;
 	}
 	platform.publishGame(ws, grantTopic, value.event, value.data, value.id);
