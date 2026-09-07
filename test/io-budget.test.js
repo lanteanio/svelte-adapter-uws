@@ -1614,9 +1614,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// TWO causes are folded into this one digest, and only this graph carries
 	// the second. The boot banner's version-info edit landed while this pin
 	// still read its previous value, so the platform digest was already
-	// unreconciled before the slot declaration was written: this graph reaches
-	// version-info.js through utils.js, and the ingress and wire-fanout graphs
-	// do not. Measured rather than inferred - reverting the version-info edit
+	// unreconciled before the slot declaration was written: handler/platform.js
+	// imports version-info.js directly, and the ingress and wire-fanout graphs
+	// never reach it. Measured rather than inferred - reverting the version-info edit
 	// alone moves this digest and neither of the other two, and reverting the
 	// relay-token JSDoc that landed between them moves none of the three, so
 	// the prose allowlist covers that one exactly as it claims to. Both causes
