@@ -8,6 +8,10 @@ import { handleSSR } from './ssr.js';
 import { requestDone } from './lifecycle.js';
 import { adminRouteMounted } from './admin.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
+import { windowsReservedPath } from '../utils/windows-path.js';
+
+// Read once: the platform does not change under a running process.
+const WINDOWS = process.platform === 'win32';
 
 // Characters through which a raw path can reach a DIFFERENT path than the one
 // spelled: dot segments in either spelling, the backslash a special scheme
@@ -79,8 +83,10 @@ export function handleRequest(res, req) {
 		));
 	}
 
-	// Windows: reject paths with : (Alternate Data Streams) or ~ (8.3 short names)
-	if (process.platform === 'win32' && (pathname.includes(':') || pathname.includes('~'))) {
+	// Windows: refuse a path naming an alternate data stream (`:`) or an 8.3
+	// short name (`~`), in the raw spelling and the decoded one - every lane
+	// below decodes before it opens anything.
+	if (WINDOWS && windowsReservedPath(pathname)) {
 		return send400(res);
 	}
 

@@ -473,6 +473,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, the reserved-character refusal reads the decoded path too.**
+  The gate that answers 400 to a path naming an NTFS alternate data stream
+  (`:`) or an 8.3 short name (`~`) read the raw request target only, so
+  `/x%3Ay` passed a gate that refused `/x:y` and reached the prerendered
+  lookup, SvelteKit's router and `read()`, all of which decode before they
+  open anything. The predicate (`utils/windows-path.js`) now decodes once
+  when the path carries a `%` and refuses on either spelling; a path that does
+  not decode is left to the lanes that refuse it themselves. Pure and pinned
+  on every platform, and driven against the built runtime on Windows.
 - **The liveness and readiness probes answer HEAD.** `healthCheckPath` and
   `readinessCheckPath` were registered for GET only, so a HEAD probe - the
   default for HAProxy's `httpchk` and for most uptime monitors - fell through
