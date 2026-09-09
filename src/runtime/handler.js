@@ -3318,12 +3318,21 @@ if (WS_ENABLED) {
 // Health check endpoint (before catch-all so it never hits SSR). This is a
 // LIVENESS probe: it reports 200 whenever the process is up, INCLUDING during a
 // graceful drain - so a k8s liveness probe never restarts a pod mid-shutdown.
+//
+// Registered for HEAD as well as GET: HAProxy's `httpchk` and most uptime
+// monitors probe with HEAD by default, and a HEAD that fell through to the
+// catch-all was answered by the app's own 404.
 if (HEALTH_CHECK_PATH) {
-	route('get', HEALTH_CHECK_PATH, (res) => {
+	const liveness = (res, req) => {
+		const headOnly = req.getMethod() === 'head';
 		res.cork(() => {
-			res.writeStatus('200 OK').end('OK');
+			res.writeStatus('200 OK');
+			if (headOnly) res.endWithoutBody(2);
+			else res.end('OK');
 		});
-	});
+	};
+	route('get', HEALTH_CHECK_PATH, liveness);
+	route('head', HEALTH_CHECK_PATH, liveness);
 }
 
 // Readiness endpoint (before catch-all so it never hits SSR). This is a
@@ -3340,19 +3349,29 @@ if (HEALTH_CHECK_PATH) {
 // draining, which reads as a stuck or reversed rollout. The routing decision is
 // the same for all of them - which is why it stays isDraining() - but the word
 // an operator reads has to say which one it is.
+//
+// HEAD answers the same status as GET with the body's length and no body, so a
+// HEAD-probing balancer reads the same routing decision.
 if (READINESS_CHECK_PATH) {
-	route('get', READINESS_CHECK_PATH, (res) => {
+	const readiness = (res, req) => {
+		const headOnly = req.getMethod() === 'head';
 		if (isDraining()) {
 			const state = lifecycleState();
 			res.cork(() => {
-				res.writeStatus('503 Service Unavailable').end(state);
+				res.writeStatus('503 Service Unavailable');
+				if (headOnly) res.endWithoutBody(state.length);
+				else res.end(state);
 			});
 		} else {
 			res.cork(() => {
-				res.writeStatus('200 OK').end('ready');
+				res.writeStatus('200 OK');
+				if (headOnly) res.endWithoutBody(5);
+				else res.end('ready');
 			});
 		}
-	});
+	};
+	route('get', READINESS_CHECK_PATH, readiness);
+	route('head', READINESS_CHECK_PATH, readiness);
 }
 
 // Reserved admin / observability route. When the app's WebSocket handler

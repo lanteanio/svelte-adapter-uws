@@ -473,6 +473,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The liveness and readiness probes answer HEAD.** `healthCheckPath` and
+  `readinessCheckPath` were registered for GET only, so a HEAD probe - the
+  default for HAProxy's `httpchk` and for most uptime monitors - fell through
+  to the catch-all and was answered by the app's own 404, which a balancer
+  reads as an unhealthy instance. Both routes now register HEAD beside GET and
+  answer it with the GET status, the body's length and no body;
+  `createTestServer` registers the same pair. Pinned over a raw socket against
+  the built runtime and through `fetch` against the test server.
 - **The test server's admin lane refuses the fetch-forbidden methods the way
   production does.** `createTestServer` builds a `Request` for its admin route
   exactly as `handler/admin.js` does, and the same `TypeError` for `TRACE`,

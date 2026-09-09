@@ -21,7 +21,7 @@ choose the authentication and topic-authorization policy before deployment.
 - **Dynamic response compression** - SSR HTML and API JSON compressed on the fly with brotli or gzip
 - **Backpressure handling** - bounded streaming and configurable per-connection send-buffer controls
 - **Graceful shutdown** - waits for in-flight requests before exiting
-- **Liveness + readiness probes** - `/healthz` (always 200 while up) and `/readyz` (503 `starting` before `init` commits, 503 `draining` once shutdown begins) out of the box
+- **Liveness + readiness probes** - `/healthz` (always 200 while up) and `/readyz` (503 `starting` before `init` commits, 503 `draining` once shutdown begins) out of the box, answering GET and HEAD
 - **WebSocket setup** - enable `websocket`, add the required Vite plugin, and choose the authentication and topic-authorization policy your app needs
 
 **Upgrading?** Start at the stable [migration index](./MIGRATION.md), then use
@@ -627,10 +627,10 @@ adapter({
   // Prefix for environment variables (e.g. 'MY_APP_' -> MY_APP_PORT)
   envPrefix: "", // default: ''
 
-  // Liveness probe - 200 whenever the process is up, even during a drain (false to disable)
+  // Liveness probe, GET or HEAD - 200 whenever the process is up, even during a drain (false to disable)
   healthCheckPath: "/healthz", // default: '/healthz'
 
-  // Readiness probe - 200 when ready, 503 during graceful shutdown so a load balancer drains this instance (false to disable)
+  // Readiness probe, GET or HEAD - 200 when ready, 503 during graceful shutdown so a load balancer drains this instance (false to disable)
   readinessCheckPath: "/readyz", // default: '/readyz'
 
   // WebSocket configuration

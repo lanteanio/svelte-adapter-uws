@@ -117,7 +117,8 @@ export interface AdapterOptions {
 	/**
 	 * Liveness probe path. Reports `200` whenever the process is up, including
 	 * during a graceful drain - so a liveness probe never restarts a draining
-	 * instance mid-shutdown. Set to `false` to disable.
+	 * instance mid-shutdown. Answers GET and HEAD (HAProxy's `httpchk` and most
+	 * uptime monitors probe with HEAD). Set to `false` to disable.
 	 * @default '/healthz'
 	 */
 	healthCheckPath?: string | false;
@@ -132,8 +133,8 @@ export interface AdapterOptions {
 	 * `closed` (the listen socket is gone) - during a rolling deploy that is the
 	 * difference between an instance still booting and one going away. Keep it
 	 * separate from `healthCheckPath` (a readiness `503` must not trip a liveness
-	 * probe into a restart). Must differ from `healthCheckPath`. Set to `false`
-	 * to disable.
+	 * probe into a restart). Must differ from `healthCheckPath`. Answers GET and
+	 * HEAD with the same status. Set to `false` to disable.
 	 * @default '/readyz'
 	 */
 	readinessCheckPath?: string | false;

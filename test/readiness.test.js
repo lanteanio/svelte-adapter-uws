@@ -33,6 +33,32 @@ describeUWS('liveness / readiness probes', () => {
 		expect(await live.text()).toBe('OK');
 	});
 
+	it('answers HEAD on both probes with the GET status and no body', async () => {
+		// HAProxy's httpchk and most uptime monitors probe with HEAD by default.
+		// The harness registers HEAD beside GET exactly as production does, so a
+		// deployment rehearsed against createTestServer sees the same answer.
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer();
+
+		const ready = await fetch(`${server.url}/readyz`, { method: 'HEAD' });
+		expect(ready.status).toBe(200);
+		expect(ready.headers.get('content-length')).toBe('5');
+		expect(await ready.text()).toBe('');
+
+		const live = await fetch(`${server.url}/healthz`, { method: 'HEAD' });
+		expect(live.status).toBe(200);
+		expect(live.headers.get('content-length')).toBe('2');
+		expect(await live.text()).toBe('');
+
+		server.platform.__setDraining(true);
+		const draining = await fetch(`${server.url}/readyz`, { method: 'HEAD' });
+		expect(draining.status).toBe(503);
+		expect(draining.headers.get('content-length')).toBe(String('draining'.length));
+		expect(await draining.text()).toBe('');
+		expect((await fetch(`${server.url}/healthz`, { method: 'HEAD' })).status).toBe(200);
+		server.platform.__setDraining(false);
+	});
+
 	it('flips readiness to 503 while liveness stays 200 during a drain', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
