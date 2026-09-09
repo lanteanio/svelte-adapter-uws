@@ -541,7 +541,14 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// reverting handler/ingress.js alone to its previous content restores this
 	// digest and no other, so nothing else in the tree reaches this body. No
 	// byte is read, allocated or copied, and no copy primitive entered.
-	publishWire: 'f98579a4c2e88e5135b0ba177b170b151ea1fda496b3d2a036f36c0eca6604ce',
+	//
+	// publishWire re-pinned for the shared branch's outcome report: the two
+	// `publishOutcomeHook` calls (one per cohort publish) became one, fed by a
+	// boolean that is true when either cohort publish delivered. The same two
+	// app.publish calls run with the same frame and envelope; what changed is
+	// a local boolean and one fewer hook call. No byte is read, allocated or
+	// copied, and no copy primitive entered.
+	publishWire: '9d61a6971fe453104d5b85835c9e1341ec009a0e245a8864396a9af3b7700d81',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '31eb28387d69104c3c46a19a5b5ab934f678730e4d143121e62030d6704ddb19',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -1776,7 +1783,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// held at the values above without a revert being needed), which is the
 	// same reach the paragraph above records. Same paths, same verdict on
 	// bytes and copies.
-	platform: 'a172d57691f17cb724ec2648d1940804eb4205ee2ea29061a232ce2bee495331',
+	//
+	// Re-pinned for the shared cohort accounting, measured as two parts: with
+	// cohort.js alone reverted this digest reads
+	// 7949fece91c640cc62ad1c743e5654d3fa3cac8694cf84103a46832c8034b175
+	// (platform.js: the shared branch's one outcome report, see the
+	// publishWire seal above), and the value below adds cohort.js's join
+	// guard - `if (held && held.has(topic)) return;` ahead of the wire-id
+	// acquire, a Set read on the subscribe path. Neither statement is on a
+	// fan-out path; per publish the shared branch makes the same two
+	// app.publish calls. No byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: 'a4d391d423c65e1cbb150342156cb6be9cc454d41b4cff3c802621c042548679',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -904,6 +904,11 @@ export async function createTestServer(options = {}) {
 		const caps = ud[WS_CAPS];
 		const { bin, json } = cohortTopicsT(topic);
 		if (caps && caps.has(capability) && !wireStatePoisonedT(ud, capability)) {
+			// Already a cohort member (a plugin re-join of a topic the client
+			// holds over the wire): no second reference, no second announce, as
+			// production.
+			const held = ud[WS_SHARED_COHORTS];
+			if (held && held.has(topic)) return;
 			const id = sharedWireIds.acquire(topic);
 			// Charged like the production cohort's announce. A 2 is one of two
 			// things, and the budget slot tells them apart: the budget cut the

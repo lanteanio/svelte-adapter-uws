@@ -591,12 +591,16 @@ export const platform = {
 			// announce succeeded); otherwise this shared topic currently has only JSON
 			// subscribers and skips the binary fan-out entirely.
 			const id = getSharedWireId(topic);
+			// ONE outcome for this logical publish, whichever cohorts carried it:
+			// the outcome family sums to the publish family on every other exit,
+			// and a shared publish counted per cohort recorded a delivery beside a
+			// no-subscribers for the cohort that happened to be empty.
+			let delivered = false;
 			if (id !== undefined) {
-				const binaryResult = app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
-				counters.publishOutcomeHook?.(binaryResult);
+				delivered = app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
 			}
-			const jsonResult = app.publish(json, envelope, false, compress);
-			counters.publishOutcomeHook?.(jsonResult);
+			if (app.publish(json, envelope, false, compress)) delivered = true;
+			counters.publishOutcomeHook?.(delivered);
 			// Cross-worker subscribers: each receiving worker re-derives the shared
 			// codec from its registry (relayPublishWire) and runs ITS OWN cohort split
 			// with its own server-wide id, so the single-instance path needs no

@@ -62,19 +62,22 @@ let clients;
 async function connectClient(url, caps) {
 	const { WebSocket } = await import('ws');
 	const ws = new WebSocket(url);
-	const frames = { wireIds: [], json: [], binary: [] };
+	const frames = { wireIds: [], json: [], binary: [], acks: [] };
 	ws.on('message', (data, isBinary) => {
 		if (isBinary) { frames.binary.push(new Uint8Array(data)); return; }
 		try {
 			const obj = JSON.parse(data.toString());
 			if (obj && obj.type === 'wire-id') frames.wireIds.push(obj);
+			else if (obj && (obj.type === 'subscribed' || obj.type === 'subscribe-denied')) frames.acks.push(obj);
 			else if (obj && obj.topic !== undefined && obj.event !== undefined) frames.json.push(obj);
 		} catch { /* ignore non-JSON */ }
 	});
 	await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
 	if (caps) ws.send(JSON.stringify({ type: 'hello', caps }));
-	ws.send(JSON.stringify({ type: 'subscribe', topic: TOPIC }));
-	await sleep(60); // server-side hello + subscribe settle
+	// Settled by the server's own ack, not by a sleep: the hello is processed
+	// ahead of the subscribe on the same socket, so the ack proves both landed.
+	ws.send(JSON.stringify({ type: 'subscribe', topic: TOPIC, ref: 1 }));
+	await until(() => frames.acks.find((a) => a.ref === 1 && a.type === 'subscribed'));
 	clients.push(ws);
 	return { ws, frames };
 }
@@ -197,14 +200,29 @@ describeUWS('shared binary fan-out via cohort topics', () => {
 	it('falls back to the per-connection walk when the publish excludes a socket', async () => {
 		// excludeWs forces the walk (a single app.publish cannot skip one socket), so
 		// delivery still reaches a capable subscriber as binary - just not via cohorts.
-		server = await createTestServer({});
+		// Exclude a REAL member, `b`, and hold the server-side socket for it: the
+		// harness hands the app the socket in the message hook, and a publish
+		// that excluded a fake would pass under either lane. `a` still receives
+		// (the walk delivers it) and `b` must not.
+		let excluded;
+		server = await createTestServer({
+			handler: {
+				message(ws, { data }) {
+					if (JSON.parse(Buffer.from(data).toString()).type === 'mark') excluded = ws;
+				}
+			}
+		});
 		const a = await connectClient(server.wsUrl, [CAP]);
-		// Exclude a socket that is not `a` (a fresh fake never delivered to), so `a`
-		// still receives. The point is the shared path does not engage with excludeWs.
-		server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec(), { excludeWs: { getUserData() { return {}; } } });
+		const b = await connectClient(server.wsUrl, [CAP]);
+		b.ws.send(JSON.stringify({ type: 'mark' }));
+		await until(() => excluded);
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec(), { excludeWs: excluded });
 		await until(() => a.frames.binary.length >= 1);
 		const frame = parseBinaryFrame(a.frames.binary[0]);
 		expect(decodePayload(frame.payload)).toEqual({ event: 'snapshot', data: { tick: 1 } });
+		await sleep(50);
+		expect(b.frames.binary.length, 'the excluded member receives nothing').toBe(0);
+		expect(b.frames.json.length).toBe(0);
 	});
 
 	it('a relayed shared publish re-runs the cohort split on the receiving server (clustered path)', async () => {

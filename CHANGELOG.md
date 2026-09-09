@@ -473,6 +473,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A shared cohort publish reports one outcome, and a re-join holds one
+  reference.** `platform.publishWire` on a `shared: true` codec counted a
+  publish outcome per cohort - a delivery for the binary cohort beside a
+  no-subscribers for the empty JSON one - so `ws_publish_outcomes_total`
+  advanced by two for one logical publish. It now reports once, delivered if
+  either cohort carried it. And `joinSharedCohort` acquired a shared wire-id
+  reference on every call while membership is a Set, so a plugin's
+  `trackedSubscribe` of a socket the client already held over the wire took
+  a reference the single leave released once: the id outlived its last
+  member, the egress split over-counted the binary cohort, and every later
+  publish built a frame for nobody. A join of a held topic now acquires and
+  announces nothing, in the runtime and in `createTestServer`. Pinned on the
+  built cohort module with the real wire-id table, on the test server through
+  the announces a client sees and the fresh id the next cohort draws, and on
+  the built runtime through its `/metrics` scrape.
 - **A failing `unsubscribe` hook no longer takes the worker or the message
   handler with it.** The hook is fire-and-forget and was invoked bare at
   thirty sites across the runtime, the test server and the dev plugin, so an

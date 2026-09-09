@@ -44,6 +44,14 @@ export function joinSharedCohort(ws, ud, topic, capability) {
 	const { bin, json } = cohortTopics(topic);
 	const caps = ud[WS_CAPS];
 	if (caps && caps.has(capability) && !wireStatePoisoned(ud, capability)) {
+		// Already in the binary cohort: nothing to acquire and nothing to
+		// announce. The one caller that reaches a join on a held topic is a
+		// plugin's trackedSubscribe of a socket the client already subscribed
+		// over the wire; a second acquire here would hold a wire-id reference
+		// that the single leave releases once, so the id outlived its last
+		// member and every later publish built a frame for an empty cohort.
+		const held = ud[WS_SHARED_COHORTS];
+		if (held && held.has(topic)) return;
 		const id = acquireSharedWireId(topic);
 		// The announce is a control frame the subscribe bought; it is charged to
 		// the connection's control budget like every other one.
