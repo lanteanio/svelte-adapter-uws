@@ -26,15 +26,16 @@ import { WS_REQUEST_ID_KEY } from './request-id.js';
  */
 export function runUnsubscribeHook(hook, ws, topic, ctx) {
 	if (typeof hook !== 'function') return;
-	let result;
+	// The attach sits inside the same try as the call: a thenable whose `then`
+	// throws synchronously is the one shape that would otherwise leave through
+	// the seam the catch is here to close.
 	try {
-		result = hook(ws, topic, ctx);
+		const result = hook(ws, topic, ctx);
+		if (result != null && typeof result.then === 'function') {
+			result.then(undefined, (err) => reportUnsubscribeHookFailure(err, ws, topic, ctx));
+		}
 	} catch (err) {
 		reportUnsubscribeHookFailure(err, ws, topic, ctx);
-		return;
-	}
-	if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
-		result.then(undefined, (err) => reportUnsubscribeHookFailure(err, ws, topic, ctx));
 	}
 }
 
@@ -51,10 +52,11 @@ function reportUnsubscribeHookFailure(err, ws, topic, ctx) {
 	// and as the upgrade stamped it on userData. The socket may already be
 	// closed by the time a rejection lands, and an anonymous connection may
 	// never have had one: the id is a courtesy of the report, not a condition.
-	let requestId = ctx?.platform?.requestId;
-	if (typeof requestId !== 'string') {
-		try { requestId = ws?.getUserData?.()?.[WS_REQUEST_ID_KEY]; } catch { /* closed socket */ }
-	}
+	let requestId;
+	try {
+		requestId = ctx?.platform?.requestId;
+		if (typeof requestId !== 'string') requestId = ws?.getUserData?.()?.[WS_REQUEST_ID_KEY];
+	} catch { /* closed socket, or a platform that refuses the read */ }
 	if (typeof requestId === 'string') attributes.requestId = requestId;
 	emitOperationalEvent({
 		source: 'svelte-adapter-uws',

@@ -1767,7 +1767,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// paths, none on publish or fan-out. Per publish and per fan-out nothing
 	// executes differently, no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	platform: 'bc0dcd029d5543d4813efde4951d9299cdeffc0d72ce10f10646b93c58a71b8e',
+	//
+	// Re-pinned once more for the helper alone: the rejection-handler attach
+	// moved inside the same try as the hook call, the thenable test became
+	// `result != null && typeof result.then === 'function'`, and the request
+	// id read gained its own try/catch. Only utils/unsubscribe-hook.js
+	// changed, and only this digest moved (the ingress and wire-fanout seals
+	// held at the values above without a revert being needed), which is the
+	// same reach the paragraph above records. Same paths, same verdict on
+	// bytes and copies.
+	platform: 'a172d57691f17cb724ec2648d1940804eb4205ee2ea29061a232ce2bee495331',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

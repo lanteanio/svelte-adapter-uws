@@ -74,6 +74,30 @@ describe('runUnsubscribeHook', () => {
 		expect(events.filter((r) => r.event === EVENT)).toHaveLength(1);
 	});
 
+	it('contains a thenable whose then throws synchronously', () => {
+		// The one shape that could leave through the seam between the call and
+		// the attach: attaching the handler is itself a call into app code.
+		const hostile = { then() { throw new Error('then boom'); } };
+		expect(() => runUnsubscribeHook(() => hostile, ws, 'room:6', { platform: null })).not.toThrow();
+		expect(events.filter((r) => r.event === EVENT)).toHaveLength(1);
+		expect(events[0].attributes.error.message).toBe('then boom');
+	});
+
+	it('takes a function that carries a then, like any other thenable', async () => {
+		const fnThenable = Object.assign(() => {}, { then(_ok, fail) { setTimeout(() => fail(new Error('fn boom')), 0); } });
+		runUnsubscribeHook(() => fnThenable, ws, 'room:7', { platform: null });
+		await tick();
+		expect(events.filter((r) => r.event === EVENT)).toHaveLength(1);
+	});
+
+	it('still reports when the platform refuses the request id read', () => {
+		const platform = { get requestId() { throw new Error('hostile getter'); } };
+		runUnsubscribeHook(() => { throw new Error('with hostile platform'); }, ws, 'room:8', { platform });
+		expect(events).toHaveLength(1);
+		expect(events[0].attributes.error.message).toBe('with hostile platform');
+		expect(events[0].attributes.requestId).toBeUndefined();
+	});
+
 	it('reports nothing for a hook that returns, resolves, or is absent', async () => {
 		runUnsubscribeHook(() => undefined, ws, 'a', { platform: null });
 		runUnsubscribeHook(() => 42, ws, 'b', { platform: null });
