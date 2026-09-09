@@ -1448,9 +1448,9 @@ describe('no surface re-derives a decision the policy owns', () => {
 	}
 
 	// Banning only the constant NAME left the same decision available under a
-	// local spelling: `const cap = 1_000_000; if (subs.size >= cap)`. The shared
-	// caps module legitimately contains several independent one-million bounds;
-	// every consumer module must receive this one through the named import.
+	// local spelling: `const cap = 65_536; if (subs.size >= cap)`. The shared
+	// caps module is the one place the value may be written; every consumer
+	// module must receive it through the named import.
 	for (const file of SCANNED.filter((candidate) => candidate !== 'src/runtime/utils/caps.js')) {
 		it(`${file} does not re-declare the subscription cap value`, () => {
 			const offenders = ast(file).nodes
@@ -1463,9 +1463,9 @@ describe('no surface re-derives a decision the policy owns', () => {
 		});
 	}
 
-	// The cap's VALUE, not merely its shape. The rule above is the ONLY defence
-	// this decision has - the cap is 1,000,000, so no behavioural test can reach
-	// it - and asserting only "a finite number above zero" left the constant
+	// The cap's VALUE, not merely its shape. The rule above is the cheap defence
+	// this decision has - at 65,536 a behavioural fill is possible but costs a
+	// real server run - and asserting only "a finite number above zero" left the constant
 	// itself as the way to disable it: raising caps.js to a number no connection
 	// can ever hit removes the limit while every other rule in this file stays
 	// green. Moving the cap is a deliberate act and must move this line with it.

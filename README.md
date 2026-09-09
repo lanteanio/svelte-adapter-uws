@@ -1458,7 +1458,7 @@ The `webhooks` row is the only opt-in one: those caps exist only once you pass t
 
 Two policy notes:
 
-- **Per-conn cap math at uWS scale.** `1,000,000 subscriptions × 1,000,000 connections` is more than any realistic process can handle. The per-conn caps catch single-connection bugs (a `for (i=0; i<N; i++) ws.subscribe('topic-' + i)` loop, a misbehaving extension); they do not pretend to OOM-protect a 1M-connection server. Set the per-worker `upgradeAdmission.maxConnections` ceiling for that.
+- **Per-conn cap math at uWS scale.** The per-conn caps catch single-connection bugs (a `for (i=0; i<N; i++) ws.subscribe('topic-' + i)` loop, a misbehaving extension) and, for subscriptions, bound what one admitted connection can pin in native memory (about 46 MB at 65,536). They do not pretend to OOM-protect a 1M-connection server on their own: set the per-worker `upgradeAdmission.maxConnections` ceiling for the aggregate.
 - **`topicSeqs` is warn-only.** The seq registry cannot evict entries - the resume protocol depends on each topic's monotonic counter persisting for the process lifetime, and dropping a row would corrupt any reconnecting client trying to resume that topic. The cap fires a single structured `console.warn` with the topN recent publishers when the threshold is first crossed; ops sees the leak shape and can reduce topic cardinality (or opt out with `{ seq: false }` per publish) before OOM.
 
 ### Static file behavior

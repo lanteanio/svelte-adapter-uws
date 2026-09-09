@@ -25,8 +25,10 @@
  * outlives the attribution. Below 246 the helper exits at once and READY or
  * WATCHDOG can be dropped; the README states that floor and the fallback of
  * `Type=simple` without a watchdog for an older manager. `--pid=` names the
- * unit's main process and does not change how the sender is attributed, so
- * it is not the answer to that race and is not sent.
+ * unit's main process; when privileged the helper also sends as that PID, but
+ * unprivileged it falls back to its own, and privileged it already sends as
+ * its parent by default - so the flag adds nothing to attribution either way
+ * and is not sent.
  *
  * Zero-config: everything derives from the environment systemd itself
  * provides. No NOTIFY_SOCKET (any non-systemd host, dev, CI, containers

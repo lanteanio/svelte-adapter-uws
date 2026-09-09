@@ -324,8 +324,8 @@ describe('grant-model wiring - source guards', () => {
 		// which pinned a SPELLING rather than the behaviour: routing the lane
 		// through the shared policy turned it red while the cap still worked, and
 		// equally an inline rewrite that dropped the cap entirely could have kept
-		// it green. The cap is 1_000_000, so the registry's `size` is stubbed on a
-		// real Set rather than allocating a million entries.
+		// it green. The registry's `size` is stubbed on a real Set rather than
+		// allocating entries up to the cap, whatever caps.js sets it to.
 		const { trackedSubscribe, WS_SUBSCRIPTIONS } = await import('../src/runtime/utils/ws-symbols.js');
 		const { MAX_SUBSCRIPTIONS_PER_CONNECTION } = await import('../src/runtime/utils/caps.js');
 
