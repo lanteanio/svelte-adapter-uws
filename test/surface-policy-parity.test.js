@@ -1361,7 +1361,7 @@ describe('no surface re-derives a decision the policy owns', () => {
 			capEquivalentSizeComparisonOffenders(ast(file).nodes, file, SUBSCRIPTION_CAP));
 		expect(
 			offenders,
-			`a helper rebuilt the million-subscription decision under a constant expression: ${offenders.join(', ')}`
+			`a helper rebuilt the subscription-cap decision under a constant expression: ${offenders.join(', ')}`
 		).toEqual([]);
 	});
 

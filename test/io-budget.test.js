@@ -961,7 +961,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// previous values while the platform digest still moves - so nothing else
 	// edited reaches this graph. No byte is read, allocated or copied, and no
 	// copy primitive entered.
-	ingress: 'ccc6d048a7999ce51321dc342103285d0dd38749edffcf283049cc26909fa141',
+	//
+	// Re-pinned for the subscription cap, reached through utils.js ->
+	// utils/caps.js: one frozen number constant moved from 1_000_000 to
+	// 65_536, and the digest covers literal content. The predicate that reads
+	// it is unchanged; nothing executes differently on any frame path, no byte
+	// is read, allocated or copied, and no copy primitive entered.
+	ingress: '28f083c34d9c959f48d16984717eb20628d15aaf69bdbd873eae63db62cad365',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1726,7 +1732,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// connection's request id on the exhaustion event; byte-budget.js gains that
 	// one function. Per publish and per fan-out nothing executes differently, no
 	// byte is read, allocated or copied, and no copy primitive entered.
-	platform: '7c01148202a80daefe710b362af609d0cff8216b280c6d960780dff5392bed13',
+	//
+	// Re-pinned for the subscription cap in utils/caps.js, the same one-number
+	// drift recorded on the ingress seal above: 1_000_000 to 65_536, literal
+	// content only. Nothing executes differently on any frame path, no byte is
+	// read, allocated or copied, and no copy primitive entered.
+	platform: 'e870141a7966aeb8dcd7ec3e1b49a39356fb4d7c1b56e44d810bbabad312b2ac',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2007,7 +2018,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// announces sent through the budgeted control sender. The fan-out core
 	// itself and this graph's root module are untouched. No byte is read,
 	// allocated or copied, and no copy primitive entered.
-	'wire-fanout': '7106c5c22737abf526234881ec02a16c659db81cee4d467214eef96f61a736c5',
+	//
+	// Re-pinned for the subscription cap in utils/caps.js, reached through
+	// utils.js like the other two graphs: one frozen number constant, 1_000_000
+	// to 65_536, literal content only. Nothing executes differently on any
+	// fan-out path, no byte is read, allocated or copied, and no copy primitive
+	// entered.
+	'wire-fanout': '92f0018ddd25e150fd9cc8f0af7189c23e5b437ade714b14630c6d041c4b152b',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
