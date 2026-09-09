@@ -486,15 +486,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last-Modified`), so every `staticHeaders` entry - HSTS, CSP, frame and
   referrer policy - was absent on every revalidation, and a client that
   revalidates on each navigation saw its security policy once. The 304 now
-  writes the representation's 200 header set less the fields that describe
-  the body it does not carry (`Content-Encoding`, `Content-Disposition`; RFC
-  9110 15.4.5), baked per representation at index time so the revalidation
-  path stays one loop.
+  writes the representation's 200 header tuples - validators, caching
+  directives and every configured entry; `Content-Type` is written only beside
+  a body - less the fields that describe the body it does not carry
+  (`Content-Encoding`, `Content-Disposition`; RFC 9110 15.4.5), baked per
+  representation at index time so the revalidation path stays one loop.
 - **Accept-Encoding is negotiated by its weights, not by substring.** Both the
   static lane and the single-chunk SSR lane chose a coding with
   `includes('br')` then `includes('gzip')`, so `br;q=0` - a refusal - was
-  served brotli, `gzip;q=1, br;q=0.5` got brotli, and `*;q=0, gzip` got
-  brotli. `utils/content-coding.js` reads the list as RFC 9110 12.5.3 does:
+  served brotli, `gzip;q=1, br;q=0.5` got brotli, and a bare `*` got
+  identity. `utils/content-coding.js` reads the list as RFC 9110 12.5.3 does:
   an unlisted coding is acceptable only through `*`, `q=0` refuses, the
   highest weight wins and brotli breaks a tie; identity stays the fallback
   even under `identity;q=0`. The browser shape (brotli listed weightless) is

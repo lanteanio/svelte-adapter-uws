@@ -19,8 +19,8 @@
  * shape browsers send lists brotli with no weight. A coding listed without a
  * weight is acceptable at 1, the highest weight there is, and brotli wins a
  * tie, so finding `br` spelled that way settles the decision with one native
- * substring search and a delimiter check on each side - the same cost as the
- * substring test it replaces. Every other shape (a weight anywhere on brotli,
+ * substring search and a delimiter check on each side - a few nanoseconds
+ * over the substring test it replaces. Every other shape (a weight anywhere on brotli,
  * a capitalised spelling, no brotli at all) takes one allocation-free pass over
  * the header. Weights are kept in thousandths (the grammar allows at most three
  * decimals), a coding that is not listed is -1, the first listing of a coding
