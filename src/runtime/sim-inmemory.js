@@ -273,6 +273,7 @@ export function createInMemoryApp(opts) {
 	const app = {
 		ws(path, b) { wsPath = path; behavior = b || {}; return app; },
 		get(path, handler) { routes.set('GET ' + path, handler); return app; },
+		head(path, handler) { routes.set('HEAD ' + path, handler); return app; },
 		post(path, handler) { routes.set('POST ' + path, handler); return app; },
 		any(path, handler) { routes.set('ANY ' + path, handler); return app; },
 		options(path, handler) { routes.set('OPTIONS ' + path, handler); return app; },
