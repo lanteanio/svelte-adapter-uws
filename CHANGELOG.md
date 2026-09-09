@@ -473,6 +473,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bytes=-0` is answered 416, not with the whole body.** The range parser
+  read a zero-length suffix as malformed, and a malformed Range is ignored, so
+  a request for the last zero bytes got a 200 with everything. RFC 9110 14.2
+  makes a suffix range satisfiable only with a non-zero length; the parser
+  (`utils/byte-range.js`, moved out of the static handler so the suite drives
+  the served line rather than a transcription of it) now reports it
+  unsatisfiable, and the static lane answers `416` with
+  `Content-Range: bytes */N` against the negotiated representation's length.
+- **A 304 carries the app's configured headers.** The revalidation response
+  was assembled from four named fields (`ETag`, `Vary`, `Cache-Control`,
+  `Last-Modified`), so every `staticHeaders` entry - HSTS, CSP, frame and
+  referrer policy - was absent on every revalidation, and a client that
+  revalidates on each navigation saw its security policy once. The 304 now
+  writes the representation's 200 header set less the fields that describe
+  the body it does not carry (`Content-Encoding`, `Content-Disposition`; RFC
+  9110 15.4.5), baked per representation at index time so the revalidation
+  path stays one loop.
+- **Accept-Encoding is negotiated by its weights, not by substring.** Both the
+  static lane and the single-chunk SSR lane chose a coding with
+  `includes('br')` then `includes('gzip')`, so `br;q=0` - a refusal - was
+  served brotli, `gzip;q=1, br;q=0.5` got brotli, and `*;q=0, gzip` got
+  brotli. `utils/content-coding.js` reads the list as RFC 9110 12.5.3 does:
+  an unlisted coding is acceptable only through `*`, `q=0` refuses, the
+  highest weight wins and brotli breaks a tie; identity stays the fallback
+  even under `identity;q=0`. The browser shape (brotli listed weightless) is
+  decided by one substring search; measured on the static and SSR lanes under
+  autocannon, the change sits inside the control arm's spread
+  (`bench/38-content-coding-lanes-ab.mjs`).
+- **A prerendered trailing-slash redirect is percent-encoded.** The lookup
+  matches the DECODED path and wrote it verbatim into `Location`, so a
+  prerendered route with a non-ASCII name redirected with the name's raw UTF-8
+  bytes in the header - and a client sending the bytes raw in its request line
+  got them back the same way. The target is now spelled as a request target
+  (`utils/location-target.js`), path segments and query alike, so the redirect
+  lands on the lookup that issued it. Pinned against the built runtime over a
+  raw socket, encoded and raw-byte spellings both.
 - **On Windows, the reserved-character refusal reads the decoded path too.**
   The gate that answers 400 to a path naming an NTFS alternate data stream
   (`:`) or an 8.3 short name (`~`) read the raw request target only, so

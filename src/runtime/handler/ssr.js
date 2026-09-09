@@ -2,6 +2,7 @@
 /* global WS_OPTIONS */
 /* global ENV_PREFIX */
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
+import { negotiateEncoding } from '../utils/content-coding.js';
 import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
@@ -535,15 +536,16 @@ async function writeResponse(res, response, state, acceptEncoding) {
 					const semi = ctRaw.indexOf(';');
 					const ct = semi === -1 ? ctRaw : ctRaw.slice(0, semi).trimEnd();
 					if (COMPRESSIBLE_TYPES.has(ct)) {
-						const useBr = acceptEncoding.includes('br');
-						const useGz = !useBr && acceptEncoding.includes('gzip');
-						if (useBr || useGz) {
-							const compressed = useBr
+						// The header's weights decide, not a substring: `br;q=0` is a
+						// refusal, and `gzip;q=1, br;q=0.5` prefers gzip.
+						const chosen = negotiateEncoding(acceptEncoding, true, true);
+						if (chosen !== '') {
+							const compressed = chosen === 'br'
 								? brotliCompressSync(body, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } })
 								: gzipSync(body, { level: 6 });
 							if (compressed.byteLength < body.byteLength) {
 								body = compressed;
-								encoding = useBr ? 'br' : 'gzip';
+								encoding = chosen;
 							}
 						}
 					}

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { hasUWS } from './helpers/real-runtime.js';
 import { parseCookies, serializeCookie, createCookies } from '../src/runtime/cookies.js';
 import { contentDispositionValue } from '../src/runtime/utils/static-headers.js';
+import { parseRange } from '../src/runtime/utils/byte-range.js';
 import {
 	mimeLookup,
 	parse_as_bytes,
@@ -996,49 +997,30 @@ describe('SSR dedup Vary exclusion', () => {
 });
 
 // - parseRange behavior -------------------------------------------------------
-// Inline copy of parseRange from src/runtime/handler.js.
-
-// Inline copy of parseRange from src/runtime/handler.js.
-// Returns { start, end } for a valid range, null for unsatisfiable, false for syntax error.
-function parseRange(header, fileSize) {
-	if (!header.startsWith('bytes=')) return false;
-	const spec = header.slice(6);
-	if (spec.includes(',')) return false;
-
-	const dash = spec.indexOf('-');
-	if (dash < 0) return false;
-
-	const rawStart = spec.slice(0, dash);
-	const rawEnd = spec.slice(dash + 1);
-
-	if (rawStart !== '' && /\D/.test(rawStart)) return false;
-	if (rawEnd !== '' && /\D/.test(rawEnd)) return false;
-
-	let start, end;
-	if (rawStart === '') {
-		const suffix = parseInt(rawEnd, 10);
-		if (!Number.isFinite(suffix) || suffix <= 0) return false;
-		start = Math.max(0, fileSize - suffix);
-		end = fileSize - 1;
-	} else {
-		start = parseInt(rawStart, 10);
-		if (!Number.isFinite(start) || start < 0) return false;
-		if (rawEnd === '') {
-			end = fileSize - 1;
-		} else {
-			end = parseInt(rawEnd, 10);
-			if (!Number.isFinite(end) || end < start) return false;
-		}
-	}
-
-	if (start >= fileSize) return null;
-	end = Math.min(end, fileSize - 1);
-	return { start, end };
-}
+// The shipped parser (src/runtime/utils/byte-range.js), the one serveStatic
+// calls. An earlier version of this block held an inline copy, so every case
+// passed against its own transcription while the served line went unpinned.
 
 describe('parseRange', () => {
 	it('parses a simple byte range', () => {
 		expect(parseRange('bytes=0-499', 1000)).toEqual({ start: 0, end: 499 });
+	});
+
+	it('a zero-length suffix (bytes=-0) is unsatisfiable, not ignorable', () => {
+		// RFC 9110 14.2: a suffix range is satisfiable only with a NON-ZERO
+		// length. null is the 416 outcome; false would have served the whole
+		// body for a request that asked for none of it.
+		expect(parseRange('bytes=-0', 1000)).toBeNull();
+		expect(parseRange('bytes=-00', 1000)).toBeNull();
+		expect(parseRange('bytes=-1', 1000)).toEqual({ start: 999, end: 999 });
+	});
+
+	it('a suffix longer than the representation is the whole representation', () => {
+		expect(parseRange('bytes=-5000', 1000)).toEqual({ start: 0, end: 999 });
+	});
+
+	it('a bare dash is malformed, not a zero suffix', () => {
+		expect(parseRange('bytes=-', 1000)).toBe(false);
 	});
 
 	it('parses an open-ended range (bytes=N-)', () => {

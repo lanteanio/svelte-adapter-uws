@@ -98,6 +98,8 @@ describeMaybe('static assets: per-encoding representations', () => {
 	let configuredEntry;
 	/** @type {any} */
 	let customCacheEntry;
+	/** @type {any} */
+	let downloadEntry;
 	/** @type {Buffer} */
 	let brBytes;
 	/** @type {Buffer} */
@@ -123,6 +125,9 @@ describeMaybe('static assets: per-encoding representations', () => {
 		fs.writeFileSync(assetPath, IDENTITY);
 		fs.writeFileSync(assetPath + '.br', brBytes);
 		fs.writeFileSync(assetPath + '.gz', gzBytes);
+		// A download extension, so one entry carries Content-Disposition.
+		fs.writeFileSync(path.join(tmpDir, 'bundle.zip'), IDENTITY);
+		fs.writeFileSync(path.join(tmpDir, 'bundle.zip.br'), brBytes);
 
 		const immutableRel = path.join(manifest.appPath, 'immutable', 'chunk.js');
 		fs.mkdirSync(path.dirname(path.join(tmpDir, immutableRel)), { recursive: true });
@@ -144,6 +149,7 @@ describeMaybe('static assets: per-encoding representations', () => {
 		immutableEntry = staticCache.get(`/negotiate-immutable/${manifest.appPath}/immutable/chunk.js`);
 		configuredEntry = staticCache.get('/negotiate-configured/asset.txt');
 		customCacheEntry = staticCache.get('/negotiate-custom-cache/asset.txt');
+		downloadEntry = staticCache.get('/negotiate-configured/bundle.zip');
 
 		serve = (target, opts = {}) => {
 			const rec = recorder();
@@ -308,6 +314,40 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(identity, 'content-range')).toBe(`bytes */${IDENTITY.length}`);
 	});
 
+	it('a zero-length suffix is unsatisfiable against the selected representation', () => {
+		// RFC 9110 14.2: a suffix range is satisfiable only with a non-zero
+		// length. `bytes=-0` used to be read as malformed and answered with the
+		// whole body - the one answer the RFC rules out for it.
+		const br = serve(entry, { acceptEncoding: 'br', range: 'bytes=-0' });
+		expect(br.status).toBe('416 Range Not Satisfiable');
+		expect(header(br, 'content-range')).toBe(`bytes */${brBytes.byteLength}`);
+		expect(br.body).toBeNull();
+
+		const identity = serve(entry, { range: 'bytes=-0' });
+		expect(identity.status).toBe('416 Range Not Satisfiable');
+		expect(header(identity, 'content-range')).toBe(`bytes */${IDENTITY.length}`);
+	});
+
+	it('selects by the weights in Accept-Encoding, not by substring', () => {
+		// `br;q=0` is a refusal; the substring test read it as an acceptance.
+		const refused = serve(entry, { acceptEncoding: 'br;q=0, gzip' });
+		expect(refused.status).toBe('200 OK');
+		expect(header(refused, 'content-encoding')).toBe('gzip');
+		expect(header(refused, 'etag')).toBe(entry.gzEtag);
+		expect(refused.body.equals(gzBytes)).toBe(true);
+
+		const preferred = serve(entry, { acceptEncoding: 'gzip;q=1.0, br;q=0.5' });
+		expect(header(preferred, 'content-encoding')).toBe('gzip');
+
+		const none = serve(entry, { acceptEncoding: 'br;q=0, gzip;q=0' });
+		expect(header(none, 'content-encoding')).toBeUndefined();
+		expect(header(none, 'etag')).toBe(entry.etag);
+		expect(none.body.equals(Buffer.from(IDENTITY))).toBe(true);
+
+		// The shapes browsers send still select brotli.
+		expect(header(serve(entry, { acceptEncoding: 'gzip, deflate, br, zstd' }), 'content-encoding')).toBe('br');
+	});
+
 	it('keeps compression when a Range header cannot be honoured', () => {
 		// Malformed, multi-range and stale-If-Range requests fall through to a
 		// normal response - which must still be the negotiated one, or a junk
@@ -385,6 +425,44 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(serve(configuredEntry), 'x-frame-options')).toBe('DENY');
 		expect(header(serve(configuredEntry, { acceptEncoding: 'br' }), 'x-frame-options')).toBe('DENY');
 		expect(header(serve(configuredEntry, { acceptEncoding: 'gzip' }), 'x-frame-options')).toBe('DENY');
+	});
+
+	it('carries app-configured headers on a 304, and leaves out what describes the body', () => {
+		// A client that revalidates on every navigation used to see the app's
+		// security headers only on the first fetch: the 304 was assembled from
+		// four named fields. RFC 9110 15.4.5 wants the 200's header set, less
+		// representation metadata that only makes sense beside the octets.
+		const identity = serve(configuredEntry, { ifNoneMatch: configuredEntry.etag });
+		expect(identity.status).toBe('304 Not Modified');
+		expect(header(identity, 'x-frame-options')).toBe('DENY');
+
+		const full = serve(configuredEntry, { acceptEncoding: 'br' });
+		const brEtag = header(full, 'etag');
+		const br = serve(configuredEntry, { acceptEncoding: 'br', ifNoneMatch: brEtag });
+		expect(br.status).toBe('304 Not Modified');
+		expect(header(br, 'x-frame-options')).toBe('DENY');
+		expect(header(br, 'x-content-type-options')).toBe('nosniff');
+		expect(header(br, 'etag')).toBe(brEtag);
+		expect(header(br, 'vary')).toBe('Accept-Encoding');
+		expect(header(br, 'cache-control')).toBe('no-cache');
+		expect(header(br, 'last-modified')).toBe(header(full, 'last-modified'));
+		expect(header(br, 'date')).toBeTruthy();
+		expect(header(br, 'content-encoding')).toBeUndefined();
+		expect(header(br, 'content-type')).toBeUndefined();
+		expect(br.body).toBeNull();
+
+		// The download's disposition describes a body the 304 does not carry.
+		expect(downloadEntry, 'the download probe asset must be in the static cache').toBeTruthy();
+		expect(header(serve(downloadEntry), 'content-disposition')).toBe('attachment; filename="bundle.zip"');
+		const revalidated = serve(downloadEntry, { ifNoneMatch: downloadEntry.etag });
+		expect(revalidated.status).toBe('304 Not Modified');
+		expect(header(revalidated, 'content-disposition')).toBeUndefined();
+		expect(header(revalidated, 'x-frame-options')).toBe('DENY');
+		const codedEtag = header(serve(downloadEntry, { acceptEncoding: 'br' }), 'etag');
+		const coded = serve(downloadEntry, { acceptEncoding: 'br', ifNoneMatch: codedEtag });
+		expect(coded.status).toBe('304 Not Modified');
+		expect(header(coded, 'content-disposition')).toBeUndefined();
+		expect(header(coded, 'content-encoding')).toBeUndefined();
 	});
 
 	it('carries a matching custom cache policy across representations and 304', () => {
@@ -637,5 +715,21 @@ describeMaybe('static assets: resume over a real connection', () => {
 		});
 		expect(res.status).toBe(416);
 		expect(res.headers['content-range']).toBe(`bytes */${brBytes.byteLength}`);
+	});
+
+	it('answers a zero-length suffix with 416 on the wire', async () => {
+		const res = await rawGet(port, '/wire-probe/asset.txt', { range: 'bytes=-0' });
+		expect(res.status).toBe(416);
+		expect(res.headers['content-range']).toBe(`bytes */${IDENTITY.length}`);
+		expect(res.body.byteLength).toBe(0);
+	});
+
+	it('serves identity to a client that refuses brotli by weight', async () => {
+		// Only a brotli sibling is indexed here, so a refusal of brotli leaves
+		// identity - and the substring test would have served brotli anyway.
+		const res = await rawGet(port, '/wire-probe/asset.txt', { 'accept-encoding': 'br;q=0, gzip' });
+		expect(res.status).toBe(200);
+		expect(res.headers['content-encoding']).toBeUndefined();
+		expect(res.body.equals(Buffer.from(IDENTITY))).toBe(true);
 	});
 });

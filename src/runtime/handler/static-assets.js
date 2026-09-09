@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { manifest, prerendered } from '../manifest-bridge.js';
 import { excludedDotPath } from '../utils/dot-path.js';
 import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl, contentDispositionValue } from '../utils.js';
+import { parseRange } from '../utils/byte-range.js';
+import { negotiateEncoding } from '../utils/content-coding.js';
+import { locationTarget } from '../utils/location-target.js';
+import { revalidationHeaders } from '../utils/revalidation-headers.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
@@ -28,14 +32,18 @@ const VARY_ON = 'Accept-Encoding';
 
 /**
  * A cached asset. Beyond the identity representation, an entry carries each
- * available content-coding's own validator and response headers, both resolved
- * at index time so the request path only has to pick one of them.
+ * available content-coding's own validator, response headers and the subset of
+ * those headers a 304 repeats, all resolved at index time so the request path
+ * only has to pick one of them.
  * @typedef {StaticEntry & {
  *   lastModifiedMs?: number,
+ *   revalidationHeaders: [string, string][],
  *   brEtag?: string,
  *   gzEtag?: string,
  *   brHeaders?: [string, string][],
- *   gzHeaders?: [string, string][]
+ *   gzHeaders?: [string, string][],
+ *   brRevalidationHeaders?: [string, string][],
+ *   gzRevalidationHeaders?: [string, string][]
  * }} NegotiatedStaticEntry
  */
 
@@ -125,22 +133,6 @@ function variantHeaders(base, variantEtag, encoding) {
 }
 
 /**
- * Read one header value out of a representation's baked tuples. Used on the
- * 304 path only, where the response is assembled field by field rather than by
- * replaying the whole tuple loop.
- *
- * @param {[string, string][]} tuples
- * @param {string} name - lowercase field name
- * @returns {string}
- */
-function headerValue(tuples, name) {
-	for (let i = 0; i < tuples.length; i++) {
-		if (tuples[i][0] === name) return tuples[i][1];
-	}
-	return '';
-}
-
-/**
  * Load a directory into the static cache.
  * @param {string} dir
  * @param {string} urlPrefix
@@ -193,8 +185,9 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			headers.push(['content-disposition', contentDispositionValue(path.basename(relPath))]);
 		}
 
+		const merged = mergeStaticHeaders(headers, staticHeaders);
 		/** @type {NegotiatedStaticEntry} */
-		const entry = { buffer, contentType, etag, lastModifiedMs, headers: mergeStaticHeaders(headers, staticHeaders) };
+		const entry = { buffer, contentType, etag, lastModifiedMs, headers: merged, revalidationHeaders: revalidationHeaders(merged) };
 
 		if (PRECOMPRESS) {
 			const brPath = absPath + '.br';
@@ -214,10 +207,12 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			if (entry.brBuffer) {
 				entry.brEtag = representationEtag(etag, 'br');
 				entry.brHeaders = variantHeaders(entry.headers, entry.brEtag, 'br');
+				entry.brRevalidationHeaders = revalidationHeaders(entry.brHeaders);
 			}
 			if (entry.gzBuffer) {
 				entry.gzEtag = representationEtag(etag, 'gzip');
 				entry.gzHeaders = variantHeaders(entry.headers, entry.gzEtag, 'gzip');
+				entry.gzRevalidationHeaders = revalidationHeaders(entry.gzHeaders);
 			}
 		}
 
@@ -262,60 +257,6 @@ export const clientDir = path.join(__dirname, 'client');
 export const prerenderedDir = path.join(__dirname, 'prerendered');
 
 export const _t_static = monotonicNow();
-
-/**
- * Parse an HTTP Range header value for a single byte range.
- * Returns { start, end } (both inclusive) or null when the range is absent,
- * malformed, multi-range, or would be unsatisfiable for the given file size.
- *
- * @param {string} header - Value of the Range header (e.g. "bytes=0-499")
- * @param {number} fileSize - Total number of bytes in the file
- * @returns {{ start: number, end: number } | null}
- */
-// parseRange returns:
-//   { start, end } - valid range, serve 206
-//   null           - syntactically valid but unsatisfiable (start >= fileSize), send 416
-//   false          - syntactically invalid, ignore the header and serve full 200
-function parseRange(header, fileSize) {
-	if (!header.startsWith('bytes=')) return false;
-	const spec = header.slice(6);
-	// Multi-range (comma-separated)  - not supported; serve full content instead
-	if (spec.includes(',')) return false;
-
-	const dash = spec.indexOf('-');
-	if (dash < 0) return false;
-
-	const rawStart = spec.slice(0, dash);
-	const rawEnd = spec.slice(dash + 1);
-
-	// Reject tokens with non-digit characters (e.g. "1oops"). RFC 7233 requires
-	// range values to be pure integers (1*DIGIT grammar production).
-	if (rawStart !== '' && /\D/.test(rawStart)) return false;
-	if (rawEnd !== '' && /\D/.test(rawEnd)) return false;
-
-	let start, end;
-	if (rawStart === '') {
-		// Suffix range: bytes=-N (last N bytes)
-		const suffix = parseInt(rawEnd, 10);
-		if (!Number.isFinite(suffix) || suffix <= 0) return false;
-		start = Math.max(0, fileSize - suffix);
-		end = fileSize - 1;
-	} else {
-		start = parseInt(rawStart, 10);
-		if (!Number.isFinite(start) || start < 0) return false;
-		if (rawEnd === '') {
-			// Open-ended: bytes=N- (from N to EOF)
-			end = fileSize - 1;
-		} else {
-			end = parseInt(rawEnd, 10);
-			if (!Number.isFinite(end) || end < start) return false;
-		}
-	}
-
-	if (start >= fileSize) return null; // Syntactically valid but unsatisfiable
-	end = Math.min(end, fileSize - 1);
-	return { start, end };
-}
 
 /**
  * Whether an ETag list header names `tag`, by OPAQUE EQUALITY. `*` matches any
@@ -439,17 +380,22 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 	// what a resuming download manager asks for, usually without If-Range -
 	// hands back a slice of a representation the client never held: no status
 	// code reports it and nothing on the wire catches it, the saved file is just
-	// wrong.
+	// wrong. The choice honours the header's weights (negotiateEncoding), so a
+	// coding the client refused with `q=0` is never the one selected.
 	let headers = entry.headers;
+	let revalidation = entry.revalidationHeaders;
 	let body = entry.buffer;
 	let repEtag = entry.etag;
-	if (entry.brBuffer && acceptEncoding.includes('br')) {
+	const encoding = negotiateEncoding(acceptEncoding, entry.brBuffer !== undefined, entry.gzBuffer !== undefined);
+	if (encoding === 'br') {
 		headers = /** @type {[string, string][]} */ (entry.brHeaders);
-		body = entry.brBuffer;
+		revalidation = /** @type {[string, string][]} */ (entry.brRevalidationHeaders);
+		body = /** @type {Buffer} */ (entry.brBuffer);
 		repEtag = /** @type {string} */ (entry.brEtag);
-	} else if (entry.gzBuffer && acceptEncoding.includes('gzip')) {
+	} else if (encoding === 'gzip') {
 		headers = /** @type {[string, string][]} */ (entry.gzHeaders);
-		body = entry.gzBuffer;
+		revalidation = /** @type {[string, string][]} */ (entry.gzRevalidationHeaders);
+		body = /** @type {Buffer} */ (entry.gzBuffer);
 		repEtag = /** @type {string} */ (entry.gzEtag);
 	}
 
@@ -474,17 +420,19 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 		if (verdict === 304) {
 			res.cork(() => {
 				res.writeStatus('304 Not Modified');
-				// A 304 updates a stored response, so it has to name WHICH stored
-				// representation was validated, what that entry varies on, and the
-				// freshness policy it is stored under. Without them a shared cache can
-				// attach it to the wrong variant and hand a coded body to a client that
-				// asked for identity.
-				res.writeHeader('etag', repEtag);
-				res.writeHeader('vary', VARY_ON);
-				const cacheControl = headerValue(headers, 'cache-control');
-				if (cacheControl) res.writeHeader('cache-control', cacheControl);
-				const lastModified = headerValue(headers, 'last-modified');
-				if (lastModified) res.writeHeader('last-modified', lastModified);
+				// A 304 repeats the header set the 200 would have carried, less the
+				// fields that describe the body it does not have (RFC 9110 15.4.5),
+				// baked per representation at index time. The validator and Vary
+				// name WHICH stored representation was validated - without them a
+				// shared cache can attach the 304 to the wrong variant and hand a
+				// coded body to a client that asked for identity - Cache-Control
+				// names the policy it is stored under, and the app-configured
+				// headers ride along, since a client that revalidates on every
+				// navigation would otherwise see its transport-security and
+				// content-security policy only once.
+				for (let i = 0; i < revalidation.length; i++) {
+					res.writeHeader(revalidation[i][0], revalidation[i][1]);
+				}
 				res.writeHeader('date', counters.cachedDateHeader);
 				res.end();
 			});
@@ -606,7 +554,7 @@ export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatc
 	if (prerendered.has(decoded)) {
 		// Directory-style page: bare path is not canonical, redirect to trailing slash
 		if (prerenderedDirStyle.has(decoded)) {
-			const location = decoded + '/' + search;
+			const location = locationTarget(decoded + '/', search);
 			res.cork(() => {
 				res.writeStatus('308 Permanent Redirect');
 				res.writeHeader('location', location);
@@ -633,8 +581,10 @@ export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatc
 				return true;
 			}
 		}
-		// Otherwise redirect to the prerendered path (the canonical form)
-		const location = alt + search;
+		// Otherwise redirect to the prerendered path (the canonical form),
+		// percent-encoded: the lookup matched on the decoded spelling, and a
+		// header carries the string's raw UTF-8 bytes.
+		const location = locationTarget(alt, search);
 		res.cork(() => {
 			res.writeStatus('308 Permanent Redirect');
 			res.writeHeader('location', location);
