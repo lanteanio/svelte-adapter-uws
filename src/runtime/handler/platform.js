@@ -1,6 +1,7 @@
 // Substituted by the adapter's build step; a free identifier until then.
 /* global WS_OPTIONS */
 import { wsModule } from '../ws-handler-bridge.js';
+import { runUnsubscribeHook } from '../utils/unsubscribe-hook.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
@@ -126,7 +127,7 @@ export const platform = {
 	// module reference to wsModule. Symbol-keyed: invisible to Object.keys /
 	// JSON / spread, unreachable from wire input. See WS_REVOKED_UNSUBSCRIBE.
 	[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
-		wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+		runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 	},
 	/**
 	 * Publish a message to all WebSocket clients subscribed to a topic.
@@ -1761,7 +1762,7 @@ export const platform = {
 			// through this exit and nothing remains to judge the membership.
 			if (settleDeniedSubscribe(ud, topic, pendingToken, subs.has(topic)) === 'deny-unwind') {
 				unwindRevokedMembership(ws, topic);
-				wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 			}
 			return denial;
 		}
@@ -1780,7 +1781,7 @@ export const platform = {
 			if (heldVerdict === 'ack') return null;
 			if (heldVerdict === 'deny-unwind') {
 				unwindRevokedMembership(ws, topic);
-				wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 			}
 			return 'FORBIDDEN';
 		}
@@ -2197,7 +2198,7 @@ export const platform = {
 		catch { counters.closedWsAborts++; return false; }
 		removeLogicalSubscription(subs, topic);
 		if (sharedTopics.has(topic)) leaveSharedCohort(ws, ws.getUserData(), topic);
-		wsModule.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+		runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		return true;
 	},
 

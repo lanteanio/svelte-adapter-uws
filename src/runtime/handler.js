@@ -48,6 +48,7 @@ import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_head
 import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CACHE_MAX, tryPrerendered } from './handler/static-assets.js';
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
+import { runUnsubscribeHook } from './utils/unsubscribe-hook.js';
 import { sendControl } from './handler/control-egress.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
@@ -2411,7 +2412,7 @@ if (WS_ENABLED) {
 						// remains to judge the membership.
 						if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
 							unwindRevokedMembership(ws, msg.topic);
-							wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+							runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 						}
 						sendSubscribeDenied(ws, msg.topic, ref, denial);
 						return;
@@ -2442,7 +2443,7 @@ if (WS_ENABLED) {
 						}
 						if (heldVerdict === 'deny-unwind') {
 							unwindRevokedMembership(ws, msg.topic);
-							wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+							runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 						}
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
@@ -2504,7 +2505,7 @@ if (WS_ENABLED) {
 							// installed by the revoked attempt's own hook must not stand.
 							if (heldVerdictR === 'deny-unwind') {
 								unwindRevokedMembership(ws, msg.topic);
-								wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+								runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 							}
 							discardResumeCapture(_cap);
 							sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
@@ -2601,7 +2602,7 @@ if (WS_ENABLED) {
 						message: 'A client topic subscription was removed.',
 						attributes: { topic: msg.topic }
 					}));
-					wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+					runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
 				if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -2849,7 +2850,7 @@ if (WS_ENABLED) {
 							// through this exit and nothing remains to judge the membership.
 							if (settleDeniedSubscribe(batchUd, topic, batchTokens[i], held) === 'deny-unwind') {
 								unwindRevokedMembership(ws, topic);
-								wsModule.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+								runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: batchUd[WS_PLATFORM] });
 							}
 							sendSubscribeDenied(ws, topic, ref, denial);
 							continue;
@@ -2867,7 +2868,7 @@ if (WS_ENABLED) {
 							}
 							if (heldVerdict === 'deny-unwind') {
 								unwindRevokedMembership(ws, topic);
-								wsModule.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+								runUnsubscribeHook(wsModule.unsubscribe, ws, topic, { platform: batchUd[WS_PLATFORM] });
 							}
 							sendSubscribeDenied(ws, topic, ref, 'FORBIDDEN');
 							continue;

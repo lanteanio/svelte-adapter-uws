@@ -58,6 +58,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	SUBSCRIBE_BATCH_HOOK: 'ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK',
 	SUBSCRIBE_BATCH_RESULT: 'ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT',
 	SUBSCRIBE_HOOK: 'ADAPTER-ERR-SUBSCRIBE-HOOK',
+	UNSUBSCRIBE_HOOK: 'ADAPTER-ERR-UNSUBSCRIBE-HOOK',
 	TLS_RELOAD_SKIPPED: 'ADAPTER-ERR-TLS-RELOAD-SKIPPED',
 	TLS_SWAP: 'ADAPTER-ERR-TLS-SWAP',
 	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH',
@@ -760,6 +761,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler/subscribe-hooks.js']),
 		anchor: 'adapter-err-subscribe-hook',
 		help: 'docs/errors.md#adapter-err-subscribe-hook'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.UNSUBSCRIBE_HOOK,
+		code: null,
+		event: 'unsubscribe.hook-failed',
+		component: 'runtime.subscribe',
+		severity: 'error',
+		emission: 'direct',
+		problemPrefix: 'The unsubscribe hook threw or rejected; the connection and its remaining subscriptions are unaffected.',
+		messagePrefix: direct('runtime.subscribe', 'unsubscribe.hook-failed', 'error', 'The unsubscribe hook threw or rejected; the connection and its remaining subscriptions are unaffected.'),
+		cause: 'The application `unsubscribe` hook threw, or returned a promise that rejected. The hook is fire-and-forget: the adapter never awaits it, so a rejection has no other owner.',
+		consequence: 'Nothing on the wire. The unsubscribe itself had already completed - the membership is gone and the client was told so before the hook ran - and the connection keeps every other subscription. Whatever per-topic cleanup the hook was doing did not finish. The record carries the topic, the connection\'s request id and the attached error.',
+		automaticRecovery: 'None. The hook runs again on the next unsubscribe of that topic on any connection.',
+		nextAction: 'Read the attached error and fix the hook. If the hook is async, keep the contract in mind: the adapter does not wait for it, so a cleanup that must finish before the socket is reused needs its own owner (a queue, a store, an awaited platform call inside the hook).',
+		sources: Object.freeze(['src/runtime/utils/unsubscribe-hook.js']),
+		anchor: 'adapter-err-unsubscribe-hook',
+		help: 'docs/errors.md#adapter-err-unsubscribe-hook'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.TLS_RELOAD_SKIPPED,

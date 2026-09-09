@@ -6,6 +6,7 @@ import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
@@ -811,7 +812,7 @@ export default function uws(options = {}) {
 		// no reference to this server's hook container. See
 		// WS_REVOKED_UNSUBSCRIBE.
 		[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
-			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			runUnsubscribeHook(userHandlers.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 		},
 		publish,
 		publishBatched,
@@ -1126,7 +1127,7 @@ export default function uws(options = {}) {
 				// through this exit and nothing remains to judge the membership.
 				if (settleDeniedSubscribe(ud, topic, tokenS, subs.has(topic)) === 'deny-unwind') {
 					unwindRevokedMembership(ws, topic);
-					userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+					runUnsubscribeHook(userHandlers.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 				}
 				return denial;
 			}
@@ -1140,7 +1141,7 @@ export default function uws(options = {}) {
 				if (heldVerdict === 'ack') return null;
 				if (heldVerdict === 'deny-unwind') {
 					unwindRevokedMembership(ws, topic);
-					userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+					runUnsubscribeHook(userHandlers.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 				}
 				return 'FORBIDDEN';
 			}
@@ -1236,7 +1237,7 @@ export default function uws(options = {}) {
 			if (!(subs instanceof Set) || !subs.has(topic)) return cancelledPendingV;
 			ws.unsubscribe(topic);
 			subs.delete(topic);
-			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			runUnsubscribeHook(userHandlers.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
 		// Client-publish authorization (the `game` lane), mirroring the
@@ -2762,7 +2763,7 @@ export default function uws(options = {}) {
 									// through this exit and nothing remains to judge the membership.
 									if (settleDeniedSubscribe(pendingUdV, msg.topic, pendingTokenV, subs.has(msg.topic)) === 'deny-unwind') {
 										unwindRevokedMembership(wrapped, msg.topic);
-										userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+										runUnsubscribeHook(userHandlers.unsubscribe, wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
 									}
 									sendDenied(ws, msg.topic, ref, denial);
 									return;
@@ -2788,7 +2789,7 @@ export default function uws(options = {}) {
 									}
 									if (heldVerdictV === 'deny-unwind') {
 										unwindRevokedMembership(wrapped, msg.topic);
-										userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+										runUnsubscribeHook(userHandlers.unsubscribe, wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
 									}
 									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
 									return;
@@ -2834,7 +2835,7 @@ export default function uws(options = {}) {
 										// installed by the revoked attempt's own hook must not stand.
 										if (heldVerdictVR === 'deny-unwind') {
 											unwindRevokedMembership(wrapped, msg.topic);
-											userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+											runUnsubscribeHook(userHandlers.unsubscribe, wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
 										}
 										discardResumeCaptureV(_cap);
 										sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
@@ -2871,7 +2872,7 @@ export default function uws(options = {}) {
 								// Read access gone means write access gone, as production does.
 								if (uudV && uudV[WS_PUBLISH_GRANT] === msg.topic) uudV[WS_PUBLISH_GRANT] = undefined;
 								releaseDerivedSubscriptions(wrapped, msg.topic);
-								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+								runUnsubscribeHook(userHandlers.unsubscribe, wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 								return;
 							}
 							if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -3078,7 +3079,7 @@ export default function uws(options = {}) {
 										// through this exit and nothing remains to judge the membership.
 										if (settleDeniedV(held) === 'deny-unwind') {
 											unwindRevokedMembership(wrapped, topic);
-											userHandlers.unsubscribe?.(wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
+											runUnsubscribeHook(userHandlers.unsubscribe, wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
 										}
 										sendDenied(ws, topic, ref, denial);
 										continue;
@@ -3094,7 +3095,7 @@ export default function uws(options = {}) {
 										}
 										if (heldVerdictV === 'deny-unwind') {
 											unwindRevokedMembership(wrapped, topic);
-											userHandlers.unsubscribe?.(wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
+											runUnsubscribeHook(userHandlers.unsubscribe, wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
 										}
 										sendDenied(ws, topic, ref, 'FORBIDDEN');
 										continue;

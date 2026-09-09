@@ -1816,7 +1816,8 @@ export function subscribe(ws, topic, { platform }) {
 }
 
 // Called when a client unsubscribes from a topic (optional). Clean up per-topic
-// state here; it is synchronous and fire-and-forget, a returned promise is not awaited.
+// state here; it is fire-and-forget, a returned promise is not awaited. A throw
+// or a rejection is reported as ADAPTER-ERR-UNSUBSCRIBE-HOOK and the connection survives.
 export function unsubscribe(ws, topic, { platform }) {
   console.log(`Unsubscribed from ${topic}`);
 }

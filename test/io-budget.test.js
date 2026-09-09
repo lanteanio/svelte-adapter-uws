@@ -967,7 +967,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// 65_536, and the digest covers literal content. The predicate that reads
 	// it is unchanged; nothing executes differently on any frame path, no byte
 	// is read, allocated or copied, and no copy primitive entered.
-	ingress: '28f083c34d9c959f48d16984717eb20628d15aaf69bdbd873eae63db62cad365',
+	//
+	// Re-pinned for the unsubscribe-hook registry entry, reached through
+	// utils.js -> utils/metrics.js -> error-registry.js: one id constant and
+	// one frozen entry object (prose fields only), and the digest covers
+	// literal content. Measured: reverting error-registry.js alone returns this
+	// digest to its previous value while the platform digest still moves, and
+	// reverting platform.js alone leaves this digest at the value below - so
+	// the hook helper and the platform.js call sites do not reach this graph.
+	// Nothing executes differently on any frame path, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: 'e248ba21d5122422c0b56343b8c2d2aa44f180257125be1b1bd45f85ddcad1ea',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1737,7 +1747,27 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// drift recorded on the ingress seal above: 1_000_000 to 65_536, literal
 	// content only. Nothing executes differently on any frame path, no byte is
 	// read, allocated or copied, and no copy primitive entered.
-	platform: 'e870141a7966aeb8dcd7ec3e1b49a39356fb4d7c1b56e44d810bbabad312b2ac',
+	//
+	// Re-pinned for the contained unsubscribe hook, and measured as two parts:
+	// with error-registry.js alone reverted this digest reads
+	// 073ce9300c327464b6ae04b5f4d0cbbbf3144af00aafbd65e160568d120032d3 (the
+	// call sites and the helper), with platform.js alone reverted it reads
+	// a749ab5d8d87e450f4acca76fa2c13aa77a23327bde820a430b8544bf91e7e0f (the
+	// registry entry, the same drift the ingress and wire-fanout seals
+	// record), and with error-registry.js reverted and the other two pins set
+	// to that state all three seals hold - so the registry entry is what
+	// reaches every graph, and the call sites reach this one only. What
+	// changed in this graph:
+	// platform.js imports utils/unsubscribe-hook.js and its four
+	// `wsModule.unsubscribe?.(...)` sites (the observer deny-unwind slot, the
+	// two deny-unwind branches in subscribe, and platform.unsubscribe) call
+	// `runUnsubscribeHook(wsModule.unsubscribe, ...)` with the same arguments;
+	// the helper wraps the call in a try/catch and attaches a rejection handler
+	// to a returned thenable. All of it sits on the subscribe and revoke
+	// paths, none on publish or fan-out. Per publish and per fan-out nothing
+	// executes differently, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: 'bc0dcd029d5543d4813efde4951d9299cdeffc0d72ce10f10646b93c58a71b8e',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2024,7 +2054,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// to 65_536, literal content only. Nothing executes differently on any
 	// fan-out path, no byte is read, allocated or copied, and no copy primitive
 	// entered.
-	'wire-fanout': '92f0018ddd25e150fd9cc8f0af7189c23e5b437ade714b14630c6d041c4b152b',
+	//
+	// Re-pinned for the unsubscribe-hook registry entry, reached through
+	// utils.js -> utils/metrics.js -> error-registry.js like the ingress and
+	// platform graphs: one id constant and one frozen prose entry, literal
+	// content only. Measured: with error-registry.js alone reverted (and the
+	// other two pins set to that state) this digest and both others hold at
+	// their previous values; with platform.js alone reverted this digest reads
+	// the value below - so the hook helper and the call sites that changed do
+	// not reach this graph. Nothing executes differently on any fan-out path,
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	'wire-fanout': 'fa67326e057c4873b0b466231789ff0e320c16360c705363863b22bf958e1dad',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

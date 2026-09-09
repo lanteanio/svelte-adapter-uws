@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 42 entries
-against the 45 distinct diagnostic events emitted from the scanned sources, plus
+for traffic, whether anything recovers on its own, and what to do next: 43 entries
+against the 46 distinct diagnostic events emitted from the scanned sources, plus
 35 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
@@ -63,6 +63,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook) | `subscribe.batch-hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-hook-failed severity=error] The subscribeBatch hook threw; every topic in the batch was denied INTERNAL_ERROR.` |
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result) | `subscribe.batch-result-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-result-read-failed severity=error] Reading the subscribeBatch result threw; every topic in the batch was denied INTERNAL_ERROR.` |
 | [ADAPTER-ERR-SUBSCRIBE-HOOK](#adapter-err-subscribe-hook) | `subscribe.hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.hook-failed severity=error] The subscribe hook threw; the subscribe was denied INTERNAL_ERROR.` |
+| [ADAPTER-ERR-UNSUBSCRIBE-HOOK](#adapter-err-unsubscribe-hook) | `unsubscribe.hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=unsubscribe.hook-failed severity=error] The unsubscribe hook threw or rejected; the connection and its remaining subscriptions are unaffected.` |
 | [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped) | `tls.reload-skipped` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.reload-skipped severity=warn] A certificate reload was skipped and the previous certificate was kept; the renewal on disk is not being served.` |
 | [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap) | `tls.swap-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.swap-failed severity=error] A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.` |
 | [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch) | `tls.watch-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-failed severity=error] The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.` |
@@ -106,8 +107,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 45 distinct events.
-The 42 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 46 distinct events.
+The 43 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -152,6 +153,7 @@ Indexed events:
 - `subscribe.batch-hook-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook)
 - `subscribe.batch-result-read-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result)
 - `subscribe.hook-failed` - [ADAPTER-ERR-SUBSCRIBE-HOOK](#adapter-err-subscribe-hook)
+- `unsubscribe.hook-failed` - [ADAPTER-ERR-UNSUBSCRIBE-HOOK](#adapter-err-unsubscribe-hook)
 - `tls.reload-skipped` - [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped)
 - `tls.swap-failed` - [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap)
 - `tls.watch-failed` - [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch)
@@ -671,6 +673,18 @@ searchable log prefix is:
 - **Next action:** Read the attached error and fix the hook. A client seeing INTERNAL_ERROR rather than FORBIDDEN or UNAUTHENTICATED is being told this is a defect, not a permissions decision, so treat it as one and do not go looking at authorization rules first.
 - **Runtime help:** `docs/errors.md#adapter-err-subscribe-hook`
 - **Runtime sources:** [src/runtime/handler/subscribe-hooks.js](../src/runtime/handler/subscribe-hooks.js)
+
+<a id="adapter-err-unsubscribe-hook"></a>
+## `ADAPTER-ERR-UNSUBSCRIBE-HOOK`
+
+- **Code/event:** `unsubscribe.hook-failed`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=unsubscribe.hook-failed severity=error] The unsubscribe hook threw or rejected; the connection and its remaining subscriptions are unaffected.`
+- **Cause:** The application `unsubscribe` hook threw, or returned a promise that rejected. The hook is fire-and-forget: the adapter never awaits it, so a rejection has no other owner.
+- **Consequence:** Nothing on the wire. The unsubscribe itself had already completed - the membership is gone and the client was told so before the hook ran - and the connection keeps every other subscription. Whatever per-topic cleanup the hook was doing did not finish. The record carries the topic, the connection's request id and the attached error.
+- **Automatic recovery:** None. The hook runs again on the next unsubscribe of that topic on any connection.
+- **Next action:** Read the attached error and fix the hook. If the hook is async, keep the contract in mind: the adapter does not wait for it, so a cleanup that must finish before the socket is reused needs its own owner (a queue, a store, an awaited platform call inside the hook).
+- **Runtime help:** `docs/errors.md#adapter-err-unsubscribe-hook`
+- **Runtime sources:** [src/runtime/utils/unsubscribe-hook.js](../src/runtime/utils/unsubscribe-hook.js)
 
 <a id="adapter-err-tls-reload-skipped"></a>
 ## `ADAPTER-ERR-TLS-RELOAD-SKIPPED`

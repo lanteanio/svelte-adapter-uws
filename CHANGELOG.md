@@ -473,6 +473,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failing `unsubscribe` hook no longer takes the worker or the message
+  handler with it.** The hook is fire-and-forget and was invoked bare at
+  thirty sites across the runtime, the test server and the dev plugin, so an
+  async hook's rejection was an unhandled rejection - fatal under Node's
+  default policy - and a synchronous throw propagated into the message
+  handler. One helper now invokes it everywhere: a throw is caught, a
+  returned thenable gets a rejection handler, and either failure is reported
+  once as `ADAPTER-ERR-UNSUBSCRIBE-HOOK` with the topic and the connection's
+  request id. The contract is unchanged - the promise is still not awaited, so
+  no in-flight set and no bound appear - and the connection keeps its other
+  subscriptions. Pinned on the helper, the test server and the built runtime
+  over a real socket, throw and rejection both; the fixture's hook selects
+  the failure by topic name.
 - **`bytes=-0` is answered 416, not with the whole body.** The range parser
   read a zero-length suffix as malformed, and a malformed Range is ignored, so
   a request for the last zero bytes got a 200 with everything. RFC 9110 14.2

@@ -15,6 +15,7 @@ import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, s
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
+import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
@@ -1018,7 +1019,7 @@ export async function createTestServer(options = {}) {
 		// global slot would run server A's unsubscribe hook for server B's
 		// connections. See WS_REVOKED_UNSUBSCRIBE.
 		[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
-			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 		},
 		publish(topic, event, data, options) {
 			// The seq VALUE first, so a refusal does not depend on whether a
@@ -1790,7 +1791,7 @@ export async function createTestServer(options = {}) {
 				// through this exit and nothing remains to judge the membership.
 				if (settleDeniedSubscribe(ud, topic, token, subs.has(topic)) === 'deny-unwind') {
 					unwindRevokedMembership(ws, topic);
-					handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+					runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 				}
 				return denial;
 			}
@@ -1802,7 +1803,7 @@ export async function createTestServer(options = {}) {
 				if (heldVerdict === 'ack') return null;
 				if (heldVerdict === 'deny-unwind') {
 					unwindRevokedMembership(ws, topic);
-					handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+					runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 				}
 				return 'FORBIDDEN';
 			}
@@ -1895,7 +1896,7 @@ export async function createTestServer(options = {}) {
 			catch { closedWsAbortsT++; return false; }
 			subs.delete(topic);
 			if (sharedTopicsT.has(topic)) leaveCohortT(ws, ws.getUserData(), topic);
-			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
 		// Client-publish authorization (the `game` lane), mirroring the
@@ -2951,7 +2952,7 @@ export async function createTestServer(options = {}) {
 								// through this exit and nothing remains to judge the membership.
 								if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
 									unwindRevokedMembership(ws, msg.topic);
-									handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+									runUnsubscribeHook(handler.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 								}
 								sendDeniedT(ws, msg.topic, ref, denial);
 								return;
@@ -2976,7 +2977,7 @@ export async function createTestServer(options = {}) {
 								}
 								if (heldVerdict === 'deny-unwind') {
 									unwindRevokedMembership(ws, msg.topic);
-									handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+									runUnsubscribeHook(handler.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 								}
 								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;
@@ -3016,7 +3017,7 @@ export async function createTestServer(options = {}) {
 									// installed by the revoked attempt's own hook must not stand.
 									if (heldVerdictR === 'deny-unwind') {
 										unwindRevokedMembership(ws, msg.topic);
-										handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+										runUnsubscribeHook(handler.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
 									}
 									discardResumeCaptureT(_cap);
 									sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
@@ -3071,7 +3072,7 @@ export async function createTestServer(options = {}) {
 							const udWireUnsub = ws.getUserData();
 							if (udWireUnsub[WS_PUBLISH_GRANT] === msg.topic) udWireUnsub[WS_PUBLISH_GRANT] = undefined;
 							if (sharedTopicsT.has(msg.topic)) leaveCohortT(ws, ws.getUserData(), msg.topic);
-							handler.unsubscribe?.(ws, msg.topic, { platform: udWireUnsub[WS_PLATFORM] });
+							runUnsubscribeHook(handler.unsubscribe, ws, msg.topic, { platform: udWireUnsub[WS_PLATFORM] });
 							return;
 						}
 						if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -3253,7 +3254,7 @@ export async function createTestServer(options = {}) {
 									// through this exit and nothing remains to judge the membership.
 									if (settleDeniedSubscribe(batchUd, topic, batchTokens[i], held) === 'deny-unwind') {
 										unwindRevokedMembership(ws, topic);
-										handler.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+										runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: batchUd[WS_PLATFORM] });
 									}
 									sendDeniedT(ws, topic, ref, denial);
 									continue;
@@ -3269,7 +3270,7 @@ export async function createTestServer(options = {}) {
 									}
 									if (heldVerdict === 'deny-unwind') {
 										unwindRevokedMembership(ws, topic);
-										handler.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+										runUnsubscribeHook(handler.unsubscribe, ws, topic, { platform: batchUd[WS_PLATFORM] });
 									}
 									sendDeniedT(ws, topic, ref, 'FORBIDDEN');
 									continue;
