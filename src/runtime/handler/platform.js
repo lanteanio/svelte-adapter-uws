@@ -591,7 +591,10 @@ export const platform = {
 			// announce succeeded); otherwise this shared topic currently has only JSON
 			// subscribers and skips the binary fan-out entirely.
 			const id = getSharedWireId(topic);
-			// ONE OUTCOME PER NATIVE CALL, so a shared publish reports two: the
+			// ONE OUTCOME PER NATIVE CALL, so a shared publish reports two once
+			// the topic has both cohorts and one while every subscriber is
+			// JSON-only (the binary cohort exists only while a capable client
+			// holds it, and the call below is skipped without one): the
 			// counter is documented as the result of each TopicTree publish and
 			// is deliberately not a per-logical-publish census (an excluding
 			// publish takes the per-socket walk and reports nothing at all, and
@@ -599,8 +602,7 @@ export const platform = {
 			// A cohort that is empty really did find no subscribers, which is
 			// what `no_subscribers` says. Reporting one merged outcome here
 			// would make this lane the only one that answers a different
-			// question from the rest, and would hide an all-JSON room whose
-			// binary cohort never forms.
+			// question from the rest.
 			if (id !== undefined) {
 				const binaryResult = app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
 				counters.publishOutcomeHook?.(binaryResult);

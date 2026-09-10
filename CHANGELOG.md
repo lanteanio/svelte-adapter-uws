@@ -494,10 +494,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   put it on the JSON cohort, and a later successful join added the binary one
   without removing that - so it received every shared publish twice, as the
   frame and as the envelope; the successful join now moves the connection
-  rather than adding to it. Both in the runtime and in `createTestServer`.
+  rather than adding to it, and a join that finds the capability gone - a
+  re-sent `hello` replaces the set, a refused per-connection announce poisons
+  the wire state - moves it the other way, out of the binary cohort and off
+  its reference. Both in the runtime and in `createTestServer`.
   `ws_publish_outcomes_total` is unchanged and stays per native call: a shared
-  publish makes one call per cohort and reports both, which is now stated
-  where the metric is documented rather than left to be discovered.
+  publish makes one call per cohort that exists, so it reports two once a
+  topic has both and one while every subscriber is JSON-only, which is now
+  stated where the metric is documented rather than left to be discovered.
 - **A failing `unsubscribe` hook no longer takes the worker or the message
   handler with it.** The hook is fire-and-forget and was invoked bare at
   thirty sites across the runtime, the test server and the dev plugin, so an

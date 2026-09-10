@@ -1782,7 +1782,8 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// d115c4258fb14cafef2e29a038f4234d9df891ee7c478454602d014dc643773f, which
 	// is platform.js's share: a comment over the shared branch's two outcome
 	// reports, which are unchanged - the named-function seal on publishWire
-	// above holds at the value it had, so that body is byte-identical. With
+	// above is back at the value it carried before the outcome merge, so that
+	// body is byte-identical to the one the digest was taken over. With
 	// platform.js at its previous content instead the digest reads
 	// a6c0a5908b147449b37ff6aec4bd1de35948464a1142e49ff5b2588ef1aaed3f, which
 	// is cohort.js's share: an early return when the connection already holds
@@ -1793,7 +1794,21 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// branch makes the same two app.publish calls with the same frame and
 	// envelope. No byte is read, allocated or copied, and no copy primitive
 	// entered.
-	platform: 'c49d2575a10418541dacdf957c19440de94567b63456073ed6e13f19855a0e47',
+	//
+	// Re-pinned for the other half of that cohort move: the JSON branch now
+	// removes a connection from the binary cohort before subscribing it, so a
+	// member whose capability went away (a re-sent hello replaces the set, a
+	// refused announce poisons the wire state) leaves rather than sitting on
+	// both and receiving every shared publish twice. One Set delete, one
+	// refcount release and one unsubscribe, all on the subscribe path.
+	// Measured: with cohort.js alone reverted this digest returns to
+	// c49d2575a10418541dacdf957c19440de94567b63456073ed6e13f19855a0e47, the
+	// value it carried above, so the whole drift is that branch and the
+	// platform.js edit beside it (comment only) reaches nothing that is
+	// counted. Per publish the shared branch makes
+	// the same calls with the same frame and envelope; no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: 'bdac8fc6023e4591f3850b30c1e0ea91e960f9ed2784f4c536139fb0755c2c50',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

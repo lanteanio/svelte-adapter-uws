@@ -107,8 +107,8 @@ export function message(ws, ctx) {
 	}
 	if (msg.type === 'shared-publish') {
 		// A shared stateless codec publish, so the cohort lane runs in the
-		// built runtime: the topic splits into a binary and a JSON cohort and
-		// the outcome accounting has one logical publish to report.
+		// built runtime: the topic splits into a binary and a JSON cohort,
+		// and each cohort that exists takes its own native publish.
 		platform.publishWire(msg.topic, 'snapshot', { n: msg.n ?? 1 }, {
 			capability: 'fixture.shared:1', schemaVersion: 1, shared: true, encode: () => new Uint8Array([msg.n ?? 1])
 		});

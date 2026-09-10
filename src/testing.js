@@ -933,6 +933,14 @@ export async function createTestServer(options = {}) {
 			ws.unsubscribe(json);
 			ws.subscribe(bin);
 		} else {
+			// And the move in the other direction, as production: a connection
+			// whose capability went away or whose wire state was poisoned
+			// leaves the binary cohort instead of sitting on both.
+			const held = ud[WS_SHARED_COHORTS];
+			if (held && held.delete(topic)) {
+				sharedWireIds.release(topic);
+				ws.unsubscribe(bin);
+			}
 			ws.subscribe(json);
 		}
 	}

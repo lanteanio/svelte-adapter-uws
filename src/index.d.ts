@@ -1091,11 +1091,14 @@ export interface WebSocketOptions {
 	 *   walk instead of one native call, so it is counted by
 	 *   `ws_publishes_total` and is absent here: the two do not sum. In the
 	 *   other direction, one publish on a topic served by a `shared: true`
-	 *   codec makes two native calls - the binary cohort and the JSON cohort -
-	 *   and so contributes two outcomes, `no_subscribers` among them whenever
-	 *   every subscriber sits in one cohort. Read `no_subscribers` on such a
-	 *   topic as "one of the two cohorts is empty", not as "nobody received
-	 *   it"; `ws_publishes_total` is the count of logical publishes.
+	 *   codec makes one native call per cohort that exists, so it contributes
+	 *   two outcomes once the topic has both - and then `no_subscribers` is
+	 *   one of them whenever every subscriber sits in the other. The binary
+	 *   cohort exists only while a capable client holds it, so a topic whose
+	 *   subscribers are all JSON-only makes one call and contributes one.
+	 *   Read `no_subscribers` on a shared topic as "one of its cohorts is
+	 *   empty", not as "nobody received it"; `ws_publishes_total` is the count
+	 *   of logical publishes.
 	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
 	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
 	 * - `ws_backpressure_connections` - sampled connections holding a

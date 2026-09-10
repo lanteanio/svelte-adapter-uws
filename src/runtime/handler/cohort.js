@@ -79,6 +79,19 @@ export function joinSharedCohort(ws, ud, topic, capability) {
 		try { ws.unsubscribe(json); } catch { counters.closedWsAborts++; }
 		try { ws.subscribe(bin); } catch { counters.closedWsAborts++; }
 	} else {
+		// The move in the other direction, and the same reason. A connection
+		// can be in the binary cohort when it arrives here: a re-sent hello
+		// REPLACES its capability set, and a refused per-connection announce
+		// poisons the capability's wire state, so the join a plugin's
+		// trackedSubscribe makes for a topic the connection still holds now
+		// takes this branch. Leaving it subscribed to the binary cohort would
+		// give it every shared publish twice, and its reference would go on
+		// counting toward the binary cohort in the egress split.
+		const held = ud[WS_SHARED_COHORTS];
+		if (held && held.delete(topic)) {
+			releaseSharedWireId(topic);
+			try { ws.unsubscribe(bin); } catch { counters.closedWsAborts++; }
+		}
 		try { ws.subscribe(json); } catch { counters.closedWsAborts++; }
 	}
 }

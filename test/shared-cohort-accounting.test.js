@@ -19,10 +19,10 @@
 //    documented (index.d.ts, README) as the result of each native TopicTree
 //    publish: an excluding publish takes the per-socket walk and reports
 //    nothing, a batch reports once for the N events its single frame carries,
-//    and a shared publish makes one call per cohort and reports both. Merging
-//    the shared lane's two into one would make it the only lane answering a
-//    different question, and would hide an all-JSON room whose binary cohort
-//    never forms.
+//    and a shared publish makes one call per cohort that exists, so it
+//    reports two once the topic has both and one while every subscriber is
+//    JSON-only. Merging the shared lane's two into one would make it the only
+//    lane answering a different question.
 //
 // Layers: the built cohort module with the real wire-id table, the test
 // server through what a client can see, and the built runtime's own /metrics
@@ -70,7 +70,10 @@ async function connectClient(url, caps, topic = TOPIC) {
 	await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
 	ws.send(JSON.stringify({ type: 'hello', caps }));
 	ws.send(JSON.stringify({ type: 'subscribe', topic, ref: 1 }));
-	await until(() => frames.acks.find((a) => a.ref === 1));
+	// The ack, not merely an answer: `subscribe-denied` carries the same ref,
+	// and settling on one would let a denied client go on to fail somewhere
+	// further away from the reason.
+	await until(() => frames.acks.find((a) => a.ref === 1 && a.type === 'subscribed'));
 	return {
 		ws, frames,
 		send(msg) { ws.send(JSON.stringify(msg)); },
@@ -150,6 +153,34 @@ describeUWS('joinSharedCohort holds one wire-id reference per membership', () =>
 		expect(socket.cohorts()).toEqual(['json']);
 		expect(table.sharedWireIdRefs(TOPIC)).toBe(0);
 		expect(socket.sent).toEqual([]);
+	});
+
+	it('a member that loses its capability is moved out of the binary cohort, not added to JSON', async () => {
+		// The case the fresh-socket one above structurally cannot reach: this
+		// connection IS in the binary cohort when the JSON branch runs. Both
+		// ways in are the connection's own history, not a test contrivance - a
+		// re-sent hello REPLACES the capability set, and a refused per-
+		// connection announce poisons the capability - and the re-join is the
+		// same plugin trackedSubscribe the held-topic guard above is about.
+		// Left on both cohorts, this connection receives every shared publish
+		// twice and its reference keeps pricing it as a binary member.
+		const wireState = await import('./fixture/build/handler/wire-state.js');
+		for (const lose of [
+			(socket) => { socket.ud[WS_CAPS] = new Set(); },
+			(socket) => wireState.poisonWireState(socket.ws, socket.ud, CAP)
+		]) {
+			const socket = fakeSocket();
+			cohort.joinSharedCohort(socket.ws, socket.ud, TOPIC, CAP);
+			expect(socket.cohorts()).toEqual(['bin']);
+			expect(table.sharedWireIdRefs(TOPIC)).toBe(1);
+
+			lose(socket);
+			cohort.joinSharedCohort(socket.ws, socket.ud, TOPIC, CAP);
+			expect(socket.cohorts(), 'exactly one cohort per connection').toEqual(['json']);
+			expect(table.sharedWireIdRefs(TOPIC), 'the binary cohort no longer counts it').toBe(0);
+			expect(socket.ud[WS_SHARED_COHORTS].has(TOPIC), 'and neither does the membership set').toBe(false);
+			table._resetSharedWireIds();
+		}
 	});
 
 	it('the single leave releases the last reference and the id is reclaimed', () => {
@@ -293,9 +324,10 @@ describeUWS('the outcome counter counts native calls, not logical publishes', ()
 		// once for N events. An operator reads `no_subscribers` on a shared
 		// topic as "one cohort is empty" and takes the publish count from
 		// `ws_publishes_total`. Merging these two into one would leave this the
-		// only lane answering a different question, and would hide an all-JSON
-		// room whose binary cohort never forms - so this number is a contract,
-		// not an accident, and a change to it is a change to the metric.
+		// only lane answering a different question, so the number is a
+		// contract, not an accident, and a change to it is a change to the
+		// metric. An all-JSON topic makes ONE call and reports one, because
+		// the binary publish is skipped without a cohort to make it to.
 		expect(outcomesTotal(before), 'the first shared publish must already have been counted').toBeGreaterThan(0);
 		expect(outcomesTotal(after) - outcomesTotal(before)).toBe(2);
 	});
