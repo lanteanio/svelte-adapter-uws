@@ -285,18 +285,27 @@ describe('cluster sequence authority policy', () => {
 			.not.toMatch(/stampSeq|app\.publish|captureResumeFrame|maxSeenSeq\.set|entries\.length|Array\.isArray/);
 		// The per-entry authority check runs inside the batch too - in BOTH
 		// branches (the stateless reroute pre-reads and the stateful snapshot
-		// pass), before anything is stamped or fanned out: the last call site
-		// precedes the first counter stamp and the first per-entry publish.
-		expect(wireBatch.split('assertBatchEntrySequenceAuthority(opts)').length, 'both batch branches vet per-entry authority')
-			.toBe(3);
-		// Source order: the stateless branch's check (first occurrence) sits in
-		// its pre-read loop, before the first per-entry publish; the stateful
-		// branch's (last occurrence) sits in the snapshot pass, before the
-		// first counter stamp.
-		expect(wireBatch.indexOf('assertBatchEntrySequenceAuthority(opts)'),
+		// pass), before anything is stamped or fanned out.
+		//
+		// Counted as exact LINES, not as substring occurrences: a `false &&`
+		// prefix leaves the text in place, which is the neutralization
+		// test/helpers/source-pins.js exists for, and the count has to be of
+		// the statement rather than of a string that appears inside one.
+		expectStatementCount(wireBatch, 'assertBatchEntrySequenceAuthority(opts);', 2,
+			'both batch branches vet per-entry authority');
+		// And the two are one per BRANCH rather than two in the same loop. The
+		// stateless branch publishes at `this.publishWire(`, so a check before
+		// it is that branch's and a check after it is the stateful pre-pass;
+		// requiring the last one on both sides of that line is what a pair of
+		// before-the-publish assertions could not say, since two calls in the
+		// stateless loop satisfy them and leave the stateful lane unvetted.
+		expect(wireBatch.indexOf('assertBatchEntrySequenceAuthority(opts);'),
 			'the stateless reroute must vet per-entry authority before it publishes')
 			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
-		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts)'),
+		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts);'),
+			'the second per-entry check must be the stateful branch, not a repeat in the stateless loop')
+			.toBeGreaterThan(wireBatch.indexOf('this.publishWire('));
+		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts);'),
 			'the stateful branch must vet per-entry authority before it stamps')
 			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
 		// The per-entry refusal lives in the shared resolveEntrySeq table (one
@@ -309,8 +318,18 @@ describe('cluster sequence authority policy', () => {
 		// { seq: true } on an entry up front, not diverge silently on the
 		// stateful lane or half-deliver on the stateless one. The values form
 		// with `true` is refused for every relay shape in the table above.
-		expect(wireBatch.split('assertClusterSequenceAuthorityValues(true,').length,
-			'both batch branches vet an entry-level counter draw').toBe(3);
+		// Counted and placed the same way as the per-entry check above, and
+		// the whole statement is named rather than its opening: the prefix
+		// alone matches a neutralized line as readily as a live one.
+		const counterDraw = 'assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);';
+		expectStatementCount(wireBatch, counterDraw, 2, 'both batch branches vet an entry-level counter draw');
+		expect(wireBatch.indexOf(counterDraw), 'the stateless reroute must vet the counter draw before it publishes')
+			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
+		expect(wireBatch.lastIndexOf(counterDraw),
+			'the second counter-draw check must be the stateful branch, not a repeat in the stateless loop')
+			.toBeGreaterThan(wireBatch.indexOf('this.publishWire('));
+		expect(wireBatch.lastIndexOf(counterDraw), 'the stateful branch must vet the counter draw before it stamps')
+			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
 		// batch() snapshots each message's option fields once and judges the
 		// snapshot, then hands publish() the SAME snapshot - so the atomic
 		// pre-pass and the per-message stamp cannot disagree.
