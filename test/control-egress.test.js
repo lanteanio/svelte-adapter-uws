@@ -20,7 +20,7 @@ import { buildBinaryFrame } from '../src/runtime/wire.js';
 import { encodeValue } from '../src/runtime/wire-value.js';
 import { GAME_INGRESS_SCHEMA_VERSION } from '../src/runtime/handler/game-ingress.js';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
-import { expectStatement } from './helpers/source-pins.js';
+import { expectStatement, expectStatementBlock } from './helpers/source-pins.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
 
@@ -245,17 +245,30 @@ describe('every surface hands its control sender to the shared routes', () => {
 	// of these files is an uncharged control frame on every surface at once.
 	const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
+	// Each of these is the concise body of a named arrow, so the call means
+	// what it says only together with the line that declares it: a header
+	// rewritten to `... => false &&` leaves the call's own line untouched.
+	// Both lines are pinned, consecutively, for that reason.
 	it('the three ingress dispatch sites pass the surface sender', () => {
-		expectStatement(read('../src/runtime/handler.js'),
-			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControl);', 'handler.js');
-		expectStatement(read('../src/testing.js'),
-			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControlT);', 'testing.js');
-		expectStatement(read('../src/vite.js'),
-			'dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform, sendControlWrappedV);', 'vite.js');
+		expectStatementBlock(read('../src/runtime/handler.js'), [
+			'const runIngressApplicationWork = (ws, context) =>',
+			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControl);'
+		], 'handler.js');
+		expectStatementBlock(read('../src/testing.js'), [
+			'const runIngressApplicationWorkT = (ws, context) =>',
+			'dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform, sendControlT);'
+		], 'testing.js');
+		expectStatementBlock(read('../src/vite.js'), [
+			'const runIngressApplicationWorkV = (wrapped, context) =>',
+			'dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform, sendControlWrappedV);'
+		], 'vite.js');
 	});
 
 	it('the dev plugin refuses an overloaded message through the same sender', () => {
-		expectStatement(read('../src/vite.js'), 'sendControlWrappedV(wrapped, messageOverloadedFrame(rejection));', 'vite.js');
+		expectStatementBlock(read('../src/vite.js'), [
+			'const rejectApplicationMessageV = (wrapped, rejection) =>',
+			'sendControlWrappedV(wrapped, messageOverloadedFrame(rejection));'
+		], 'vite.js');
 	});
 
 	it('the shared modules that answer a client hold no raw send', () => {
