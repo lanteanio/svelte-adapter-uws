@@ -88,6 +88,20 @@ export function message(ws, ctx) {
 	if (cursors.hooks.message(ws, ctx)) return;
 	const { data, platform } = ctx;
 	const msg = JSON.parse(Buffer.from(data).toString());
+	if (Array.isArray(msg) || msg.type === 'envelope-shape-probe') {
+		// What the runtime put in `ctx.msg`, reported back so a case can assert
+		// it. Both shapes take this branch on purpose: an array must arrive
+		// with no pre-parsed envelope (`typeof [] === 'object'`, so it reaches
+		// the check that excludes it only if that check names arrays), and an
+		// object envelope no control type claims must still arrive with one.
+		// The nonce correlates the two answers on a single connection.
+		platform.send(ws, 'test-topic', 'envelope-shape', {
+			nonce: Array.isArray(msg) ? msg[0]?.nonce : msg.nonce,
+			present: ctx.msg !== undefined,
+			isArray: Array.isArray(ctx.msg)
+		});
+		return;
+	}
 	if (msg.type === 'echo') {
 		platform.send(ws, 'test-topic', 'echo', msg.payload);
 	}

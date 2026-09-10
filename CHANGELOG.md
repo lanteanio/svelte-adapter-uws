@@ -473,6 +473,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A JSON array no longer reaches the app hook as a pre-parsed envelope.**
+  `MessageContext.msg` is declared to carry a plain object envelope and to be
+  absent for null, an array and a primitive, but the runtime tested
+  `parsed === null || typeof parsed !== 'object'` and `typeof [] === 'object'`:
+  a frame such as `[{"y":1}]` parsed, matched no control type, and arrived at
+  the app hook as `msg`. `createTestServer` and `vite dev` already excluded
+  arrays by name, so an app saw one envelope shape in development and another
+  in production. The runtime now excludes it the same way; the frame still
+  reaches the hook, as raw `data` with no envelope beside it.
 - **A shared cohort join holds one reference and leaves the connection in one
   cohort.** `joinSharedCohort` acquired a shared wire-id reference on every
   call while membership is a Set, so a plugin's `trackedSubscribe` of a socket
