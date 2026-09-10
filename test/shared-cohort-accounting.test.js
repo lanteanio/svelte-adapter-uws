@@ -1,21 +1,32 @@
-// Two accounting defects in the shared cohort lane, each pinned where it lives.
+// What a re-join of a shared cohort does, and what the outcome counter counts.
 //
-// 1. platform.publishWire's shared branch reported one publish outcome per
-//    COHORT: a delivery for the binary cohort and a no-subscribers for the
-//    JSON cohort (or the reverse), while ws_publishes_total advanced by one.
-//    Every other exit reports one outcome per logical publish, and the
-//    outcome family is documented as summing to the publish family. Pinned
-//    on the built runtime through its own /metrics scrape.
-// 2. joinSharedCohort acquired a shared wire-id reference on every call, and
+// 1. joinSharedCohort acquired a shared wire-id reference on every call, and
 //    the cohort set it records membership in is a Set, so a second join of a
 //    topic the connection already held (a plugin's trackedSubscribe of a
 //    socket the client subscribed over the wire) took a reference the single
 //    leave released once. The id then outlived its last member: the egress
 //    split over-counted the binary cohort and every later publish built a
-//    frame for nobody. Pinned on the built cohort module with the real
-//    wire-id table, and on the test server through what a client can see -
-//    one announce per membership, and a FRESH id for the next cohort after the
-//    last member leaves (a reclaimed id is retired, never reused).
+//    frame for nobody.
+// 2. The same call could leave a connection on BOTH cohorts. A connection
+//    whose own first announce was refused past its backpressure limit is
+//    served the JSON cohort and recorded in no set, so a later successful
+//    join added the binary cohort beside it and that connection received
+//    every shared publish twice - as the 0x03 frame and as the envelope.
+//    The module's own contract is one cohort per connection; the successful
+//    join now moves the connection instead of adding to it.
+// 3. The outcome counter is NOT one per logical publish, and the last case
+//    here pins that as the contract it is. `ws_publish_outcomes_total` is
+//    documented (index.d.ts, README) as the result of each native TopicTree
+//    publish: an excluding publish takes the per-socket walk and reports
+//    nothing, a batch reports once for the N events its single frame carries,
+//    and a shared publish makes one call per cohort and reports both. Merging
+//    the shared lane's two into one would make it the only lane answering a
+//    different question, and would hide an all-JSON room whose binary cohort
+//    never forms.
+//
+// Layers: the built cohort module with the real wire-id table, the test
+// server through what a client can see, and the built runtime's own /metrics
+// scrape.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
@@ -81,29 +92,64 @@ describeUWS('joinSharedCohort holds one wire-id reference per membership', () =>
 
 	afterEach(() => { table._resetSharedWireIds(); });
 
-	function fakeSocket() {
+	/**
+	 * A socket the cohort module can drive. `sendResult` is what uWS's own
+	 * `send` returns: 1 for written, 2 for refused past the backpressure
+	 * limit, which is the refusal `sendControl` maps to CONTROL_REFUSED.
+	 * `topics` is the membership as the native layer would hold it.
+	 */
+	function fakeSocket(sendResult = 1) {
 		const ud = { [WS_CAPS]: new Set([CAP]), [WS_STATS]: { messagesOut: 0, bytesOut: 0 } };
 		const sent = [];
-		const subscribed = [];
+		const topics = new Set();
 		const ws = {
+			sendResult,
 			getUserData: () => ud,
-			send(payload) { sent.push(payload); return 1; },
-			subscribe(t) { subscribed.push(t); return true; },
-			unsubscribe() { return true; }
+			send(payload) { sent.push(payload); return ws.sendResult; },
+			subscribe(t) { topics.add(t); return true; },
+			unsubscribe(t) { topics.delete(t); return true; }
 		};
-		return { ws, ud, sent, subscribed };
+		return { ws, ud, sent, topics, cohorts: () => [...topics].map((t) => t.slice(t.indexOf('\0') + 1)) };
 	}
 
 	it('a second join of a held topic acquires nothing and announces nothing', () => {
-		const { ws, ud, sent } = fakeSocket();
+		const { ws, ud, sent, cohorts } = fakeSocket();
 		cohort.joinSharedCohort(ws, ud, TOPIC, CAP);
 		expect(table.sharedWireIdRefs(TOPIC)).toBe(1);
 		expect(sent.filter((p) => p.includes('"wire-id"'))).toHaveLength(1);
 		expect(ud[WS_SHARED_COHORTS].has(TOPIC)).toBe(true);
+		expect(cohorts()).toEqual(['bin']);
 
 		cohort.joinSharedCohort(ws, ud, TOPIC, CAP);
 		expect(table.sharedWireIdRefs(TOPIC)).toBe(1);
 		expect(sent.filter((p) => p.includes('"wire-id"'))).toHaveLength(1);
+		expect(cohorts()).toEqual(['bin']);
+	});
+
+	it('a join after a refused announce moves the connection instead of adding to it', () => {
+		// The refusal path serves JSON and records no membership, so the later
+		// join is the first one the set knows about. Without the move, the
+		// connection sits on both cohorts and every shared publish reaches it
+		// twice - as the 0x03 frame and as the envelope.
+		const socket = fakeSocket(2);
+		cohort.joinSharedCohort(socket.ws, socket.ud, TOPIC, CAP);
+		expect(socket.cohorts(), 'a refused announce is served JSON').toEqual(['json']);
+		expect(table.sharedWireIdRefs(TOPIC), 'the refused announce hands its reference back').toBe(0);
+		expect(socket.ud[WS_SHARED_COHORTS]).toBeUndefined();
+
+		socket.ws.sendResult = 1;
+		cohort.joinSharedCohort(socket.ws, socket.ud, TOPIC, CAP);
+		expect(socket.cohorts(), 'exactly one cohort per connection').toEqual(['bin']);
+		expect(table.sharedWireIdRefs(TOPIC)).toBe(1);
+	});
+
+	it('a connection without the capability is served JSON and holds no reference', () => {
+		const socket = fakeSocket();
+		socket.ud[WS_CAPS] = new Set();
+		cohort.joinSharedCohort(socket.ws, socket.ud, TOPIC, CAP);
+		expect(socket.cohorts()).toEqual(['json']);
+		expect(table.sharedWireIdRefs(TOPIC)).toBe(0);
+		expect(socket.sent).toEqual([]);
 	});
 
 	it('the single leave releases the last reference and the id is reclaimed', () => {
@@ -135,7 +181,7 @@ describeUWS('joinSharedCohort holds one wire-id reference per membership', () =>
 	});
 });
 
-describeUWS('the test server keeps one cohort reference per membership', () => {
+describeUWS('the test server announces one wire id per cohort membership', () => {
 	let server;
 	const clients = [];
 
@@ -147,12 +193,11 @@ describeUWS('the test server keeps one cohort reference per membership', () => {
 	});
 
 	// The harness installs no cohort hooks on the membership primitive, so a
-	// plugin's trackedSubscribe cannot re-join a cohort there and the re-join
-	// guard in its join is reached only through what production reaches it
-	// by. What a client CAN see the harness prove: one announce per
-	// membership, one publish per frame, and a fresh id for the cohort that
-	// forms after the last member left - which is only the case when the
-	// reference count really reached zero.
+	// plugin's trackedSubscribe cannot re-join a cohort there and the guard in
+	// its join is reached only the way production reaches it. What a client
+	// CAN see the harness prove: one announce per membership, and a fresh id
+	// for the cohort that forms after the last member left - which is only the
+	// case when the reference count really reached zero.
 	it('announces once per membership and draws a fresh id after the last member leaves', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
@@ -215,7 +260,7 @@ const outcomesTotal = (values) => {
 	return sum;
 };
 
-describeUWS('a shared publish reports one outcome on the built runtime', () => {
+describeUWS('the outcome counter counts native calls, not logical publishes', () => {
 	let server;
 	let client;
 
@@ -228,10 +273,10 @@ describeUWS('a shared publish reports one outcome on the built runtime', () => {
 		await server?.stop();
 	});
 
-	it('the outcome family advances by one per shared publish, whichever cohorts carried it', async () => {
+	it('a shared publish reports both of its native calls, and the empty cohort is one of them', async () => {
 		client = await connectClient(server.wsUrl, [CAP]);
 		// The first shared publish marks the topic shared and cohorts the
-		// existing subscriber; its own outcome lands in the before-scrape.
+		// existing subscriber; its own outcomes land in the before-scrape.
 		client.send({ type: 'shared-publish', topic: TOPIC, n: 1 });
 		await until(() => client.frames.binary.length >= 1);
 
@@ -240,11 +285,18 @@ describeUWS('a shared publish reports one outcome on the built runtime', () => {
 		await until(() => client.frames.binary.length >= 2);
 		const after = await scrapeLabelled(server.httpUrl);
 
-		// One capable member: the binary cohort delivered, the JSON cohort was
-		// empty. Reported per cohort, that read as delivered PLUS
-		// no_subscribers for one publish. (ws_publishes_total is folded in from
-		// the pressure sampler's window, so it is not read here per publish.)
+		// TWO, and the trade is deliberate. The one capable member puts every
+		// subscriber in the binary cohort, so the JSON call finds nobody and
+		// records `no_subscribers` beside the binary call's `delivered`. That
+		// is what a per-native-call counter says, and index.d.ts and the README
+		// say it: an excluding publish reports nothing at all, a batch reports
+		// once for N events. An operator reads `no_subscribers` on a shared
+		// topic as "one cohort is empty" and takes the publish count from
+		// `ws_publishes_total`. Merging these two into one would leave this the
+		// only lane answering a different question, and would hide an all-JSON
+		// room whose binary cohort never forms - so this number is a contract,
+		// not an accident, and a change to it is a change to the metric.
 		expect(outcomesTotal(before), 'the first shared publish must already have been counted').toBeGreaterThan(0);
-		expect(outcomesTotal(after) - outcomesTotal(before)).toBe(1);
+		expect(outcomesTotal(after) - outcomesTotal(before)).toBe(2);
 	});
 });

@@ -473,21 +473,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A shared cohort publish reports one outcome, and a re-join holds one
-  reference.** `platform.publishWire` on a `shared: true` codec counted a
-  publish outcome per cohort - a delivery for the binary cohort beside a
-  no-subscribers for the empty JSON one - so `ws_publish_outcomes_total`
-  advanced by two for one logical publish. It now reports once, delivered if
-  either cohort carried it. And `joinSharedCohort` acquired a shared wire-id
-  reference on every call while membership is a Set, so a plugin's
-  `trackedSubscribe` of a socket the client already held over the wire took
-  a reference the single leave released once: the id outlived its last
-  member, the egress split over-counted the binary cohort, and every later
-  publish built a frame for nobody. A join of a held topic now acquires and
-  announces nothing, in the runtime and in `createTestServer`. Pinned on the
-  built cohort module with the real wire-id table, on the test server through
-  the announces a client sees and the fresh id the next cohort draws, and on
-  the built runtime through its `/metrics` scrape.
+- **A shared cohort join holds one reference and leaves the connection in one
+  cohort.** `joinSharedCohort` acquired a shared wire-id reference on every
+  call while membership is a Set, so a plugin's `trackedSubscribe` of a socket
+  the client already held over the wire took a reference the single leave
+  released once: the id outlived its last member, the egress split
+  over-counted the binary cohort, and every later publish built a binary frame
+  for nobody. A join of a topic the connection already holds now acquires
+  nothing and announces nothing. The same call could also leave a connection
+  on BOTH cohorts - its own first announce refused past the backpressure limit
+  put it on the JSON cohort, and a later successful join added the binary one
+  without removing that - so it received every shared publish twice, as the
+  frame and as the envelope; the successful join now moves the connection
+  rather than adding to it. Both in the runtime and in `createTestServer`.
+  `ws_publish_outcomes_total` is unchanged and stays per native call: a shared
+  publish makes one call per cohort and reports both, which is now stated
+  where the metric is documented rather than left to be discovered.
 - **A failing `unsubscribe` hook no longer takes the worker or the message
   handler with it.** The hook is fire-and-forget and was invoked bare at
   thirty sites across the runtime, the test server and the dev plugin, so an

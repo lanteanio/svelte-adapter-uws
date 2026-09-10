@@ -541,14 +541,7 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// reverting handler/ingress.js alone to its previous content restores this
 	// digest and no other, so nothing else in the tree reaches this body. No
 	// byte is read, allocated or copied, and no copy primitive entered.
-	//
-	// publishWire re-pinned for the shared branch's outcome report: the two
-	// `publishOutcomeHook` calls (one per cohort publish) became one, fed by a
-	// boolean that is true when either cohort publish delivered. The same two
-	// app.publish calls run with the same frame and envelope; what changed is
-	// a local boolean and one fewer hook call. No byte is read, allocated or
-	// copied, and no copy primitive entered.
-	publishWire: '9d61a6971fe453104d5b85835c9e1341ec009a0e245a8864396a9af3b7700d81',
+	publishWire: 'f98579a4c2e88e5135b0ba177b170b151ea1fda496b3d2a036f36c0eca6604ce',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '31eb28387d69104c3c46a19a5b5ab934f678730e4d143121e62030d6704ddb19',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -1784,17 +1777,23 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// same reach the paragraph above records. Same paths, same verdict on
 	// bytes and copies.
 	//
-	// Re-pinned for the shared cohort accounting, measured as two parts: with
-	// cohort.js alone reverted this digest reads
-	// 7949fece91c640cc62ad1c743e5654d3fa3cac8694cf84103a46832c8034b175
-	// (platform.js: the shared branch's one outcome report, see the
-	// publishWire seal above), and the value below adds cohort.js's join
-	// guard - `if (held && held.has(topic)) return;` ahead of the wire-id
-	// acquire, a Set read on the subscribe path. Neither statement is on a
-	// fan-out path; per publish the shared branch makes the same two
-	// app.publish calls. No byte is read, allocated or copied, and no copy
-	// primitive entered.
-	platform: 'a4d391d423c65e1cbb150342156cb6be9cc454d41b4cff3c802621c042548679',
+	// Re-pinned for the shared cohort join, measured as two parts. With
+	// cohort.js at its previous content this digest reads
+	// d115c4258fb14cafef2e29a038f4234d9df891ee7c478454602d014dc643773f, which
+	// is platform.js's share: a comment over the shared branch's two outcome
+	// reports, which are unchanged - the named-function seal on publishWire
+	// above holds at the value it had, so that body is byte-identical. With
+	// platform.js at its previous content instead the digest reads
+	// a6c0a5908b147449b37ff6aec4bd1de35948464a1142e49ff5b2588ef1aaed3f, which
+	// is cohort.js's share: an early return when the connection already holds
+	// the topic (one Set read), and an `unsubscribe` of the JSON cohort before
+	// the binary subscribe, so a connection served JSON by a refused announce
+	// is MOVED by a later successful join rather than added to. Both sit on
+	// the subscribe path, neither on a fan-out path; per publish the shared
+	// branch makes the same two app.publish calls with the same frame and
+	// envelope. No byte is read, allocated or copied, and no copy primitive
+	// entered.
+	platform: 'c49d2575a10418541dacdf957c19440de94567b63456073ed6e13f19855a0e47',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

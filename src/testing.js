@@ -926,6 +926,11 @@ export async function createTestServer(options = {}) {
 			let cohorts = ud[WS_SHARED_COHORTS];
 			if (!cohorts) { cohorts = new Set(); ud[WS_SHARED_COHORTS] = cohorts; }
 			cohorts.add(topic);
+			// One cohort per connection, as production: a connection whose own
+			// first announce was refused past the backpressure limit is on the
+			// JSON cohort, and a later successful join must move it rather than
+			// add to it, or it receives every shared publish twice.
+			ws.unsubscribe(json);
 			ws.subscribe(bin);
 		} else {
 			ws.subscribe(json);
