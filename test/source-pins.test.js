@@ -264,12 +264,19 @@ describe('expectStatement', () => {
 		// pin or nowhere, so the pin is dead and the unknown does not save it.
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
-		// With a default before the pin, the same unknown decides whether the
-		// default is entered, so nothing is known and the pin is taken -
-		// unless a case after the unknown matches, which takes control past
-		// the pin whatever the unknown does.
+		// With a default before the pin, the unknown decides whether the
+		// default is entered; the default falls through to the pin, so the
+		// pin may be live and is taken. A case after the unknown that matches
+		// takes control past the pin whatever the unknown does.
 		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin')).not.toThrow();
 		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tx();\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		// The unknown never makes a pin live on its own: a default before the
+		// pin that LEAVES still cuts it off, and a default after the pin is
+		// entered past it. Both dead, with or without the unknown.
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\t\treturn;\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
 	});
 

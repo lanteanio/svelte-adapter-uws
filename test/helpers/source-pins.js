@@ -504,10 +504,10 @@ function containsBreakOrReturn(node) {
  * written as a literal and control, entering where that literal sends it,
  * never falls through as far as the case holding the pinned line.
  *
- * Conservative where it has to be: a case test the fold cannot read is a case
- * that may be the entry, and then nothing is known - unless every outcome
- * still enters past the pin or nowhere: it stands after the pin, and either
- * no `default` sits at or before the pin or a case after it matches anyway.
+ * Conservative where it has to be: a case test the fold cannot read at or
+ * before the pin is a case that may be the entry, and then nothing is known.
+ * One after the pin can only enter past it, so it changes nothing: the static
+ * matches and the `default` decide, and if they say live, the pin is taken.
  */
 function switchCannotReach(switchNode, caseNode) {
 	const discriminant = staticValue(switchNode.discriminant);
@@ -521,26 +521,20 @@ function switchCannotReach(switchNode, caseNode) {
 	// then nothing is known.
 	const defaultAt = switchNode.cases.findIndex((candidate) => candidate.test === null);
 	let entry = -1;
-	let unknownAfter = false;
 	for (let i = 0; i < switchNode.cases.length; i++) {
 		const candidate = switchNode.cases[i];
 		if (candidate.test === null) continue;
 		const test = staticValue(candidate.test);
 		if (!test) {
 			// Unknown. At or before the pin it may be the entry. After the pin
-			// it matters only if NOT matching would hand control to a default
-			// at or before the pin - and then only if no case after it matches,
-			// which the rest of the walk decides.
+			// it can only enter past the pin, which is dead whether or not it
+			// matches, so the rest of the walk decides.
 			if (i <= at) return false;
-			unknownAfter = true;
 			continue;
 		}
 		if (test.value === discriminant.value) { entry = i; break; }
 	}
-	if (entry === -1) {
-		if (unknownAfter && defaultAt !== -1 && defaultAt <= at) return false;
-		entry = defaultAt;
-	}
+	if (entry === -1) entry = defaultAt;
 	if (entry === -1 || entry > at) return true;
 	// From the entry the pinned case is reached by falling through, and any
 	// case on the way that always leaves - a `break` included, it ends the
