@@ -171,18 +171,28 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 			try { assertStampableSeq(value); } catch (error) { return error; }
 			throw new Error('production accepts this value, so it is no test of a refusal');
 		};
-		for (const value of ['x', 0, -1, 1.5, {}]) {
+		for (const value of ['x', 0, -1, 1.5, {}, 0n, 2 ** 53]) {
 			const expected = refusal(value);
 			expect(() => platform.publish('room', 'bad', { n: 1 }, { seq: value }), `publish ${String(value)}`)
 				.toThrow(expected.message);
-			expect(() => platform.batch([{ topic: 'room', event: 'bad', data: { n: 1 }, options: { seq: value } }]), `batch ${String(value)}`)
-				.toThrow(expected.message);
-			// The batched fast path: two entries on one topic, the second bad.
-			// Refused before the first goes out, or a bad batch delivers a prefix.
+			// The batch lanes carry the bad value on the SECOND message, with a
+			// subscriber on the first's topic: refused before the first goes
+			// out, or a bad batch delivers a prefix. `batch` is a loop of
+			// publishes; `publishBatched` has a fast path for one topic and a
+			// per-event fall-back for a batch the subscriber does not see whole,
+			// and both are driven.
+			expect(() => platform.batch([
+				{ topic: 'room', event: 'bad', data: { n: 1 } },
+				{ topic: 'room', event: 'bad', data: { n: 2 }, options: { seq: value } }
+			]), `batch ${String(value)}`).toThrow(expected.message);
 			expect(() => platform.publishBatched([
 				{ topic: 'room', event: 'bad', data: { n: 1 } },
 				{ topic: 'room', event: 'bad', data: { n: 2 }, options: { seq: value } }
-			]), `publishBatched ${String(value)}`).toThrow(expected.message);
+			]), `publishBatched fast path ${String(value)}`).toThrow(expected.message);
+			expect(() => platform.publishBatched([
+				{ topic: 'room', event: 'bad', data: { n: 1 } },
+				{ topic: 'elsewhere', event: 'bad', data: { n: 2 }, options: { seq: value } }
+			]), `publishBatched fall-back ${String(value)}`).toThrow(expected.message);
 			expect(() => platform.publishWire('room', 'bad', { n: 1 }, { capability: 'dev.seq:1', schemaVersion: 1, encode: () => null }, { seq: value }), `publishWire ${String(value)}`)
 				.toThrow(expected.message);
 		}
@@ -193,8 +203,10 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 		platform.publish('room', 'accepted', { n: 3 }, { seq: 7 });
 		platform.publish('room', 'drain', { n: 4 }, { seq: false });
 		expect(await waitFor((f) => f?.event === 'drain'), 'the drain must arrive').not.toBeNull();
-		expect(frames.some((f) => f?.event === 'accepted'), 'an accepted seq value still delivers').toBe(true);
-		expect(frames.some((f) => f?.event === 'bad'), 'no refused call delivered anything').toBe(false);
+		const accepted = frames.find((f) => f?.event === 'accepted');
+		expect(accepted, 'an accepted seq value still delivers').toBeTruthy();
+		expect(accepted.seq, 'and dev stamps no seq on it').toBeUndefined();
+		expect(frames.some((f) => f?.event === 'bad'), 'no refused call delivered anything, not even a prefix').toBe(false);
 	});
 
 	it("ignores a batch entry exclusion, because production's batch ignores it", async () => {

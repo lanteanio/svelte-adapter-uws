@@ -454,7 +454,7 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {unknown} [data]
-	 * @param {{ relay?: boolean, jitterMs?: number }} [options]
+	 * @param {{ seq?: boolean | number | bigint | null, relay?: boolean, jitterMs?: number }} [options]
 	 * @param {object | null} [excludeWs] - the connection this delivery skips
 	 * @returns {boolean}
 	 */
@@ -505,6 +505,20 @@ export default function uws(options = {}) {
 	}
 
 	/**
+	 * Refuse every message's seq value before a batch lane delivers any of
+	 * them - the same all-or-nothing production's `batch` and `publishBatched`
+	 * keep. Dev stamps none of these values; it refuses what production refuses.
+	 *
+	 * @param {Array<{ options?: { seq?: unknown } }>} messages
+	 */
+	function vetBatchSeqValues(messages) {
+		for (let i = 0; i < messages.length; i++) {
+			const o = messages[i].options;
+			assertStampableSeq(/** @type {any} */ (o != null ? o.seq : undefined));
+		}
+	}
+
+	/**
 	 * Publish to all subscribers of a topic - `platform.publish`.
 	 *
 	 * @param {string} topic
@@ -546,6 +560,11 @@ export default function uws(options = {}) {
 		if (!Array.isArray(messages) || messages.length === 0) return;
 		messages = collapseByCoalesceKey(messages);
 		if (messages.length === 0) return;
+		// Every entry's seq value is refused before EITHER path delivers, as
+		// production's batch refuses it: a bad entry throws with nothing of
+		// the batch out. Vetting inside the per-event fall-back would deliver
+		// the entries before the bad one first.
+		vetBatchSeqValues(messages);
 		const firstTopic = messages[0].topic;
 		let allSameTopic = true;
 		for (let i = 1; i < messages.length; i++) {
@@ -587,13 +606,7 @@ export default function uws(options = {}) {
 			}
 			return;
 		}
-		// Fast path: build envelopes and a shared batch frame. Every entry's
-		// seq value is refused first, as production's batch refuses it, so a
-		// bad entry throws with nothing of the batch delivered.
-		for (let i = 0; i < messages.length; i++) {
-			const o = messages[i].options;
-			assertStampableSeq(o != null ? o.seq : undefined);
-		}
+		// Fast path: build envelopes and a shared batch frame.
 		const events = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
@@ -990,6 +1003,11 @@ export default function uws(options = {}) {
 		// surface in parity (see the contract above) without dead machinery.
 		registerWireCodec(_wire) {},
 		batch(messages) {
+			// The value question is asked of every message before the first
+			// publish, as production's batch asks it: a bad value on message k
+			// would otherwise throw from inside publish() with 0..k-1 already
+			// delivered.
+			vetBatchSeqValues(messages);
 			const results = [];
 			for (let i = 0; i < messages.length; i++) {
 				const { topic, event, data, options } = messages[i];
