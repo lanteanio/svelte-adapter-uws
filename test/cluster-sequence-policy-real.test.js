@@ -73,12 +73,12 @@ describeReal('real clustered sequence-authority policy', () => {
 		let nonce = 0;
 		// Every envelope on the watched topic, in arrival order. An envelope
 		// carries an event; the subscribe ack names the topic too and carries
-		// none, so it is not counted. This listener is registered before any
-		// probe's, so for a given frame it has run by the time a probe reads
-		// its reply. What is NOT assumed is the order between a topic publish
-		// and the reply's direct send on the same socket: the native layer may
-		// drain the one after the other, so a case never reads the topic at
-		// reply time - it plants a sentinel afterwards and reads up to that.
+		// none, so it is not counted. What is NOT assumed is the order between
+		// a topic publish and the reply's direct send on the same socket: the
+		// native layer may drain the one after the other, so a case never
+		// reads the topic at reply time. It plants a SENTINEL afterwards - an
+		// accepted probe on the same lane, whose two envelopes are known - and
+		// reads everything up to that pair.
 		let watched = null;
 		const seen = [];
 		ws.on('message', (data) => {
@@ -219,15 +219,15 @@ describeReal('real clustered sequence-authority policy', () => {
 		// asked two things: the reply says the batch was refused, and the
 		// topic says nothing fanned out ahead of it. The second is what makes
 		// a pre-pass a pre-pass - a check moved into the fan-out loop answers
-		// the same error with the first entry already delivered - and it is
-		// the only question the stateless lane can fail, because that lane
-		// reroutes each entry through publishWire, which asks the authority
-		// question again on its own. The absence is read against a SENTINEL:
-		// the accepted spelling of the same probe, published after the
-		// refusals, whose pair is the only thing the topic may carry since
-		// them. That holds whichever order the native layer drains a publish
-		// and the reply, and the sentinel is the control that the
-		// subscription sees anything at all.
+		// the same error with the first entry already delivered. On the
+		// stateless lane the error code discriminates as well: without its
+		// pre-pass the entry reaches publishWire, which refuses it under the
+		// cluster's own code rather than the batch entry's. The absence is
+		// read against the sentinel - the accepted spelling of the same probe,
+		// published after the refusals, whose pair is the only thing the
+		// topic may carry since them. That holds whichever order the native
+		// layer drains a publish and the reply, and the sentinel is the
+		// control that the subscription sees anything at all.
 		const server = await boot(2);
 		await server.subscribe(PROBE_TOPIC);
 		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {

@@ -1,9 +1,9 @@
 /**
  * Bytes of control frames one connection may be sent per window.
  *
- * Derived from the worst legitimate burst rather than picked. A reconnecting
- * client resubscribes in batches of at most 256 topics, and 256 acks at the
- * ack's own size is roughly 15 KB; a client restoring 5,000 topics sends twenty
+ * Derived from the worst legitimate burst rather than picked. A subscribe
+ * batch carries at most 256 topics (the bundled client chunks at 200), and 256
+ * acks at the ack's own size is roughly 15 KB; a client restoring 5,000 topics sends twenty
  * such batches for roughly 300 KB. This sits about 270 times above the first and
  * about 13 times above the second, while the measured amplifier reaches it from
  * about 34 KB/s of sustained inbound - a rate no real client produces on the
