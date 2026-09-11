@@ -71,7 +71,9 @@ describeReal('real clustered sequence-authority policy', () => {
 			ws.once('error', reject);
 		});
 		let nonce = 0;
-		// Every frame on the watched topic, in arrival order. This listener is
+		// Every probe envelope on the watched topic, in arrival order - the
+		// fixture publishes them under the event `probe`, so a control frame
+		// that happens to name the topic is not counted. This listener is
 		// registered before any probe's, so for a given frame it has run by the
 		// time a probe reads the reply - and a delivery the server wrote ahead
 		// of the reply arrives ahead of it on the same socket.
@@ -80,8 +82,16 @@ describeReal('real clustered sequence-authority policy', () => {
 		ws.on('message', (data) => {
 			let frame;
 			try { frame = JSON.parse(data.toString()); } catch { return; }
-			if (watched !== null && frame.topic === watched) seen.push(frame);
+			if (watched !== null && frame.topic === watched && frame.event === 'probe') seen.push(frame);
 		});
+		/** Wait until `count` probe envelopes have arrived since `from`. */
+		const arrived = async (from, count) => {
+			const deadline = Date.now() + 5_000;
+			while (seen.length - from < count && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			return seen.slice(from);
+		};
 		return {
 			output: () => output,
 			/**
@@ -118,9 +128,11 @@ describeReal('real clustered sequence-authority policy', () => {
 						if (frame.topic !== 'probe' || frame.event !== 'sequence-policy' || frame.data?.nonce !== wanted) return;
 						clearTimeout(timer);
 						ws.off('message', onMessage);
-						// `delivered`: the watched topic's frames that arrived between
-						// this probe's send and its reply.
-						resolve({ ...frame.data, delivered: seen.slice(from) });
+						// `delivered`: the watched topic's envelopes that arrived between
+						// this probe's send and its reply. `settled(n)` waits for n of
+						// them past the reply, for an accepted batch whose envelopes
+						// the native layer may drain after the reply's direct send.
+						resolve({ ...frame.data, delivered: seen.slice(from), settled: (count) => arrived(from, count) });
 					};
 					ws.on('message', onMessage);
 					ws.send(JSON.stringify({ type: 'sequence-policy-probe', entry, options, nonce: wanted, ...extra }));
@@ -215,7 +227,7 @@ describeReal('real clustered sequence-authority policy', () => {
 			// subscriber, which is also the control for the absences below.
 			const taken = await server.probe(entry, { seq: false, relay: false });
 			expect(taken.ok, `${entry}: ${taken.error}`).toBe(true);
-			expect(taken.delivered.map((frame) => frame.data.n), entry).toEqual([1, 2]);
+			expect((await taken.settled(2)).map((frame) => frame.data.n), entry).toEqual([1, 2]);
 			// With the relay left on, the adapter's own multi-origin fan-out
 			// would carry an externally ordered number it cannot keep ordered.
 			for (const options of [{ seq: false }, { seq: false, relay: true }]) {
@@ -232,7 +244,8 @@ describeReal('real clustered sequence-authority policy', () => {
 		// off-cluster. `{ seq: true }` on an entry asks for the local counter,
 		// which no other worker shares, so a clustered batch refuses it under
 		// the spelling that makes an explicit entry seq legal; the relay
-		// setting is not read for the counter form at all.
+		// setting is passed along but does not enter the verdict for the
+		// counter form.
 		//
 		// Same two questions as above. The stateful lane's draw is what the
 		// error answers for; the stateless lane reroutes each entry through
@@ -246,11 +259,18 @@ describeReal('real clustered sequence-authority policy', () => {
 			expect(refused.error, entry).toBe(CLUSTER_SEQUENCE_ERROR);
 			expect(refused.delivered, `${entry}: a refused batch fans out nothing`).toEqual([]);
 		}
-		// The control for those absences: the same lanes on the same topic, with
-		// nothing to refuse, reach the subscriber with both entries.
-		const taken = await server.probe('wire-batch', { seq: false });
-		expect(taken.ok, taken.error).toBe(true);
-		expect(taken.delivered.map((frame) => frame.data.n)).toEqual([1, 2]);
+		// The control for those absences, one per lane: the same topic with
+		// nothing to refuse reaches the subscriber with both entries - the
+		// stateful lane through a batch with `state`, the stateless one through
+		// the per-entry seq probe under the spelling that makes it legal.
+		for (const [entry, options] of [
+			['wire-batch', { seq: false }],
+			['wire-batch-entry-seq-stateless', { seq: false, relay: false }]
+		]) {
+			const taken = await server.probe(entry, options);
+			expect(taken.ok, `${entry}: ${taken.error}`).toBe(true);
+			expect((await taken.settled(2)).map((frame) => frame.data.n), entry).toEqual([1, 2]);
+		}
 		server.close();
 	}, 60_000);
 
