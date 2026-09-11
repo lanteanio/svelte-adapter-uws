@@ -79,6 +79,11 @@ const SHARED = [
 const POLICY = 'src/runtime/utils/subscribe-policy.js';
 const SUBSCRIPTION_CAP = 65_536;
 const POLICY_NAMES = [
+	// Not a subscribe decision: the shape of the pre-parsed envelope the app
+	// hook is handed. Listed because it is the same class of defect - three
+	// surfaces answering one question, and production answered it differently
+	// for an array, so an app saw one shape in dev and another in production.
+	'carriesPreParsedEnvelope',
 	'deniesWireSystemTopicSubscribe',
 	'deniesWireSubscribePreHook',
 	'deniesWireSubscribeLanding',
@@ -1116,6 +1121,7 @@ describe('every socket surface routes its subscribe decisions through the shared
 	// surface gains a lane; NEVER lower one to clear a red - a red here means a
 	// lane stopped asking, which is the whole point of the file.
 	const PREDICATE_MINIMUMS = [
+		{ fn: 'carriesPreParsedEnvelope', min: 1 },      // one demux per surface
 		{ fn: 'deniesWireSystemTopicSubscribe', min: 2 }, // single + batch
 		{ fn: 'deniesWireSubscribePreHook', min: 2 },   // single + batch
 		{ fn: 'deniesWireSubscribeLanding', min: 2 },

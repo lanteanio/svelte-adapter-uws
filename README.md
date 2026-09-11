@@ -1795,8 +1795,8 @@ export function open(ws, { platform }) {
 // looks like `{"type":"<custom>",...}` from a plugin). The adapter
 // already did `TextDecoder + JSON.parse` once during routing, so this
 // avoids a second parse on the dispatch path. `msg` is `undefined`
-// for binary frames, prefix-miss frames, parse failures, or frames
-// that parse to a non-object.
+// for binary frames, prefix-miss frames, parse failures, and frames
+// that parse to anything but a plain object (an array included).
 export function message(ws, { data, isBinary, msg }) {
   if (msg) {
     // Already-parsed JSON object envelope - dispatch by msg.type

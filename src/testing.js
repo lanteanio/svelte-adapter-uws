@@ -10,7 +10,7 @@ import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { FORBIDDEN_METHODS, send405 } from './runtime/handler/http-helpers.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
@@ -2901,7 +2901,7 @@ export async function createTestServer(options = {}) {
 						// the user handler as a {type,...} object envelope. Throw
 						// to the catch (which clears `msg`) for a unified fall-
 						// through path with parse failures.
-						if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
+						if (!carriesPreParsedEnvelope(msg)) throw 0;
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
 							// A recover subscribe without a ref is refused loudly and

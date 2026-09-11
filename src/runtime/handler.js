@@ -56,7 +56,7 @@ import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqF
 import { signalRelayGaps } from './handler/lifecycle.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
+import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { hasMultipleWorkers } from './handler/cluster-sequence-policy.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
@@ -2333,13 +2333,12 @@ if (WS_ENABLED) {
 				} catch {
 					parsed = undefined;
 				}
-				if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-					// Not a JSON object envelope (parse failed, or parsed to
-					// null / a primitive / an array). Forward raw bytes only.
-					// The array needs naming because `typeof [] === 'object'`
-					// passes the check above it: `msg` is declared to carry a
-					// plain object envelope, so an array must not arrive as
-					// one. testing.js and vite.js exclude it the same way.
+				if (!carriesPreParsedEnvelope(parsed)) {
+					// Not the declared envelope (the parse failed, or produced
+					// null, a primitive or an array). Forward raw bytes only.
+					// The shape question is the shared policy's, not this
+					// surface's, because all three surfaces have to answer it
+					// the same way and this one used to answer it differently.
 					await runAdmittedMessageHook(messageAdmission, wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] }, rejectApplicationMessage);
 					return;
 				}

@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+	carriesPreParsedEnvelope,
 	deniesWireSystemTopicSubscribe,
 	deniesWireSubscribePreHook,
 	deniesWireSubscribeLanding,
@@ -23,6 +24,23 @@ import { registerPluginOwnedPrefix, isPluginOwnedTopic } from '../src/runtime/ut
 registerPluginOwnedPrefix('__policytest:');
 
 const BOOLS = [false, true];
+
+describe('carriesPreParsedEnvelope', () => {
+	it('takes a plain object and nothing else', () => {
+		// The whole table, because the predicate decides what an app is handed
+		// as `MessageContext.msg` on all three surfaces. The array is the entry
+		// that matters: `typeof [] === 'object'`, so an object test that does
+		// not name it admits it, which is what production used to do.
+		const TAKEN = [['{}', {}], ['an envelope', { type: 'subscribe' }], ['a null-prototype object', Object.create(null)], ['a Date', new Date()]];
+		const REFUSED = [
+			['[]', []], ['an array of objects', [{ y: 1 }]], ['null', null], ['undefined', undefined],
+			['0', 0], ['1', 1], ['the empty string', ''], ['a string', 'x'],
+			['true', true], ['false', false], ['NaN', NaN], ['a bigint', 0n]
+		];
+		for (const [label, value] of TAKEN) expect(carriesPreParsedEnvelope(value), label).toBe(true);
+		for (const [label, value] of REFUSED) expect(carriesPreParsedEnvelope(value), label).toBe(false);
+	});
+});
 
 describe('deniesWireSystemTopicSubscribe', () => {
 	it('blocks ordinary system topics by default and preserves the broad opt-out', () => {

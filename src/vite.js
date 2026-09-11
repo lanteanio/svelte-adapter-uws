@@ -7,7 +7,7 @@ import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelp
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -2688,7 +2688,7 @@ export default function uws(options = {}) {
 							// the user handler as a {type,...} object envelope. Throw
 							// to the catch (which clears `msg`) for a unified fall-
 							// through path with parse failures.
-							if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
+							if (!carriesPreParsedEnvelope(msg)) throw 0;
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
 								// A recover subscribe without a ref is refused loudly and

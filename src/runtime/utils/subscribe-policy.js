@@ -1,5 +1,7 @@
 /**
- * The subscribe decisions, as pure functions of explicit inputs.
+ * The socket-surface decisions, as pure functions of explicit inputs. Mostly
+ * about subscribes, which is what the file is named for, and since one of them
+ * is about the shape of an inbound frame the name is narrower than the content.
  *
  * WHY THIS MODULE EXISTS. `src/runtime/handler.js` (production),
  * `src/testing.js` (the published `svelte-adapter-uws/testing` server) and
@@ -41,6 +43,25 @@ import { isPluginOwnedTopic } from './ws-symbols.js';
  * @param {string} input.topic
  * @returns {boolean}
  */
+/**
+ * Whether a parsed control-prefixed frame is the envelope `MessageContext.msg`
+ * is declared to carry, which is a plain object.
+ *
+ * `typeof [] === 'object'`, so an array passes an object test that does not
+ * name it, matches no control type (`type` is undefined on an array) and
+ * reaches the app hook as an envelope the declared contract excludes. Each
+ * surface used to spell this inline, and production spelled it without the
+ * array, so an app saw one envelope shape in development and another in
+ * production. Null and every primitive are out for the same declared reason;
+ * `undefined` is what a failed parse leaves behind and is out too.
+ *
+ * @param {unknown} parsed - what `JSON.parse` produced, or undefined if it threw
+ * @returns {boolean}
+ */
+export function carriesPreParsedEnvelope(parsed) {
+	return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+}
+
 export function deniesWireSystemTopicSubscribe({ allowSystem, topic }) {
 	if (allowSystem || typeof topic !== 'string') return false;
 	if (topic.charCodeAt(0) !== 95 || topic.charCodeAt(1) !== 95) return false;

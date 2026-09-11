@@ -58,6 +58,21 @@ describeUWS('the pre-parsed envelope handed to the app message hook', () => {
 				(parsed) => parsed?.event === 'envelope-shape' && parsed?.data?.nonce === 'object',
 				2000
 			);
+			// What routes a frame into the control block is byte 3, and without
+			// pinning that the array arm above has a second way to pass: an
+			// array whose byte 3 is not 'y' never reaches the parse at all, and
+			// would answer "no envelope" for that reason instead of for the
+			// shape. The same array prefix over the control-frame ceiling comes
+			// back as an oversized CONTROL frame, which only happens on the
+			// prefix path - so the probe really did reach the parse.
+			client.send(`[{"y":1,"nonce":"oversized","pad":"${'x'.repeat(9000)}"}]`);
+			const refused = await client.waitFor(
+				(parsed) => parsed?.type === 'error' && parsed?.code === 'CONTROL_FRAME_TOO_LARGE',
+				2000
+			);
+			expect(refused, 'an array frame with the control prefix takes the control path').not.toBeNull();
+			expect(refused.parsed.size).toBeGreaterThan(8192);
+
 			expect(asObject, 'the object frame must reach the app hook').not.toBeNull();
 			expect(
 				asObject.parsed.data.present,

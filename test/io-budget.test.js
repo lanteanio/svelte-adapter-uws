@@ -977,7 +977,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the hook helper and the platform.js call sites do not reach this graph.
 	// Nothing executes differently on any frame path, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: 'e248ba21d5122422c0b56343b8c2d2aa44f180257125be1b1bd45f85ddcad1ea',
+	//
+	// Re-pinned for the envelope-shape predicate, which reaches all three of
+	// these graphs through utils.js -> utils/subscribe-policy.js: one added
+	// function declaration, three comparisons, and no call site inside any of
+	// them (the demux sites that call it are in handler.js, testing.js and
+	// vite.js, none of which these graphs import). Measured: with
+	// subscribe-policy.js alone reverted, and the three surfaces still calling
+	// it, every one of these digests holds at its previous value. Nothing
+	// executes differently on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered.
+	ingress: '49ba662929ca9e280288c4f4206124e1279643ff20a19992f4630098e600bd50',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1810,7 +1820,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// counted. Per publish the shared branch makes
 	// the same calls with the same frame and envelope; no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: 'bdac8fc6023e4591f3850b30c1e0ea91e960f9ed2784f4c536139fb0755c2c50',
+	//
+	// Re-pinned for the envelope-shape predicate, which reaches all three of
+	// these graphs through utils.js -> utils/subscribe-policy.js: one added
+	// function declaration, three comparisons, and no call site inside any of
+	// them (the demux sites that call it are in handler.js, testing.js and
+	// vite.js, none of which these graphs import). Measured: with
+	// subscribe-policy.js alone reverted, and the three surfaces still calling
+	// it, every one of these digests holds at its previous value. Nothing
+	// executes differently on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered.
+	platform: '84d91817f0f9812bb4f6b5a14ed3a754887bb95aa6e90c28712547bac69e50cf',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2107,7 +2127,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the value below - so the hook helper and the call sites that changed do
 	// not reach this graph. Nothing executes differently on any fan-out path,
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	'wire-fanout': 'fa67326e057c4873b0b466231789ff0e320c16360c705363863b22bf958e1dad',
+	// Re-pinned for the envelope-shape predicate, which reaches all three of
+	// these graphs through utils.js -> utils/subscribe-policy.js: one added
+	// function declaration, three comparisons, and no call site inside any of
+	// them (the demux sites that call it are in handler.js, testing.js and
+	// vite.js, none of which these graphs import). Measured: with
+	// subscribe-policy.js alone reverted, and the three surfaces still calling
+	// it, every one of these digests holds at its previous value. Nothing
+	// executes differently on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered.
+	'wire-fanout': 'c98bef8e20671b1294db774b1f35a6c5b013ce77b6a7b4ed6311146a157a6602',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
