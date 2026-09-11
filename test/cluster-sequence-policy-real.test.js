@@ -71,20 +71,22 @@ describeReal('real clustered sequence-authority policy', () => {
 			ws.once('error', reject);
 		});
 		let nonce = 0;
-		// Every probe envelope on the watched topic, in arrival order - the
-		// fixture publishes them under the event `probe`, so a control frame
-		// that happens to name the topic is not counted. This listener is
-		// registered before any probe's, so for a given frame it has run by the
-		// time a probe reads the reply - and a delivery the server wrote ahead
-		// of the reply arrives ahead of it on the same socket.
+		// Every envelope on the watched topic, in arrival order. An envelope
+		// carries an event; the subscribe ack names the topic too and carries
+		// none, so it is not counted. This listener is registered before any
+		// probe's, so for a given frame it has run by the time a probe reads
+		// its reply. What is NOT assumed is the order between a topic publish
+		// and the reply's direct send on the same socket: the native layer may
+		// drain the one after the other, so a case never reads the topic at
+		// reply time - it plants a sentinel afterwards and reads up to that.
 		let watched = null;
 		const seen = [];
 		ws.on('message', (data) => {
 			let frame;
 			try { frame = JSON.parse(data.toString()); } catch { return; }
-			if (watched !== null && frame.topic === watched && frame.event === 'probe') seen.push(frame);
+			if (watched !== null && frame.topic === watched && typeof frame.event === 'string') seen.push(frame);
 		});
-		/** Wait until `count` probe envelopes have arrived since `from`. */
+		/** Wait until `count` envelopes have arrived since `from`, then answer with all of them. */
 		const arrived = async (from, count) => {
 			const deadline = Date.now() + 5_000;
 			while (seen.length - from < count && Date.now() < deadline) {
@@ -128,11 +130,12 @@ describeReal('real clustered sequence-authority policy', () => {
 						if (frame.topic !== 'probe' || frame.event !== 'sequence-policy' || frame.data?.nonce !== wanted) return;
 						clearTimeout(timer);
 						ws.off('message', onMessage);
-						// `delivered`: the watched topic's envelopes that arrived between
-						// this probe's send and its reply. `settled(n)` waits for n of
-						// them past the reply, for an accepted batch whose envelopes
-						// the native layer may drain after the reply's direct send.
-						resolve({ ...frame.data, delivered: seen.slice(from), settled: (count) => arrived(from, count) });
+						// `settled(n)`: everything on the watched topic since this
+						// probe's send, once at least n envelopes have arrived. An
+						// accepted batch awaits its own pair; a refused one awaits
+						// nothing and reads what a later sentinel brought, so what it
+						// leaked - if anything - sits ahead of the sentinel's pair.
+						resolve({ ...frame.data, settled: (count) => arrived(from, count) });
 					};
 					ws.on('message', onMessage);
 					ws.send(JSON.stringify({ type: 'sequence-policy-probe', entry, options, nonce: wanted, ...extra }));
@@ -213,27 +216,36 @@ describeReal('real clustered sequence-authority policy', () => {
 		//
 		// The connection is subscribed to the probe topic, so each refusal is
 		// asked two things: the reply says the batch was refused, and the
-		// topic's frames say nothing fanned out ahead of it. The second is what
-		// makes a pre-pass a pre-pass - a check moved into the fan-out loop
-		// answers the same error with the first entry already delivered - and
-		// it is the only question the stateless lane can fail, because that
-		// lane reroutes each entry through publishWire, which asks the
-		// authority question again on its own.
+		// topic says nothing fanned out ahead of it. The second is what makes
+		// a pre-pass a pre-pass - a check moved into the fan-out loop answers
+		// the same error with the first entry already delivered - and it is
+		// the only question the stateless lane can fail, because that lane
+		// reroutes each entry through publishWire, which asks the authority
+		// question again on its own. The absence is read against a SENTINEL:
+		// the accepted spelling of the same probe, published after the
+		// refusals, whose pair is the only thing the topic may carry since
+		// them. That holds whichever order the native layer drains a publish
+		// and the reply, and the sentinel is the control that the
+		// subscription sees anything at all.
 		const server = await boot(2);
 		await server.subscribe(PROBE_TOPIC);
 		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {
-			// The clustered spelling: options renounce the counter AND the
-			// relay, entries carry the authority. Both entries reach the
-			// subscriber, which is also the control for the absences below.
-			const taken = await server.probe(entry, { seq: false, relay: false });
-			expect(taken.ok, `${entry}: ${taken.error}`).toBe(true);
-			expect((await taken.settled(2)).map((frame) => frame.data.n), entry).toEqual([1, 2]);
 			// With the relay left on, the adapter's own multi-origin fan-out
 			// would carry an externally ordered number it cannot keep ordered.
+			const refusals = [];
 			for (const options of [{ seq: false }, { seq: false, relay: true }]) {
 				const refused = await server.probe(entry, options);
 				expect(refused.error, entry).toBe(BATCH_ENTRY_SEQUENCE_ERROR);
-				expect(refused.delivered, `${entry}: a refused batch fans out nothing`).toEqual([]);
+				refusals.push(refused);
+			}
+			// The clustered spelling: options renounce the counter AND the
+			// relay, entries carry the authority.
+			const sentinel = await server.probe(entry, { seq: false, relay: false });
+			expect(sentinel.ok, `${entry}: ${sentinel.error}`).toBe(true);
+			expect((await sentinel.settled(2)).map((frame) => frame.data.n), entry).toEqual([1, 2]);
+			for (const refused of refusals) {
+				expect((await refused.settled(0)).map((frame) => frame.data.n), `${entry}: a refused batch fans out nothing`)
+					.toEqual([1, 2]);
 			}
 		}
 		server.close();
@@ -247,29 +259,27 @@ describeReal('real clustered sequence-authority policy', () => {
 		// setting is passed along but does not enter the verdict for the
 		// counter form.
 		//
-		// Same two questions as above. The stateful lane's draw is what the
-		// error answers for; the stateless lane reroutes each entry through
-		// publishWire, which refuses a counter draw on its own, so what its
-		// pre-pass adds is that the refusal lands before the first entry goes
-		// out - and that is what the empty delivery pins.
+		// Same two questions as above, read against a sentinel the same way.
+		// The stateful lane's draw is what the error answers for; the
+		// stateless lane reroutes each entry through publishWire, which
+		// refuses a counter draw on its own, so what its pre-pass adds is that
+		// the refusal lands before the first entry goes out - and that is what
+		// the sentinel pins. One sentinel per lane: the stateful lane through
+		// a batch with `state`, the stateless one through the per-entry seq
+		// probe under the spelling that makes it legal.
 		const server = await boot(2);
 		await server.subscribe(PROBE_TOPIC);
-		for (const entry of ['wire-batch-entry-counter', 'wire-batch-entry-counter-stateless']) {
+		for (const [entry, sentinelEntry, sentinelOptions] of [
+			['wire-batch-entry-counter', 'wire-batch', { seq: false }],
+			['wire-batch-entry-counter-stateless', 'wire-batch-entry-seq-stateless', { seq: false, relay: false }]
+		]) {
 			const refused = await server.probe(entry, { seq: false, relay: false });
 			expect(refused.error, entry).toBe(CLUSTER_SEQUENCE_ERROR);
-			expect(refused.delivered, `${entry}: a refused batch fans out nothing`).toEqual([]);
-		}
-		// The control for those absences, one per lane: the same topic with
-		// nothing to refuse reaches the subscriber with both entries - the
-		// stateful lane through a batch with `state`, the stateless one through
-		// the per-entry seq probe under the spelling that makes it legal.
-		for (const [entry, options] of [
-			['wire-batch', { seq: false }],
-			['wire-batch-entry-seq-stateless', { seq: false, relay: false }]
-		]) {
-			const taken = await server.probe(entry, options);
-			expect(taken.ok, `${entry}: ${taken.error}`).toBe(true);
-			expect((await taken.settled(2)).map((frame) => frame.data.n), entry).toEqual([1, 2]);
+			const sentinel = await server.probe(sentinelEntry, sentinelOptions);
+			expect(sentinel.ok, `${sentinelEntry}: ${sentinel.error}`).toBe(true);
+			expect((await sentinel.settled(2)).map((frame) => frame.data.n), sentinelEntry).toEqual([1, 2]);
+			expect((await refused.settled(0)).map((frame) => frame.data.n), `${entry}: a refused batch fans out nothing`)
+				.toEqual([1, 2]);
 		}
 		server.close();
 	}, 60_000);
