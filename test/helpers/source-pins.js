@@ -517,7 +517,7 @@ function switchCannotReach(switchNode, caseNode) {
 	// Where control ENTERS: the first case in source order whose test matches,
 	// wherever it stands - a `default` is taken only when none does, so one
 	// before the pin is passed over by a matching case after it. A test this
-	// cannot fold before the first match is a case that may be the entry, and
+	// cannot fold at or before the pin is a case that may be the entry, and
 	// then nothing is known.
 	const defaultAt = switchNode.cases.findIndex((candidate) => candidate.test === null);
 	let entry = -1;
@@ -527,8 +527,8 @@ function switchCannotReach(switchNode, caseNode) {
 		const test = staticValue(candidate.test);
 		if (!test) {
 			// Unknown. At or before the pin it may be the entry. After the pin
-			// it can only enter past the pin, which is dead whether or not it
-			// matches, so the rest of the walk decides.
+			// it enters past the pin if it matches, which is dead, and changes
+			// nothing if it does not, so the rest of the walk decides.
 			if (i <= at) return false;
 			continue;
 		}
