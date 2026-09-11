@@ -243,10 +243,12 @@ function statementLines(slice) {
  * `line` with the text of its quoted literals removed, so an anchor inside a
  * string is not mistaken for one in the code. Escapes included.
  *
- * Quotes only. A regular expression could hide an anchor too, but telling
- * `/x/` from a division without a tokenizer erases the span between two
- * dividing slashes - and that direction is worse: it loses a live anchor and
- * blames the source for moving.
+ * Quotes only, and both directions cost something. A regular expression can
+ * hide an anchor from this, while treating every `/.../` as a literal blanks
+ * the span between two DIVIDING slashes instead. Neither is free: an anchor
+ * this misses reads as -1 and fails its pin loudly, one it hides passes
+ * quietly. Nothing counts braces here any more, so the anchor search is the
+ * only consumer, and no anchor in the tree sits on a line of either shape.
  */
 function codeOnly(line) {
 	return line.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '\'\'');
@@ -409,12 +411,20 @@ function alwaysTerminates(node) {
 		}
 		case 'LabeledStatement':
 			return alwaysTerminates(node.body);
+		case 'SwitchStatement': {
+			// Every case leaves and a `default` catches the rest, so no value of
+			// the discriminant returns to the line after it.
+			const hasDefault = node.cases.some((entry) => entry.test === null);
+			return hasDefault && node.cases.every((entry) => entry.consequent.some(alwaysTerminates));
+		}
 		case 'TryStatement':
 			// The finalizer runs last, so it decides on its own; otherwise the
 			// block has to leave AND the handler, if there is one, has to leave
 			// with it.
 			if (node.finalizer && alwaysTerminates(node.finalizer)) return true;
 			return alwaysTerminates(node.block) && (!node.handler || alwaysTerminates(node.handler.body));
+		case 'ExpressionStatement':
+			return false;
 		case 'WhileStatement':
 		case 'ForStatement': {
 			// A loop with a condition written true and no way out never returns
@@ -432,7 +442,15 @@ function alwaysTerminates(node) {
 	}
 }
 
-/** Whether `node` holds a `break` or a `return` anywhere inside it. */
+/**
+ * Whether `node` holds a `break` or a `return` that belongs to it.
+ *
+ * Nested functions are not entered: a `return` inside a callback leaves that
+ * callback, so counting it would call off a dead loop's refusal on the strength
+ * of a statement that has nothing to do with the loop.
+ */
+const FUNCTION_NODES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+
 function containsBreakOrReturn(node) {
 	let found = false;
 	const walk = (current) => {
@@ -441,6 +459,7 @@ function containsBreakOrReturn(node) {
 			for (const entry of current) walk(entry);
 			return;
 		}
+		if (FUNCTION_NODES.has(current.type)) return;
 		if (current.type === 'BreakStatement' || current.type === 'ReturnStatement') { found = true; return; }
 		for (const [key, child] of Object.entries(current)) {
 			if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
@@ -462,13 +481,18 @@ function containsBreakOrReturn(node) {
 function switchCannotReach(switchNode, caseNode) {
 	const discriminant = staticValue(switchNode.discriminant);
 	if (!discriminant) return false;
-	for (const entry of switchNode.cases) {
+	// Up to and including the pinned case only: control reaches it either
+	// because its own test matches or by falling through from an EARLIER case,
+	// and a `default` or a matching case placed after it cannot reach backwards.
+	const at = switchNode.cases.indexOf(caseNode);
+	if (at < 0) return false;
+	for (const entry of switchNode.cases.slice(0, at + 1)) {
 		if (entry.test === null) return false;
 		const test = staticValue(entry.test);
 		if (!test) return false;
 		if (test.value === discriminant.value) return false;
 	}
-	return switchNode.cases.includes(caseNode);
+	return true;
 }
 
 /** The statement-list node kinds: a statement standing in one of these stands on its own. */
@@ -610,6 +634,9 @@ function notRunningHere(slice, line) {
 		}
 		if (parent.type === 'ArrowFunctionExpression' && key === 'body' && node.type !== 'BlockStatement') {
 			return { reason: 'a concise arrow body, not a statement', owner: text(parent) };
+		}
+		if (parent.type === 'TryStatement' && key === 'handler' && parent.block.body.length === 0) {
+			return { reason: 'the `catch` of a `try` with nothing in it to throw', owner: text(parent) };
 		}
 		if (parent.type === 'SwitchStatement' && key === 'cases' && switchCannotReach(parent, node)) {
 			return { reason: 'a `switch` case its discriminant cannot reach', owner: text(parent) };

@@ -230,10 +230,43 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
 		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		// Only the cases BEFORE it can reach it by falling through, so a matching
+		// case or a `default` placed AFTER the pinned one changes nothing - both
+		// of these are dead, and reading the whole list called the refusal off.
+		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tdefault:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		// A case BEFORE it that matches does reach it, by falling through.
+		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
 		// A `default` can be entered and fall through, and a discriminant the
 		// rule cannot fold says nothing, so both are taken.
 		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
 		expect(() => expectStatement(`switch (kind) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('refuses the catch of a try with nothing in it to throw', () => {
+		expect(() => expectStatement(`try {\n} catch {\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*nothing in it to throw/);
+		// A try that CAN throw reaches its catch.
+		expect(() => expectStatement(`try {\n\trisky();\n} catch {\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('refuses a statement under a switch that leaves down every case', () => {
+		const above = 'switch (kind) {\n\tcase 1:\n\t\treturn;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${above}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
+		// Without a default, a discriminant matching nothing falls past it.
+		const partial = 'switch (kind) {\n\tcase 1:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${partial}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('does not read a jump inside a nested function as the loop\'s own', () => {
+		// `return` in a callback leaves the callback. Counting it called off the
+		// refusal for a loop that never ends.
+		const above = 'while (true) {\n\tqueue.push(() => { return 1; });\n}';
+		expect(() => expectStatement(`before();\n${above}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
 	});
 
 	it('folds an expression of literals, and answers rather than throwing on one it cannot', () => {
