@@ -6,6 +6,7 @@ import path from 'node:path';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { freePort } from './helpers/real-runtime.js';
 import {
+	BATCH_ENTRY_SEQUENCE_ERROR,
 	BATCH_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR
 } from '../src/runtime/handler/cluster-sequence-policy.js';
@@ -149,6 +150,37 @@ describeReal('real clustered sequence-authority policy', () => {
 		// A valid unsequenced empty batch is still the no-op it always was.
 		expect(await server.probe('wire-batch-empty', { seq: false }))
 			.toMatchObject({ ok: true, result: false });
+		server.close();
+	}, 60_000);
+
+	it('refuses a per-entry seq on both batch lanes unless the batch renounces the counter and the relay', async () => {
+		// The per-entry authority check is the one guard in this family that no
+		// in-process case can reach: it returns early off-cluster, so a single
+		// worker never runs it. Asked here of a real two-worker runtime, on both
+		// lanes - the stateless reroute and the stateful snapshot pass, selected
+		// by whether the codec carries `state`.
+		const server = await boot(2);
+		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {
+			// The clustered spelling: options renounce the counter AND the
+			// relay, entries carry the authority.
+			expect((await server.probe(entry, { seq: false, relay: false })).ok, entry).toBe(true);
+			// With the relay left on, the adapter's own multi-origin fan-out
+			// would carry an externally ordered number it cannot keep ordered.
+			expect((await server.probe(entry, { seq: false })).error, entry)
+				.toBe(BATCH_ENTRY_SEQUENCE_ERROR);
+			expect((await server.probe(entry, { seq: false, relay: true })).error, entry)
+				.toBe(BATCH_ENTRY_SEQUENCE_ERROR);
+		}
+		server.close();
+	}, 60_000);
+
+	it('takes a per-entry seq on one worker, where the local counter is the only authority', async () => {
+		// The other side of the same rule, so the refusal above is a clustered
+		// decision rather than a blanket one.
+		const server = await boot(1);
+		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {
+			expect((await server.probe(entry, { seq: false })).ok, entry).toBe(true);
+		}
 		server.close();
 	}, 60_000);
 

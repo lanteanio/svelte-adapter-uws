@@ -226,8 +226,8 @@ describe('cluster sequence authority policy', () => {
 			return source.slice(start, end);
 		};
 		const publish = carve('publish', '\tpublish(', '\n\t/**\n\t * Send a message');
-		const wire = carve('publishWire', '\tpublishWire(', '\n\t/**\n\t * Register a plugin');
-		const wireBatch = carve('publishWireBatch', '\tpublishWireBatch(', '\n\t/**\n\t * Multi-entry single-target');
+		const wire = carve('publishWire', '\tpublishWire(', '\n\t/**\n\t * Multi-entry fan-out');
+		const wireBatch = carve('publishWireBatch', '\tpublishWireBatch(', '\n\t/**\n\t * Register a plugin');
 		const loopBatch = carve('batch', '\tbatch(messages)', '\n\t/**\n\t * Wire-batching implementation');
 		const batch = carve('publishBatched', '\tpublishBatched(', '\n\t/**');
 		// The single lanes follow the one-read rule the batch pioneered: every
@@ -298,11 +298,19 @@ describe('cluster sequence authority policy', () => {
 		// once, so lifting the check out of the branch, or up into the egress
 		// gate below the loop, changes these lines even though the call is
 		// untouched.
-		// The block runs to the end of the resolve, so it carries BOTH refusals
-		// and the bookkeeping between them: the authority check in the numeric
-		// arm, the counter refusal in the `true` arm, and the latch that fires
-		// the first once. Comment lines between them are skipped, so the pin
-		// survives an edit to the prose and not to the code.
+		// The block spans both arms of the resolve, so it carries BOTH refusals
+		// and the latch that fires the first once: the authority check in the
+		// numeric arm, the counter refusal in the `true` arm. Comment lines
+		// between them are skipped, so the pin survives an edit to the prose and
+		// not to the code. It stops at the arm's close rather than running to
+		// the end of the resolve, because the bookkeeping after it carries
+		// nothing this pin is about and a pin fails on every rename it spans.
+		//
+		// These pins are the SECOND line of defence. What the per-entry refusal
+		// actually runs is pinned behaviourally in
+		// test/cluster-sequence-policy-real.test.js, against a real two-worker
+		// runtime, because the refusal returns early off-cluster and no
+		// in-process case can reach it.
 		const entrySeqPrePass = [
 			'const resolved = resolveEntrySeq(entry.seq, i);',
 			'if (resolved !== undefined) {',
@@ -313,9 +321,6 @@ describe('cluster sequence authority policy', () => {
 			'}',
 			'} else if (resolved === true) {',
 			'assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);',
-			'}',
-			'if (entrySeqs === null) entrySeqs = new Array(count);',
-			'entrySeqs[i] = resolved;',
 			'}'
 		];
 		const prePasses = expectStatementBlockCount(wireBatch, entrySeqPrePass, 2,

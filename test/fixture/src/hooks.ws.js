@@ -154,6 +154,20 @@ export function message(ws, ctx) {
 				result = platform.publishWireBatch(topic, event, entries, {
 					capability: 'fixture.sequence-batch:1', schemaVersion: 1, state: {}, encode: () => null
 				}, options);
+			} else if (msg.entry === 'wire-batch-entry-seq' || msg.entry === 'wire-batch-entry-seq-stateless') {
+				// A per-ENTRY seq: the clustered spelling of an authoritative
+				// batch, where the options renounce the counter and each entry
+				// carries the number an external allocator gave it. A codec with
+				// `state` takes the stateful snapshot pass and one without it
+				// reroutes per entry, so the two kinds drive the two pre-passes
+				// that have to refuse it - and neither refusal exists off-cluster,
+				// which is why they are asked of a real clustered runtime.
+				result = platform.publishWireBatch(topic, event, [{ data: { n: 1 } }, { data: { n: 2 }, seq: 21 }], {
+					capability: 'fixture.sequence-batch:1',
+					schemaVersion: 1,
+					...(msg.entry === 'wire-batch-entry-seq' ? { state: {} } : {}),
+					encode: () => null
+				}, options);
 			} else if (msg.entry === 'batch') {
 				platform.publishBatched([{ topic, event, data: { n: 1 }, options }]);
 				result = true;
