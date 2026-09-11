@@ -16,26 +16,29 @@
  * back green.
  *
  * `expectStatement` asks for a LINE whose trimmed text is exactly the
- * statement, AND whose own line above it finished what it was saying.
- * Deleting the call fails it, renaming it fails it, anything written on the
- * same line around it fails it because the line is no longer that statement,
- * and a one-line wrapper on the line ABOVE it - `if (false)`, `else`,
- * `false &&`, an arrow header - fails it because the pinned line is then that
- * line's body rather than a statement of its own. Comments and the inside of a
- * literal that spans lines are blanked first, so `/* stmt *\/`, `// stmt` and a
- * template literal whose own line reads as the statement are not lines either.
- * The failure names the line it found, or the line above that took it over,
- * instead of reporting a bare `false`, so a neutralized guard identifies
- * itself.
+ * statement, AND which runs on its own where it stands. Deleting the call
+ * fails it, renaming it fails it, and anything written on the same line
+ * around it fails it because the line is no longer that statement. Three
+ * shapes leave the pinned line byte-identical and are refused by reading what
+ * is above it: a one-line wrapper - `if (false)`, `else`, `false &&`, an
+ * arrow header - because the pinned line is then that line's body; an
+ * unconditional `return` / `throw` / `break` / `continue` immediately above
+ * it, because nothing after that runs; and an enclosing block opened
+ * `if (false) {` or `while (0) {`, found by walking the braces outward.
+ * Comments and the inside of a literal that spans lines are blanked first, so
+ * `/* stmt *\/`, `// stmt` and a template literal whose own line reads as the
+ * statement are not lines either. The failure names the line it found and
+ * what took it over instead of reporting a bare `false`, so a neutralized
+ * guard identifies itself.
  *
- * WHAT LINE EQUALITY CANNOT SEE: a dead enclosing BLOCK. `if (false) {` and a
- * matching `}` some lines later leaves the pinned line following a `{`, which
- * is exactly what an ordinary block looks like; so does moving the statement
- * into a braced function nothing calls. A statement whose meaning depends on
- * its neighbours - a callback argument, a continuation of the line above - is
- * pinned with `expectStatementBlock`, which requires the lines CONSECUTIVELY,
- * so a neutralization of the line that owns the call changes the block. The
- * dead block is what the behavioural case beside a pin exists for.
+ * WHAT THIS STILL CANNOT SEE, because seeing it means evaluating the program:
+ * a block whose condition is a NAME that is false, a braced function nothing
+ * calls, and a caller that stops reaching the statement's lane at all. A
+ * statement whose meaning depends on its neighbours - a callback argument, a
+ * continuation of the line above - is pinned with `expectStatementBlock`,
+ * which requires the lines CONSECUTIVELY, so a neutralization of the line
+ * that owns the call changes the block. Those are what the behavioural case
+ * beside a pin exists for.
  */
 
 import { expect } from 'vitest';
@@ -211,24 +214,73 @@ function statementLines(slice) {
 
 /**
  * The characters a line ends with when it FINISHES what it was saying: a
- * statement (`;`), a block that opened or closed (`{`, `}`), or a label the
- * next statement belongs to rather than depends on (`:`, a `case`).
+ * statement (`;`) or a block that opened or closed (`{`, `}`).
  *
  * Everything else means the line above did not finish - `if (false)`, `else`,
  * `while (x)`, `false &&`, `() =>`, an open argument list - and the line under
  * it is that line's BODY or its continuation, not a statement of its own.
+ *
+ * `:` is NOT one of them, because it ends a ternary as readily as a label:
+ * `const dead = true ? undefined :` above a pinned call leaves the call dead
+ * on a line that terminates. A label really does hand the next line its own
+ * statement, so it is matched as a whole line instead.
  */
-const STATEMENT_TERMINATORS = new Set([';', '{', '}', ':']);
+const STATEMENT_TERMINATORS = new Set([';', '{', '}']);
+
+/** `case x:`, `default:` or a bare label: what follows belongs to it. */
+const LABEL_LINE = /^(?:case\b.+|default|[A-Za-z_$][\w$]*)\s*:$/;
+
+/** A line that leaves the block: nothing after it in that block can run. */
+const UNCONDITIONAL_JUMP = /^(?:return|throw|break|continue)\b/;
+
+/** A block header whose condition is written false: it opens dead code. */
+const DEAD_BLOCK_OPENER = /^(?:\}\s*else\s+)?(?:if|while)\s*\(\s*(?:false|0)\s*\)\s*\{$/;
 
 /**
- * Whether the line at `index` stands on its own rather than serving as the
- * body or the continuation of the line above it.
+ * The enclosing block header written `if (false) {` (or `while (0) {`, or an
+ * `else if`) that the line at `index` sits inside, or null.
  *
- * This is what closes the one neutralization line equality could not see: a
+ * Line equality cannot see a dead BLOCK: the pinned line follows an ordinary
+ * `{`, which is what every live block looks like too. Walking the braces
+ * outward finds the headers that opened the blocks this line is in, and a
+ * header that says `false` in as many characters is the neutralization
+ * someone reaches for once the one-line and line-above shapes are refused.
+ *
+ * A block whose condition is a name that happens to be false is NOT caught -
+ * that is a design decision this cannot see through without evaluating the
+ * program, and it is what the behavioural case beside a pin is for.
+ *
+ * @param {string[]} lines - trimmed, non-code already blanked
+ * @param {number} index
+ * @returns {string | null}
+ */
+function deadEnclosingBlock(lines, index) {
+	let depth = 0;
+	for (let i = index - 1; i >= 0; i--) {
+		const line = lines[i];
+		for (let c = line.length - 1; c >= 0; c--) {
+			if (line[c] === '}') { depth++; continue; }
+			if (line[c] !== '{') continue;
+			if (depth > 0) { depth--; continue; }
+			// An opener of a block this line is inside.
+			if (DEAD_BLOCK_OPENER.test(line)) return line;
+		}
+	}
+	return null;
+}
+
+/**
+ * What owns the line at `index` instead of letting it stand as a statement of
+ * its own, or null when nothing does.
+ *
+ * This is what closes the neutralizations line equality could not see. A
  * wrapper written on the PREVIOUS line leaves the pinned line byte-identical,
  * so `if (false)` above a pinned call passed a pin that `if (false) call();`
- * on one line fails. Reading the line above is enough to tell the two apart,
- * because a free-standing statement always follows a line that terminated.
+ * on one line fails; reading the line above tells the two apart, because a
+ * free-standing statement always follows a line that terminated. Two more
+ * shapes terminate a line and still leave the pinned call dead: an
+ * unconditional `return` / `throw` / `break` / `continue` above it, and a
+ * `if (false) {` block around it.
  *
  * Blank lines are skipped; comment-only lines are already blank by the time
  * these lines are produced. A statement at the top of the slice has nothing
@@ -236,29 +288,29 @@ const STATEMENT_TERMINATORS = new Set([';', '{', '}', ':']);
  *
  * @param {string[]} lines - trimmed, non-code already blanked
  * @param {number} index
- * @returns {boolean}
+ * @returns {string | null}
  */
-function startsItsOwnStatement(lines, index) {
+function ownedBy(lines, index) {
 	for (let i = index - 1; i >= 0; i--) {
 		const previous = lines[i];
 		if (previous === '') continue;
-		return STATEMENT_TERMINATORS.has(previous[previous.length - 1]);
+		if (UNCONDITIONAL_JUMP.test(previous)) return previous;
+		if (LABEL_LINE.test(previous)) break;
+		if (!STATEMENT_TERMINATORS.has(previous[previous.length - 1])) return previous;
+		break;
 	}
-	return true;
+	return deadEnclosingBlock(lines, index);
 }
 
 /**
- * The index of the line above `index` that owns it, for a failure message.
+ * Whether the line at `index` stands on its own.
  *
- * @param {string[]} lines
+ * @param {string[]} lines - trimmed, non-code already blanked
  * @param {number} index
- * @returns {string}
+ * @returns {boolean}
  */
-function owningLine(lines, index) {
-	for (let i = index - 1; i >= 0; i--) {
-		if (lines[i] !== '') return lines[i];
-	}
-	return '';
+function startsItsOwnStatement(lines, index) {
+	return ownedBy(lines, index) === null;
 }
 
 /**
@@ -278,11 +330,12 @@ export function expectStatement(slice, statement, label) {
 
 	// Report the near misses rather than a bare false. A wrapped, owned or
 	// commented call still contains the text, and naming the line that holds
-	// it - or the line above that took it over - is the difference between
-	// "the pin failed" and "here is what someone did to it".
+	// it - or the line above, the jump, or the dead block that took it over -
+	// is the difference between "the pin failed" and "here is what someone
+	// did to it".
 	if (exact.length > 0) {
-		const owners = exact.map((i) => JSON.stringify(owningLine(lines, i))).join(' | ');
-		expect.fail(`${label}: ${JSON.stringify(statement)} is its own line but the line above owns it: ${owners}`);
+		const owners = exact.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ');
+		expect.fail(`${label}: ${JSON.stringify(statement)} is its own line but does not run on its own, owned by: ${owners}`);
 	}
 	const wrapped = lines.filter((line) => line.includes(statement));
 	const detail = wrapped.length > 0
@@ -320,15 +373,17 @@ export function expectStatementCount(slice, statement, count, label) {
 	const exact = [];
 	for (let i = 0; i < lines.length; i++) if (lines[i] === statement) exact.push(i);
 	// An owned line does not count. Neutralizing one of a lane's two exits by
-	// putting `if (false)` above it would otherwise leave the count intact,
-	// which is the whole reason this function exists rather than a `toContain`.
+	// putting `if (false)` above it, jumping out of the block before it, or
+	// wrapping it in a block written false would otherwise leave the count
+	// intact, which is the whole reason this function exists rather than a
+	// `toContain`.
 	const owned = exact.filter((i) => !startsItsOwnStatement(lines, i));
 	const found = exact.length - owned.length;
 	if (found === count) return;
 	const wrapped = lines.filter((line) => line !== statement && line.includes(statement));
 	const detail = [
 		owned.length > 0
-			? `${owned.length} more is owned by the line above it: ${owned.map((i) => JSON.stringify(owningLine(lines, i))).join(' | ')}`
+			? `${owned.length} more line(s) do not run on their own, owned by: ${owned.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ')}`
 			: '',
 		wrapped.length > 0
 			? `${wrapped.length} more line(s) contain it without being it: ${wrapped.map((line) => JSON.stringify(line)).join(' | ')}`

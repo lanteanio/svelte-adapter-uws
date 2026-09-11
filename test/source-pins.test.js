@@ -106,18 +106,60 @@ describe('expectStatement', () => {
 
 	it('refuses a wrapper written on the line ABOVE, and names that line', () => {
 		// The neutralization line equality could not see: the pinned line stays
-		// byte-identical while the line above takes it over. `if (false)` on
-		// its own line is the shape a reviewer reaches for after finding that
-		// `if (false) stmt;` on one line is caught.
+		// byte-identical while the line above takes it over.
 		for (const owner of ['if (false)', 'else', 'while (false)', 'for (;;)', 'false &&', 'const unused = () =>', 'if (someCondition)']) {
 			expect(() => expectStatement(`before();\n${owner}\n\t${STATEMENT}\nafter();\n`, STATEMENT, 'pin'),
-				owner).toThrow(new RegExp(`pin: .* is its own line but the line above owns it: ${JSON.stringify(owner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+				owner).toThrow(new RegExp(`pin: .* owned by: ${JSON.stringify(owner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 		}
+	});
+
+	it('refuses an owner that ENDS in a terminator and still leaves the statement dead', () => {
+		// A line can finish what it was saying and still take the next line
+		// with it. The ternary is the one that reads like a terminator: `:`
+		// closes a label and an alternate alike, and the alternate is a
+		// one-line wrapper with the same cost to write as `if (false)`. The
+		// jumps are the other half - a line that leaves the block ends in `;`,
+		// and everything after it in that block is unreachable.
+		for (const owner of [
+			'const dead = true ? undefined :',
+			'return;',
+			'return value;',
+			'throw new Error(\'x\');',
+			'break;',
+			'continue;'
+		]) {
+			expect(() => expectStatement(`before();\n${owner}\n\t${STATEMENT}\nafter();\n`, STATEMENT, 'pin'),
+				owner).toThrow(new RegExp(`pin: .* owned by: ${JSON.stringify(owner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+		}
+	});
+
+	it('refuses a statement wrapped in a block written false, however far above the header is', () => {
+		// The dead enclosing BLOCK. The pinned line follows an ordinary `{`,
+		// which is what a live block looks like too, so the braces have to be
+		// walked outward to find the header that opened it.
+		for (const header of ['if (false) {', 'while (0) {', '} else if (false) {']) {
+			const slice = `before();\n${header}\n\tx();\n\t${STATEMENT}\n}\nafter();\n`;
+			expect(() => expectStatement(slice, STATEMENT, 'pin'), header)
+				.toThrow(new RegExp(`pin: .* owned by: ${JSON.stringify(header).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+		}
+		// And a live block around a dead one does not launder it.
+		expect(() => expectStatement(`if (ready) {\n\tif (false) {\n\t\t${STATEMENT}\n\t}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: "if \(false\) \{"/);
+	});
+
+	it('takes a statement inside an ordinary block, however deep', () => {
+		// The refusal above must cost nothing to live code: a nested block
+		// whose headers say nothing about being dead is where most pinned
+		// statements actually live.
+		const slice = `if (ready) {\n\tfor (const x of xs) {\n\t\ttry {\n\t\t\t${STATEMENT}\n\t\t} catch {}\n\t}\n}\n`;
+		expect(() => expectStatement(slice, STATEMENT, 'pin')).not.toThrow();
+		// A block that CLOSED above the statement is not enclosing it.
+		expect(() => expectStatement(`if (false) {\n\tx();\n}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('looks past blank and comment-only lines to find the line that owns it', () => {
 		expect(() => expectStatement(`if (false)\n\n\t// a note\n\t${STATEMENT}\n`, STATEMENT, 'pin'))
-			.toThrow(/the line above owns it: "if \(false\)"/);
+			.toThrow(/owned by: "if \(false\)"/);
 		expect(() => expectStatement(`before();\n\n\t// a note\n\t${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
@@ -125,7 +167,7 @@ describe('expectStatement', () => {
 		// A terminated statement, an opened block, a closed block, a case
 		// label, and the top of the slice: each is an ordinary place for the
 		// pinned statement to stand, and none of them is a wrapper.
-		for (const above of ['before();', 'if (x) {', '}', "case 'x':", '']) {
+		for (const above of ['before();', 'if (x) {', '}', "case 'x':", 'default:', 'retry:', '']) {
 			expect(() => expectStatement(`${above}\n\t${STATEMENT}\n`, STATEMENT, 'pin'), above).not.toThrow();
 		}
 	});
@@ -148,8 +190,12 @@ describe('expectStatementCount', () => {
 		// The count is what pins one check per lane exit, so neutralizing one
 		// exit from the line above has to move the number.
 		expect(() => expectStatementCount(`${STATEMENT}\nif (false)\n\t${STATEMENT}\n`, STATEMENT, 2, 'pin'))
-			.toThrow(/expected 2 line\(s\) .* found 1 \(1 more is owned by the line above it: "if \(false\)"\)/);
+			.toThrow(/expected 2 line\(s\) .* found 1 \(1 more line\(s\) do not run on their own, owned by: "if \(false\)"\)/);
 		expect(() => expectStatementCount(`${STATEMENT}\nif (false)\n\t${STATEMENT}\n`, STATEMENT, 1, 'pin')).not.toThrow();
+		// And the count drops for a dead block around one of them just as it
+		// does for a wrapper above it.
+		expect(() => expectStatementCount(`${STATEMENT}\nif (false) {\n\t${STATEMENT}\n}\n`, STATEMENT, 2, 'pin'))
+			.toThrow(/found 1 \(1 more line\(s\) do not run on their own, owned by: "if \(false\) \{"\)/);
 	});
 });
 
