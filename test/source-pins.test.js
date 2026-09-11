@@ -237,12 +237,28 @@ describe('expectStatement', () => {
 			.toThrow(/owned by: .*discriminant cannot reach/);
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
-		// A case BEFORE it that matches does reach it, by falling through.
+		// A case BEFORE it that matches does reach it, by falling through -
+		// unless that case leaves first. A `break` ends the fall-through as
+		// surely as a `return`, and reading the match alone admitted both.
 		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\t\tbreak;\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\t\treturn;\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
 		// A `default` can be entered and fall through, and a discriminant the
 		// rule cannot fold says nothing, so both are taken.
 		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
 		expect(() => expectStatement(`switch (kind) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		// But a `default` is entered only when NO case matches, wherever the
+		// matching one stands: one after the pin takes control away from a
+		// default before it. And a default that leaves does not fall through.
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\t\treturn;\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		// A test the fold cannot read AFTER the first match changes nothing,
+		// because the first match in source order is where control enters.
+		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('refuses the catch of a try with nothing in it to throw', () => {
@@ -259,6 +275,30 @@ describe('expectStatement', () => {
 		// Without a default, a discriminant matching nothing falls past it.
 		const partial = 'switch (kind) {\n\tcase 1:\n\t\treturn;\n}';
 		expect(() => expectStatement(`before();\n${partial}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// A `break` leaves the CASE and lands on the line after the switch, so
+		// the ordinary switch - every case ending in one - comes back. Reading
+		// `break` as a jump out of the block refused every pin below one.
+		const ordinary = 'switch (kind) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tdefault:\n\t\tb();\n\t\tbreak;\n}';
+		expect(() => expectStatement(`before();\n${ordinary}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		const braced = 'switch (kind) {\n\tcase 1: {\n\t\tbreak;\n\t}\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${braced}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// `continue` leaves the switch for the loop around it, so a switch that
+		// continues or returns on every case never comes back.
+		const continuing = 'switch (kind) {\n\tcase 1:\n\t\tcontinue;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`while (more()) {\n\tbefore();\n\t${continuing.replace(/\n/g, '\n\t')}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
+	});
+
+	it('does not read a break to a label as leaving the block the label stands in', () => {
+		// `break outer` lands on the line after the labelled statement.
+		const labelled = 'outer: {\n\tif (kind) break outer;\n\tother();\n}';
+		expect(() => expectStatement(`before();\n${labelled}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		const labelledOut = 'outer: {\n\tbreak outer;\n}';
+		expect(() => expectStatement(`before();\n${labelledOut}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// A return inside the label's body still leaves.
+		const labelledReturn = 'outer: {\n\treturn;\n}';
+		expect(() => expectStatement(`before();\n${labelledReturn}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
 	});
 
 	it('does not read a jump inside a nested function as the loop\'s own', () => {

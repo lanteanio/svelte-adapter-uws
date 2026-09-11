@@ -246,9 +246,11 @@ function statementLines(slice) {
  * Quotes only, and both directions cost something. A regular expression can
  * hide an anchor from this, while treating every `/.../` as a literal blanks
  * the span between two DIVIDING slashes instead. Neither is free: an anchor
- * this misses reads as -1 and fails its pin loudly, one it hides passes
- * quietly. Nothing counts braces here any more, so the anchor search is the
- * only consumer, and no anchor in the tree sits on a line of either shape.
+ * this misses reads as -1 and fails its pin loudly, while a hit inside a regex
+ * answers with a line that is not the anchor's, which an ordering bound
+ * catches only when the wrong line is on the wrong side of it. Nothing counts
+ * braces here any more, so the anchor search is the only consumer, and no
+ * anchor in the tree sits on a line of either shape.
  */
 function codeOnly(line) {
 	return line.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '\'\'');
@@ -391,40 +393,57 @@ function staticBinary(operator, a, b) {
 	}
 }
 
-/** Whether `node` always leaves the block it is in, so nothing after it runs. */
-function alwaysTerminates(node) {
+/**
+ * Whether `node` always leaves the statement list it stands in, so nothing
+ * after it in that list runs.
+ *
+ * `breakLeaves` says what an unlabelled `break` means from where the question
+ * is asked. Inside a list it ends, it leaves - the statements after it never
+ * run. But a `break` inside a `switch` case lands on the line AFTER the
+ * switch, and one inside a labelled statement's body lands after the label,
+ * so when the question is whether the SWITCH or the LABEL leaves the block
+ * around it, a `break` is the opposite of an answer: it is the way back.
+ * `return`, `throw` and `continue` leave from anywhere.
+ *
+ * @param {any} node
+ * @param {boolean} [breakLeaves]
+ */
+function alwaysTerminates(node, breakLeaves = true) {
 	if (!node) return false;
+	const leaves = (child) => alwaysTerminates(child, breakLeaves);
 	switch (node.type) {
 		case 'ReturnStatement':
 		case 'ThrowStatement':
-		case 'BreakStatement':
 		case 'ContinueStatement':
 			return true;
+		case 'BreakStatement':
+			return breakLeaves;
 		case 'BlockStatement':
 			// A bare block that returns takes the statements after it with it.
-			return node.body.some(alwaysTerminates);
+			return node.body.some(leaves);
 		case 'IfStatement': {
 			const test = staticValue(node.test);
-			if (test && test.value) return alwaysTerminates(node.consequent);
-			if (test && !test.value) return alwaysTerminates(node.alternate);
-			return Boolean(node.alternate) && alwaysTerminates(node.consequent) && alwaysTerminates(node.alternate);
+			if (test && test.value) return leaves(node.consequent);
+			if (test && !test.value) return leaves(node.alternate);
+			return Boolean(node.alternate) && leaves(node.consequent) && leaves(node.alternate);
 		}
 		case 'LabeledStatement':
-			return alwaysTerminates(node.body);
+			// A `break` to this label lands after it; only a jump that leaves the
+			// label's own body from further in counts.
+			return alwaysTerminates(node.body, false);
 		case 'SwitchStatement': {
-			// Every case leaves and a `default` catches the rest, so no value of
-			// the discriminant returns to the line after it.
+			// Every case leaves the switch itself - a `break` only leaves the
+			// case - and a `default` catches the rest, so no value of the
+			// discriminant returns to the line after it.
 			const hasDefault = node.cases.some((entry) => entry.test === null);
-			return hasDefault && node.cases.every((entry) => entry.consequent.some(alwaysTerminates));
+			return hasDefault && node.cases.every((entry) => entry.consequent.some((child) => alwaysTerminates(child, false)));
 		}
 		case 'TryStatement':
 			// The finalizer runs last, so it decides on its own; otherwise the
 			// block has to leave AND the handler, if there is one, has to leave
 			// with it.
-			if (node.finalizer && alwaysTerminates(node.finalizer)) return true;
-			return alwaysTerminates(node.block) && (!node.handler || alwaysTerminates(node.handler.body));
-		case 'ExpressionStatement':
-			return false;
+			if (node.finalizer && leaves(node.finalizer)) return true;
+			return leaves(node.block) && (!node.handler || leaves(node.handler.body));
 		case 'WhileStatement':
 		case 'ForStatement': {
 			// A loop with a condition written true and no way out never returns
@@ -481,18 +500,27 @@ function containsBreakOrReturn(node) {
 function switchCannotReach(switchNode, caseNode) {
 	const discriminant = staticValue(switchNode.discriminant);
 	if (!discriminant) return false;
-	// Up to and including the pinned case only: control reaches it either
-	// because its own test matches or by falling through from an EARLIER case,
-	// and a `default` or a matching case placed after it cannot reach backwards.
 	const at = switchNode.cases.indexOf(caseNode);
 	if (at < 0) return false;
-	for (const entry of switchNode.cases.slice(0, at + 1)) {
-		if (entry.test === null) return false;
-		const test = staticValue(entry.test);
+	// Where control ENTERS: the first case in source order whose test matches,
+	// wherever it stands - a `default` is taken only when none does, so one
+	// before the pin is passed over by a matching case after it. A test this
+	// cannot fold before the first match is a case that may be the entry, and
+	// then nothing is known.
+	let entry = -1;
+	for (let i = 0; i < switchNode.cases.length; i++) {
+		const candidate = switchNode.cases[i];
+		if (candidate.test === null) continue;
+		const test = staticValue(candidate.test);
 		if (!test) return false;
-		if (test.value === discriminant.value) return false;
+		if (test.value === discriminant.value) { entry = i; break; }
 	}
-	return true;
+	if (entry === -1) entry = switchNode.cases.findIndex((candidate) => candidate.test === null);
+	if (entry === -1 || entry > at) return true;
+	// From the entry the pinned case is reached by falling through, and any
+	// case on the way that always leaves - a `break` included, it ends the
+	// fall-through - stops control short of it.
+	return switchNode.cases.slice(entry, at).some((candidate) => candidate.consequent.some((child) => alwaysTerminates(child)));
 }
 
 /** The statement-list node kinds: a statement standing in one of these stands on its own. */
