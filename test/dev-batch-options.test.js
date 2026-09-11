@@ -1,8 +1,15 @@
 // `platform.batch()` is a loop over independent publishes, and each entry
-// carries its own `options`. Production (src/runtime/handler/platform.js) reads
-// that field and the createTestServer harness (src/testing.js) forwards it; the
-// dev plugin destructured only `{ topic, event, data }` and dropped it, so the
-// same call delivered a different frame under `vite dev` than under `npm start`.
+// carries its own `options` - the ones this lane reads. Production
+// (src/runtime/handler/platform.js) snapshots seq, relay, compress and jitterMs,
+// and the createTestServer harness forwards the same set; the dev plugin
+// destructured only `{ topic, event, data }` and dropped them, so the same call
+// delivered a different frame under `vite dev` than under `npm start`.
+//
+// Which keys those are is the other half of the contract, and dev got it wrong
+// in both directions: it dropped `jitterMs`, which production reads, and it
+// honoured `excludeWs`, which production's publish and batch do not read at all
+// (sender exclusion is a wire-lane option, where the per-connection walk it
+// needs already lives). Both directions are pinned below.
 //
 // This drives the real plugin - a real http.Server, a real `ws` client - and
 // asserts the frame the CLIENT is handed, because that is the only place the
@@ -21,6 +28,8 @@ import { WS_PLATFORM } from '../src/runtime/utils/ws-symbols.js';
 let httpServer = null;
 /** @type {any} */
 let client = null;
+/** @type {any[]} */
+let extraClients = [];
 
 /**
  * Boot the Vite plugin against a real HTTP server and a real client. The dev
@@ -40,10 +49,13 @@ async function bootDev(handler) {
 	/** @type {any} */
 	let capturedWs = null;
 	const appOpen = handler.open;
+	/** @type {any[]} */
+	const opened = [];
 	const loaded = {
 		...handler,
 		open(ws) {
-			capturedWs = ws;
+			opened.push(ws);
+			if (capturedWs === null) capturedWs = ws;
 			appOpen?.(ws);
 		}
 	};
@@ -70,29 +82,50 @@ async function bootDev(handler) {
 	});
 	await new Promise((r) => setTimeout(r, 60));
 
+	const watch = (collected) => async (predicate, ms = 1000) => {
+		const deadline = Date.now() + ms;
+		for (;;) {
+			const hit = collected.find(predicate);
+			if (hit) return hit;
+			if (Date.now() > deadline) return null;
+			await new Promise((r) => setTimeout(r, 10));
+		}
+	};
+
 	return {
 		ws: capturedWs,
 		frames,
+		waitFor: watch(frames),
 		/**
-		 * @param {(f: any) => boolean} predicate
-		 * @param {number} [ms]
+		 * A second client on the same dev server, so a case that asserts an
+		 * absence can show the same publish reaching someone else - an absence
+		 * on the only subscriber is satisfied by a lane that delivers nothing.
 		 */
-		async waitFor(predicate, ms = 1000) {
-			const deadline = Date.now() + ms;
-			for (;;) {
-				const hit = frames.find(predicate);
-				if (hit) return hit;
-				if (Date.now() > deadline) return null;
-				await new Promise((r) => setTimeout(r, 10));
-			}
+		async connect() {
+			const extra = new WebSocket('ws://127.0.0.1:' + port + '/ws');
+			/** @type {any[]} */
+			const extraFrames = [];
+			extra.on('message', (raw) => {
+				try { extraFrames.push(JSON.parse(raw.toString())); } catch { /* non-JSON frame */ }
+			});
+			await new Promise((resolve, reject) => {
+				extra.on('open', resolve);
+				extra.on('error', reject);
+			});
+			await new Promise((r) => setTimeout(r, 60));
+			extraClients.push(extra);
+			return { ws: opened[opened.length - 1], frames: extraFrames, waitFor: watch(extraFrames) };
 		}
 	};
 }
 
-describe('dev platform.batch() carries each entry OPTIONS (src/vite.js)', () => {
+describe('dev platform.batch() reads the entry options production reads (src/vite.js)', () => {
 	afterEach(async () => {
 		try { client?.terminate(); } catch { /* already gone */ }
 		client = null;
+		for (const extra of extraClients.splice(0)) {
+			try { extra.terminate(); } catch { /* already gone */ }
+		}
 		await new Promise((resolve) => {
 			if (!httpServer) return resolve(undefined);
 			httpServer.close(() => resolve(undefined));
@@ -131,7 +164,7 @@ describe('dev platform.batch() carries each entry OPTIONS (src/vite.js)', () => 
 		// socket means a per-connection walk. Sender exclusion is a WIRE-lane
 		// option, and honouring it here made `vite dev` suppress an echo that
 		// `npm start` delivers, silently.
-		const { ws, frames, waitFor } = await bootDev({});
+		const { ws, frames, waitFor, connect } = await bootDev({});
 		const platform = ws.getUserData()[WS_PLATFORM];
 		expect(await platform.subscribe(ws, 'room')).toBeNull();
 
@@ -147,11 +180,19 @@ describe('dev platform.batch() carries each entry OPTIONS (src/vite.js)', () => 
 		// The wire lane is where exclusion lives, and it still honours it here -
 		// otherwise this parity would have been bought by breaking the lane that
 		// declares the option.
+		// A second subscriber, so the absence below is an exclusion and not a lane
+		// that delivered nothing: the same publish has to reach this one.
+		const other = await connect();
+		expect(await platform.subscribe(other.ws, 'room')).toBeNull();
 		const wire = { capability: 'dev.exclude:1', schemaVersion: 1, encode: () => null };
 		expect(
 			platform.publishWire('room', 'wire-excluded', { n: 2 }, wire, { excludeWs: ws }),
-			'the only recipient was excluded, so the wire lane sent nothing'
-		).toBe(false);
+			'the wire lane delivered to the subscriber it was not asked to skip'
+		).toBe(true);
+		expect(
+			await other.waitFor((f) => f?.event === 'wire-excluded'),
+			'the other subscriber must receive it'
+		).not.toBeNull();
 		// Drain: wait for a frame published AFTER it, so the absence below is an
 		// exclusion rather than a frame still in flight.
 		platform.publish('room', 'drain', { n: 3 });

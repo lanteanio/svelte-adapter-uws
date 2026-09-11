@@ -242,7 +242,10 @@ export default function uws(options = {}) {
 	const chargeableBytesV = (envelope, recipients) =>
 		envelopeWireBytes(envelope, recipients, egressAccountV.bytesEnabled);
 	/**
-	 * Local recipients of a topic on this dev server. `excludeWs` withholds one
+	 * Local recipients of a topic on this dev server, for the egress admission.
+	 * `excludeWs` is the same pair `deliver` matches - the lanes that exclude
+	 * pass it to both - so a lane's admission counts exactly the recipients its
+	 * delivery will charge. `excludeWs` withholds one
 	 * connection, matched as either the uWS-shaped wrapper a handler receives
 	 * or the underlying raw socket - the same pair `publish` matches, so a
 	 * batch's admission counts exactly the recipients its entries will charge.
@@ -501,9 +504,11 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {unknown} [data]
-	 * @param {{ relay?: boolean, jitterMs?: number }} [options] - `relay` is
-	 *   accepted for API parity with production and ignored in dev
-	 *   (single-process).
+	 * @param {{ seq?: boolean | number | bigint | null, relay?: boolean, compress?: boolean, jitterMs?: number }} [options] -
+	 *   the four fields production's `publish` reads. `relay` is accepted for
+	 *   API parity and ignored in dev (single-process), and dev stamps no
+	 *   `seq` at all (documented on `publishBatched`); `jitterMs` lands in the
+	 *   envelope as `j` here exactly as it does in production.
 	 *
 	 *   `excludeWs` is NOT read here, because production's `publish` does not
 	 *   read it either: that lane is one native fan-out, and excluding one
