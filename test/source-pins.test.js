@@ -327,6 +327,15 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(`before();\n${maybeBreak}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 		const ownLabel = 'outer: switch (kind) {\n\tcase 1:\n\t\tbreak outer;\n\tdefault:\n\t\treturn;\n}';
 		expect(() => expectStatement(`before();\n${ownLabel}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// The same reading declines on a break that in truth stays inside the
+		// case - one in a nested loop, one to a label inside the case - and
+		// admits the pin below a switch that does always leave. That is the
+		// conservative side, the one the loop rule sits on too, and the cost
+		// of not deciding what each break targets.
+		const nestedBreak = 'switch (kind) {\n\tcase 1:\n\t\twhile (c) { break; }\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${nestedBreak}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		const innerLabel = 'switch (kind) {\n\tcase 1:\n\t\tinner: { break inner; }\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${innerLabel}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('does not read a break to a label as leaving the block the label stands in', () => {

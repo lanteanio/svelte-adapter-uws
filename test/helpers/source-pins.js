@@ -398,34 +398,28 @@ function staticBinary(operator, a, b) {
  * Whether `node` always leaves the statement list it stands in, so nothing
  * after it in that list runs.
  *
- * A `break` means different things depending on where the question is asked
- * from, and the two extra arguments say where that is. `breakLeaves` is what
- * an UNLABELLED `break` means: inside a list it ends, it leaves - the
- * statements after it never run - but inside a `switch` case it lands on the
- * line AFTER the switch, so when the question is whether the switch leaves the
- * block around it, that `break` is the way back. `labels` are the labels whose
- * `break` lands right after the construct being judged, for the same reason:
- * `break outer` inside `outer: { ... }` comes back to the line after the label,
- * while a `break` to any other label targets something further out and does
- * leave, and an unlabelled one inside a labelled block means whatever
- * `breakLeaves` says, since the label is not its target. `return`, `throw` and
- * `continue` leave from anywhere.
+ * A `break` leaves the list it stands in - the statements after it never run
+ * - unless it targets a label whose statement encloses that list, since then
+ * it comes back to the line after the label. `labels` are those labels, for
+ * the construct being judged: `break outer` inside `outer: { ... }` comes back,
+ * a `break` to any other label targets something further out and does leave.
+ * A `switch` case's `break` lands after the switch, and the switch arm below
+ * declines on any break rather than deciding what it targets. `return`,
+ * `throw` and `continue` leave from anywhere.
  *
  * @param {any} node
- * @param {boolean} [breakLeaves]
  * @param {readonly string[]} [labels]
  */
-function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
+function alwaysTerminates(node, labels = NO_LABELS) {
 	if (!node) return false;
-	const leaves = (child) => alwaysTerminates(child, breakLeaves, labels);
+	const leaves = (child) => alwaysTerminates(child, labels);
 	switch (node.type) {
 		case 'ReturnStatement':
 		case 'ThrowStatement':
 		case 'ContinueStatement':
 			return true;
 		case 'BreakStatement':
-			if (node.label === null) return breakLeaves;
-			return !labels.includes(node.label.name);
+			return node.label === null || !labels.includes(node.label.name);
 		case 'BlockStatement':
 			// A bare block that returns takes the statements after it with it.
 			return node.body.some(leaves);
@@ -438,8 +432,8 @@ function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 		case 'LabeledStatement':
 			// A `break` to THIS label lands after it. An unlabelled one inside
 			// the body still targets the loop or switch around the label, so it
-			// keeps the caller's meaning.
-			return alwaysTerminates(node.body, breakLeaves, [...labels, node.label.name]);
+			// leaves as it would anywhere.
+			return alwaysTerminates(node.body, [...labels, node.label.name]);
 		case 'SwitchStatement': {
 			// Every path through the switch leaves it, and a `default` catches
 			// the rest, so no value of the discriminant returns to the line
