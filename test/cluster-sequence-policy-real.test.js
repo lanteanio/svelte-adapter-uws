@@ -98,9 +98,10 @@ describeReal('real clustered sequence-authority policy', () => {
 			output: () => output,
 			/**
 			 * Subscribe this same connection to `topic` and watch it, so a probe
-			 * can say what went out on the topic before its reply came back:
-			 * the reply says whether the call was refused, the frames say
-			 * whether anything fanned out first.
+			 * can say what went out on the topic since its send, read against
+			 * a later sentinel: the reply says whether the call was refused,
+			 * the envelopes up to the sentinel's say whether anything fanned
+			 * out.
 			 */
 			async subscribe(topic) {
 				await new Promise((resolve, reject) => {
