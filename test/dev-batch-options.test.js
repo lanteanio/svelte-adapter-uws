@@ -6,19 +6,21 @@
 // delivered a different frame under `vite dev` than under `npm start`.
 //
 // Which keys those are is the other half of the contract, and dev got it wrong
-// in both directions: it dropped `jitterMs`, which production reads, and it
-// honoured `excludeWs`, which production's publish and batch do not read at all
-// (sender exclusion is a wire-lane option, where the per-connection walk it
-// needs already lives). Both directions are pinned below.
+// in three ways: it dropped `jitterMs`, which production reads; it honoured
+// `excludeWs`, which production's publish and batch do not read at all (sender
+// exclusion is a wire-lane option, where the per-connection walk it needs
+// already lives); and it accepted every `seq` VALUE production refuses, since
+// it stamps none and used to read none. All three are pinned below.
 //
 // This drives the real plugin - a real http.Server, a real `ws` client - and
 // asserts the frame the CLIENT is handed, because that is the only place the
 // divergence shows. A test that inspected the platform object would agree with
 // either implementation.
 //
-// `jitterMs` is the option under test because dev honours it observably: it
-// lands in the envelope as `j`. Dev deliberately stamps no `seq` (documented on
-// publishBatched), so seq would prove nothing here.
+// `jitterMs` is the option that proves an entry's options survive, because dev
+// honours it observably: it lands in the envelope as `j`. Dev deliberately
+// stamps no `seq` (documented on publishBatched), so what seq proves here is
+// the refusal, never a stamped value.
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer } from 'node:http';
@@ -120,7 +122,7 @@ async function bootDev(handler) {
 	};
 }
 
-describe('dev platform.batch() reads the entry options production reads (src/vite.js)', () => {
+describe('dev platform reads the publish options production reads, and refuses what it refuses (src/vite.js)', () => {
 	afterEach(async () => {
 		try { client?.terminate(); } catch { /* already gone */ }
 		client = null;
@@ -197,8 +199,10 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 			expect(() => platform.publishWire('room', 'bad', { n: 1 }, { capability: 'dev.seq:1', schemaVersion: 1, encode: () => null }, { seq: value }), `publishWire ${String(value)}`)
 				.toThrow(expected.message);
 		}
-		// Every refusal was a TypeError, production's class for a value refusal.
+		// A value refusal is a TypeError on both servers, production's class
+		// for it; one dev lane is pinned to the class, not only the message.
 		expect(refusal('x')).toBeInstanceOf(TypeError);
+		expect(() => platform.publish('room', 'bad', { n: 1 }, { seq: 'x' })).toThrow(TypeError);
 		// The value vetted is the value delivered: an accessor that answers the
 		// check with an accepted value and every later read with a refused one
 		// is accepted, as production accepts it from its snapshot - not
@@ -209,10 +213,12 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 			{ topic: 'room', event: 'shifty-batch', data: { n: 1 } },
 			{ topic: 'room', event: 'shifty-batch', data: { n: 2 }, options: shifty }
 		])).not.toThrow();
+		// The accessor rides the message the subscriber receives, so the count
+		// below is 0 unless the accessor's message was accepted and delivered.
 		reads = 0;
 		expect(() => platform.publishBatched([
-			{ topic: 'room', event: 'shifty-fallback', data: { n: 1 } },
-			{ topic: 'elsewhere', event: 'shifty-fallback', data: { n: 2 }, options: shifty }
+			{ topic: 'elsewhere', event: 'shifty-fallback', data: { n: 1 } },
+			{ topic: 'room', event: 'shifty-fallback', data: { n: 2 }, options: shifty }
 		])).not.toThrow();
 		// The values production takes still deliver, and nothing refused did:
 		// a frame published after them bounds the absence.
@@ -224,7 +230,7 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 		expect(accepted.seq, 'and dev stamps no seq on it').toBeUndefined();
 		expect(frames.some((f) => f?.event === 'bad'), 'no refused call delivered anything, not even a prefix').toBe(false);
 		expect(frames.filter((f) => f?.event === 'shifty-batch').length, 'the accessor batch delivered both').toBe(2);
-		expect(frames.filter((f) => f?.event === 'shifty-fallback').length, 'the accessor fall-back delivered its room message').toBe(1);
+		expect(frames.filter((f) => f?.event === 'shifty-fallback').length, 'the accessor fall-back delivered the accessor\'s own message').toBe(1);
 	});
 
 	it("ignores a batch entry exclusion, because production's batch ignores it", async () => {

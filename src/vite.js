@@ -906,10 +906,10 @@ export default function uws(options = {}) {
 		// sender exclusion flows through publishWire's options.
 		publishWireBatch(topic, event, entries, _wire, options) {
 			// Same refusal as production and the harness, checked before the
-			// entries: dev routes every entry through publish() with one shared
-			// options object, so a numeric seq would stamp them all identically
-			// here as well - and an empty dev batch must refuse what a full one
-			// refuses, or dev accepts a call production rejects.
+			// entries: dev routes every entry through the delivery seam with one
+			// shared options object, so a numeric seq would stamp them all
+			// identically here as well - and an empty dev batch must refuse what
+			// a full one refuses, or dev accepts a call production rejects.
 			// Field reads rather than a spread, as production reads them: an
 			// inherited or accessor-carried numeric seq must not slip a
 			// refusal here that production applies.
@@ -927,8 +927,8 @@ export default function uws(options = {}) {
 			// re-read them would disagree with production about what was sent.
 			// Per-entry seqs are validated with production's predicate - dev must
 			// refuse the call production refuses - and then carried through to
-			// publish(), which stamps no seq in dev (the documented dev posture;
-			// the seq protocol runs against createTestServer).
+			// the delivery seam, which stamps no seq in dev (the documented dev
+			// posture; the seq protocol runs against createTestServer).
 			const count = Array.isArray(entries) ? entries.length : 0;
 			const datas = new Array(count);
 			const excludes = new Array(count);

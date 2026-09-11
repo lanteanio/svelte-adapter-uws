@@ -494,8 +494,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   production runs before it admits - `publish` and the wire lanes through the
   delivery seam, `batch` and `publishBatched` over every message before the
   first goes out - so a bad value throws the same error on both servers, with
-  nothing of a batch delivered. Dev still stamps no seq on the values it
-  accepts.
+  nothing of a batch delivered. The publish lanes in dev still stamp no seq on
+  the values they accept; the send lanes carry an explicit one as before.
 - **A JSON array no longer reaches the app hook as a pre-parsed envelope.**
   `MessageContext.msg` is declared to carry a plain object envelope and to be
   absent for null, an array and a primitive, but the runtime tested
