@@ -319,6 +319,14 @@ describe('expectStatement', () => {
 		// But falling through into a case that breaks comes back.
 		const runsIntoBreak = 'switch (kind) {\n\tcase 1:\n\t\ta();\n\tcase 2:\n\t\tbreak;\n\tdefault:\n\t\treturn;\n}';
 		expect(() => expectStatement(`before();\n${runsIntoBreak}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// And a break that MAY land after the switch comes back too: one under
+		// a condition ahead of a fall-through into a returning default, and
+		// one to the switch's own label. Reading the case as a fall-through
+		// because nothing in it always leaves refused the live pin below.
+		const maybeBreak = 'switch (kind) {\n\tcase 1:\n\t\tif (x) break;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${maybeBreak}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		const ownLabel = 'outer: switch (kind) {\n\tcase 1:\n\t\tbreak outer;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${ownLabel}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('does not read a break to a label as leaving the block the label stands in', () => {

@@ -443,20 +443,21 @@ function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 		case 'SwitchStatement': {
 			// Every path through the switch leaves it, and a `default` catches
 			// the rest, so no value of the discriminant returns to the line
-			// after it. A case's consequent does one of three things: it leaves
-			// the switch (a `return`, a `throw`, a `continue`, a `break` to an
-			// outer label), it ends in a `break` that lands after the switch,
-			// or it falls through into the next case, which then decides -
-			// and the last case falls out of the switch. Read from the last
-			// case backwards so a fall-through knows where it lands.
+			// after it. A case's consequent either leaves the switch (a
+			// `return`, a `throw`, a `continue`) or falls through into the next
+			// case, which then decides - and the last case falls out of the
+			// switch. A `break` anywhere in a consequent declines the answer for
+			// that case, as the loop rule declines: it may land after the
+			// switch (`if (x) break;` does on one path, and a labelled one may
+			// target the switch's own label), and telling which is not worth
+			// the reading. Read from the last case backwards so a fall-through
+			// knows where it lands.
 			if (!node.cases.some((entry) => entry.test === null)) return false;
 			let everyPathLeaves = true;
 			let fallsInto = false;
 			for (let i = node.cases.length - 1; i >= 0; i--) {
 				const body = node.cases[i].consequent;
-				const exits = body.some((child) => alwaysTerminates(child, false, labels));
-				const ends = exits || body.some((child) => alwaysTerminates(child, true, labels));
-				const leavesSwitch = exits || (!ends && fallsInto);
+				const leavesSwitch = !containsBreak(body) && (body.some((child) => alwaysTerminates(child)) || fallsInto);
 				if (!leavesSwitch) everyPathLeaves = false;
 				fallsInto = leavesSwitch;
 			}
