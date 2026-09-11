@@ -154,6 +154,18 @@ export function message(ws, ctx) {
 				result = platform.publishWireBatch(topic, event, entries, {
 					capability: 'fixture.sequence-batch:1', schemaVersion: 1, state: {}, encode: () => null
 				}, options);
+			} else if (msg.entry === 'wire-batch-entry-counter' || msg.entry === 'wire-batch-entry-counter-stateless') {
+				// An entry drawing the per-worker COUNTER, which is the other
+				// refusal the batch pre-pass carries: a clustered batch cannot
+				// take `{ seq: true }` on an entry whatever its options say,
+				// because the counter is per worker and the relay is
+				// multi-origin. Same two codecs, for the same two pre-passes.
+				result = platform.publishWireBatch(topic, event, [{ data: { n: 1 } }, { data: { n: 2 }, seq: true }], {
+					capability: 'fixture.sequence-batch:1',
+					schemaVersion: 1,
+					...(msg.entry === 'wire-batch-entry-counter' ? { state: {} } : {}),
+					encode: () => null
+				}, options);
 			} else if (msg.entry === 'wire-batch-entry-seq' || msg.entry === 'wire-batch-entry-seq-stateless') {
 				// A per-ENTRY seq: the clustered spelling of an authoritative
 				// batch, where the options renounce the counter and each entry

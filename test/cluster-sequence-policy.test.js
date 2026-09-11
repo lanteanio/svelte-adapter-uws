@@ -252,7 +252,12 @@ describe('cluster sequence authority policy', () => {
 		expectStatement(wire, 'if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);', 'publishWire vets cluster sequence authority origin-side');
 		// The wire slice runs on into the batch surfaces; the one-read counts
 		// must cover exactly the publishWire body, which ends at the next JSDoc.
-		const wireBody = wire.slice(0, wire.indexOf('\n\t/**'));
+		// `indexOf` may not find a following doc comment now that the wire carve
+		// ends at one: -1 as a slice bound silently drops the last character and
+		// keeps every assertion green, which is the failure this file's own
+		// carve helper exists to refuse.
+		const wireBodyEnd = wire.indexOf('\n\t/**');
+		const wireBody = wireBodyEnd === -1 ? wire : wire.slice(0, wireBodyEnd);
 		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs']) {
 			expect(wireBody.split(field).length, `publishWire reads ${field} exactly once`).toBe(2);
 		}

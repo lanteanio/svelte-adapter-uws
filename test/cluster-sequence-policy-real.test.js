@@ -174,11 +174,40 @@ describeReal('real clustered sequence-authority policy', () => {
 		server.close();
 	}, 60_000);
 
-	it('takes a per-entry seq on one worker, where the local counter is the only authority', async () => {
-		// The other side of the same rule, so the refusal above is a clustered
-		// decision rather than a blanket one.
+	it('refuses an entry drawing the per-worker counter on both batch lanes', async () => {
+		// The second refusal the same pre-pass carries, and equally invisible
+		// off-cluster. `{ seq: true }` on an entry asks for the local counter,
+		// which no other worker shares, so a clustered batch refuses it whatever
+		// the options say - `{ seq: false, relay: false }` included, which is the
+		// spelling that makes an explicit entry seq legal.
+		//
+		// WHAT THIS DISCRIMINATES, measured: removing the STATEFUL branch's draw
+		// makes this fail. Removing the stateless branch's does not, because that
+		// branch reroutes each entry through publishWire, which asks the same
+		// value question again - so what the stateless pre-pass buys is not the
+		// refusal but its TIMING, whole-batch-or-nothing before the first entry
+		// fans out. Observing that needs a subscriber on the topic, and it is
+		// carded rather than claimed here.
+		const server = await boot(2);
+		for (const entry of ['wire-batch-entry-counter', 'wire-batch-entry-counter-stateless']) {
+			expect((await server.probe(entry, { seq: false, relay: false })).error, entry)
+				.toBe(CLUSTER_SEQUENCE_ERROR);
+			expect((await server.probe(entry, { seq: false })).error, entry)
+				.toBe(CLUSTER_SEQUENCE_ERROR);
+		}
+		server.close();
+	}, 60_000);
+
+	it('takes both per-entry forms on one worker, so neither refusal is blanket', async () => {
+		// What this proves and no more: both refusals are CLUSTERED decisions, so
+		// a guard that fired everywhere would fail here. It says nothing about
+		// what the counter stamps - `ok` is "did not throw" - and the value
+		// questions are asked in the in-process suite.
 		const server = await boot(1);
-		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {
+		for (const entry of [
+			'wire-batch-entry-seq', 'wire-batch-entry-seq-stateless',
+			'wire-batch-entry-counter', 'wire-batch-entry-counter-stateless'
+		]) {
 			expect((await server.probe(entry, { seq: false })).ok, entry).toBe(true);
 		}
 		server.close();
