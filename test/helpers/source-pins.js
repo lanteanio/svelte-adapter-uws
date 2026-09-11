@@ -42,7 +42,8 @@
  * - no earlier statement in its block may always leave: `return`, `throw`,
  *   `break`, `continue`, `if (true) return;`, `{ return; }`, a `try` that
  *   leaves down every path it has, a loop written `while (true)` that nothing
- *   breaks out of;
+ *   breaks out of, a `switch` with a `default` whose every path leaves it, a
+ *   labelled statement whose body leaves by anything but a `break` to it;
  * - and a `switch` case its discriminant cannot reach is not reached either.
  *
  * A carve that does not parse is refused loudly rather than guessed at, since a
@@ -405,8 +406,9 @@ function staticBinary(operator, a, b) {
  * block around it, that `break` is the way back. `labels` are the labels whose
  * `break` lands right after the construct being judged, for the same reason:
  * `break outer` inside `outer: { ... }` comes back to the line after the label,
- * while a `break` to any other label, or an unlabelled one inside a labelled
- * block, targets something further out and does leave. `return`, `throw` and
+ * while a `break` to any other label targets something further out and does
+ * leave, and an unlabelled one inside a labelled block means whatever
+ * `breakLeaves` says, since the label is not its target. `return`, `throw` and
  * `continue` leave from anywhere.
  *
  * @param {any} node
@@ -439,11 +441,26 @@ function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 			// keeps the caller's meaning.
 			return alwaysTerminates(node.body, breakLeaves, [...labels, node.label.name]);
 		case 'SwitchStatement': {
-			// Every case leaves the switch itself - an unlabelled `break` only
-			// leaves the case - and a `default` catches the rest, so no value of
-			// the discriminant returns to the line after it.
-			const hasDefault = node.cases.some((entry) => entry.test === null);
-			return hasDefault && node.cases.every((entry) => entry.consequent.some((child) => alwaysTerminates(child, false, labels)));
+			// Every path through the switch leaves it, and a `default` catches
+			// the rest, so no value of the discriminant returns to the line
+			// after it. A case's consequent does one of three things: it leaves
+			// the switch (a `return`, a `throw`, a `continue`, a `break` to an
+			// outer label), it ends in a `break` that lands after the switch,
+			// or it falls through into the next case, which then decides -
+			// and the last case falls out of the switch. Read from the last
+			// case backwards so a fall-through knows where it lands.
+			if (!node.cases.some((entry) => entry.test === null)) return false;
+			let everyPathLeaves = true;
+			let fallsInto = false;
+			for (let i = node.cases.length - 1; i >= 0; i--) {
+				const body = node.cases[i].consequent;
+				const exits = body.some((child) => alwaysTerminates(child, false, labels));
+				const ends = exits || body.some((child) => alwaysTerminates(child, true, labels));
+				const leavesSwitch = exits || (!ends && fallsInto);
+				if (!leavesSwitch) everyPathLeaves = false;
+				fallsInto = leavesSwitch;
+			}
+			return everyPathLeaves;
 		}
 		case 'TryStatement':
 			// The finalizer runs last, so it decides on its own; otherwise the
@@ -454,14 +471,16 @@ function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 		case 'WhileStatement':
 		case 'ForStatement': {
 			// A loop with a condition written true and no way out never returns
-			// to the line after it. `break` inside a nested loop or switch
-			// leaves that one instead, which is why this reads the body's own
-			// text rather than claiming to know: any `break` at all is enough to
-			// decline the answer.
+			// to the line after it. Only a `break` can land there - a `return`
+			// or a `throw` inside the body leaves the function, and the line
+			// after the loop still never runs. A `break` inside a nested loop or
+			// switch leaves that one instead, which is why this reads the
+			// body's own text rather than claiming to know: any `break` at all
+			// is enough to decline the answer.
 			const test = staticValue(node.test);
 			const endless = node.type === 'ForStatement' && node.test === null;
 			const truthy = endless || Boolean(test && test.value);
-			return truthy && !containsBreakOrReturn(node.body);
+			return truthy && !containsBreak(node.body);
 		}
 		default:
 			return false;
@@ -472,15 +491,15 @@ function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 const NO_LABELS = Object.freeze([]);
 
 /**
- * Whether `node` holds a `break` or a `return` that belongs to it.
+ * Whether `node` holds a `break` that belongs to it.
  *
- * Nested functions are not entered: a `return` inside a callback leaves that
- * callback, so counting it would call off a dead loop's refusal on the strength
- * of a statement that has nothing to do with the loop.
+ * Nested functions are not entered: a `break` inside a callback's own loop
+ * leaves that loop, so counting it would call off a dead loop's refusal on the
+ * strength of a statement that has nothing to do with the loop.
  */
 const FUNCTION_NODES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
 
-function containsBreakOrReturn(node) {
+function containsBreak(node) {
 	let found = false;
 	const walk = (current) => {
 		if (found || !current || typeof current !== 'object') return;
@@ -489,7 +508,7 @@ function containsBreakOrReturn(node) {
 			return;
 		}
 		if (FUNCTION_NODES.has(current.type)) return;
-		if (current.type === 'BreakStatement' || current.type === 'ReturnStatement') { found = true; return; }
+		if (current.type === 'BreakStatement') { found = true; return; }
 		for (const [key, child] of Object.entries(current)) {
 			if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
 			walk(child);

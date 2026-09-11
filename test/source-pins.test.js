@@ -230,9 +230,10 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
 		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
-		// Only the cases BEFORE it can reach it by falling through, so a matching
-		// case or a `default` placed AFTER the pinned one changes nothing - both
-		// of these are dead, and reading the whole list called the refusal off.
+		// Only the cases BEFORE it can reach it by falling through. With no
+		// default before the pin, a matching case or a `default` placed AFTER
+		// it enters past the pin - both of these are dead, and reading the
+		// whole list called the refusal off.
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tdefault:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
@@ -306,6 +307,18 @@ describe('expectStatement', () => {
 		const continuing = 'switch (kind) {\n\tcase 1:\n\t\tcontinue;\n\tdefault:\n\t\treturn;\n}';
 		expect(() => expectStatement(`while (more()) {\n\tbefore();\n\t${continuing.replace(/\n/g, '\n\t')}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/pin: .* owned by: .*always leaves the block/);
+		// A case that falls through into one that leaves, leaves with it: an
+		// empty case sharing the default's return, and a case whose consequent
+		// runs into the next. Reading each case alone admitted a pin below both.
+		const shared = 'switch (kind) {\n\tcase 1:\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${shared}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block: "switch \(kind\) \{"/);
+		const runsInto = 'switch (kind) {\n\tcase 1:\n\t\ta();\n\tcase 2:\n\t\treturn;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${runsInto}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block: "switch \(kind\) \{"/);
+		// But falling through into a case that breaks comes back.
+		const runsIntoBreak = 'switch (kind) {\n\tcase 1:\n\t\ta();\n\tcase 2:\n\t\tbreak;\n\tdefault:\n\t\treturn;\n}';
+		expect(() => expectStatement(`before();\n${runsIntoBreak}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('does not read a break to a label as leaving the block the label stands in', () => {
@@ -332,11 +345,21 @@ describe('expectStatement', () => {
 	});
 
 	it('does not read a jump inside a nested function as the loop\'s own', () => {
-		// `return` in a callback leaves the callback. Counting it called off the
-		// refusal for a loop that never ends.
-		const above = 'while (true) {\n\tqueue.push(() => { return 1; });\n}';
+		// A `break` in a callback's own loop leaves that loop. Counting it
+		// called off the refusal for a loop that never ends.
+		const above = 'while (true) {\n\tqueue.push(() => { for (;;) break; });\n}';
 		expect(() => expectStatement(`before();\n${above}\n${STATEMENT}\n`, STATEMENT, 'pin'))
 			.toThrow(/pin: .* owned by: .*always leaves the block/);
+	});
+
+	it('reads only a break as a way out of an endless loop', () => {
+		// A `return` inside the body leaves the function; the line after the
+		// loop still never runs. Counting it admitted a dead pin below.
+		const returning = 'while (true) {\n\tif (x) return;\n}';
+		expect(() => expectStatement(`before();\n${returning}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block: "while \(true\) \{"/);
+		const breaking = 'while (true) {\n\tif (x) break;\n}';
+		expect(() => expectStatement(`before();\n${breaking}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('folds an expression of literals, and answers rather than throwing on one it cannot', () => {
