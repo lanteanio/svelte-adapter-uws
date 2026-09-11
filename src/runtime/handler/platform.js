@@ -591,14 +591,18 @@ export const platform = {
 			// announce succeeded); otherwise this shared topic currently has only JSON
 			// subscribers and skips the binary fan-out entirely.
 			const id = getSharedWireId(topic);
-			// ONE OUTCOME PER NATIVE CALL, and the two calls below are not
-			// symmetric: the binary one runs only while some connection holds
-			// the binary cohort, the JSON one after it runs unconditionally.
-			// So a shared publish reports two while the binary cohort has a
-			// member and one when it has none - an empty JSON cohort still
-			// costs a call and a `no_subscribers`, an empty binary cohort
-			// costs neither. The
-			// counter is documented as the result of each TopicTree publish and
+			// ONE OUTCOME PER NATIVE CALL, so a publish that reaches this split
+			// reports one for each cohort it publishes to. The two calls below
+			// are not symmetric about that: the binary one runs only while some
+			// connection holds the binary cohort, the JSON one after it runs
+			// whether or not anyone is on it - so an empty JSON cohort still
+			// costs a call and a `no_subscribers`, an empty binary cohort costs
+			// neither. Note also what does NOT reach here: with no live
+			// connection advertising the capability the publish took the JSON
+			// fast path above, and a codec that declined the frame published
+			// once on the logical topic.
+			//
+			// The counter is documented as the result of each TopicTree publish and
 			// is deliberately not a per-logical-publish census (an excluding
 			// publish takes the per-socket walk and reports nothing at all, and
 			// a batch reports once for the N events its single frame carries).

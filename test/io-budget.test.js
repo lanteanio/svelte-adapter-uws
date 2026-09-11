@@ -1790,12 +1790,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned for the shared cohort join, measured as two parts. With
 	// cohort.js at its previous content this digest reads
 	// d115c4258fb14cafef2e29a038f4234d9df891ee7c478454602d014dc643773f, which
-	// is platform.js's share: the shared branch's second outcome report, which
-	// the merge had folded into one and which this restores. Executable, so it
-	// moves the digest; the comment beside it does not, since this hash is an
-	// AST with no comment nodes. Against the tree BEFORE the merge that body is
-	// unchanged, and the named-function seal on publishWire above says so - it
-	// is back at the value it carried then. With
+	// is platform.js's share: the shared branch reports one outcome per native
+	// publish, which is two report statements rather than one. Executable, so
+	// it moves this digest; the comment beside it does not, since this hash is
+	// an AST with no comment nodes - and the named-function seal on publishWire
+	// above carries the value that body has, which is how the two are told
+	// apart. With
 	// platform.js at its previous content instead the digest reads
 	// a6c0a5908b147449b37ff6aec4bd1de35948464a1142e49ff5b2588ef1aaed3f, which
 	// is cohort.js's share: an early return when the connection already holds

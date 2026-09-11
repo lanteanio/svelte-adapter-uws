@@ -498,10 +498,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-sent `hello` replaces the set, a refused per-connection announce poisons
   the wire state - moves it the other way, out of the binary cohort and off
   its reference. Both in the runtime and in `createTestServer`.
-  `ws_publish_outcomes_total` is unchanged and stays per native call: a shared
-  publish makes the JSON-cohort call always and the binary one only while some
-  connection holds that cohort, so it reports two while the binary cohort has
-  a member and one when it has none. That asymmetry is now stated where the
+  `ws_publish_outcomes_total` is unchanged and stays per native call: a publish
+  that splits its topic into cohorts makes one native call per cohort it
+  publishes to and reports one outcome for each, so a `no_subscribers` there
+  answers for one cohort and not for the publish. That is now stated where the
   metric is documented rather than left to be discovered.
 - **A failing `unsubscribe` hook no longer takes the worker or the message
   handler with it.** The hook is fire-and-forget and was invoked bare at

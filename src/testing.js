@@ -930,8 +930,8 @@ export async function createTestServer(options = {}) {
 			// first announce was refused past the backpressure limit is on the
 			// JSON cohort, and a later successful join must move it rather than
 			// add to it, or it receives every shared publish twice.
-			ws.unsubscribe(json);
-			ws.subscribe(bin);
+			try { ws.unsubscribe(json); } catch { closedWsAbortsT++; }
+			try { ws.subscribe(bin); } catch { closedWsAbortsT++; }
 		} else {
 			// And the move in the other direction, as production: a connection
 			// whose capability went away or whose wire state was poisoned
@@ -939,17 +939,18 @@ export async function createTestServer(options = {}) {
 			const held = ud[WS_SHARED_COHORTS];
 			if (held && held.delete(topic)) {
 				sharedWireIds.release(topic);
-				// Charged like the refusal path above and like production: a
-				// socket that closed under this call throws, and the count is
-				// what says so.
 				try { ws.unsubscribe(bin); } catch { closedWsAbortsT++; }
 			}
-			ws.subscribe(json);
+			try { ws.subscribe(json); } catch { closedWsAbortsT++; }
 		}
 	}
 	function leaveCohortT(ws, ud, topic) {
 		const { bin, json } = cohortTopicsT(topic);
-		ws.unsubscribe(bin); ws.unsubscribe(json);
+		// Every native call on this path is charged the way production charges
+		// it: a socket that closed under one throws, and the counter is what
+		// says so rather than the throw escaping the join.
+		try { ws.unsubscribe(bin); } catch { closedWsAbortsT++; }
+		try { ws.unsubscribe(json); } catch { closedWsAbortsT++; }
 		const cohorts = ud[WS_SHARED_COHORTS];
 		if (cohorts && cohorts.delete(topic)) sharedWireIds.release(topic);
 	}

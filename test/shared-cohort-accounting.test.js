@@ -19,11 +19,12 @@
 //    documented (index.d.ts, README) as the result of each native TopicTree
 //    publish: an excluding publish takes the per-socket walk and reports
 //    nothing, a batch reports once for the N events its single frame carries,
-//    and a shared publish makes the JSON call always and the binary call only
-//    while some connection holds the binary cohort, so it reports two while
-//    that cohort has a member and one when it has none. Merging the shared
-//    lane's two into one would make it the only lane answering a different
-//    question.
+//    and a publish that splits its topic into cohorts makes one native call
+//    per cohort it publishes to and reports one outcome for each. Inside that
+//    split the two calls are not symmetric - the binary call is guarded on a
+//    live cohort reference, the JSON call is not - so the last two cases pin
+//    both numbers it can report. Merging them into one would make this the
+//    only lane answering a different question.
 //
 // Layers: the built cohort module with the real wire-id table, the test
 // server through what a client can see, and the built runtime's own /metrics
@@ -228,18 +229,21 @@ describeUWS('the test server announces one wire id per cohort membership', () =>
 	});
 
 	// The harness installs no cohort hooks on the membership primitive, so a
-	// plugin's trackedSubscribe cannot re-join a cohort there and the guard in
-	// its join is reached only the way production reaches it. Neither can a
-	// client: every lane that could re-join a topic the connection already
-	// holds answers the held topic first - `platform.subscribe` returns on
-	// `subs.has(topic)` (testing.js around 1815), and the recover lane
-	// re-checks after its resume await and acks (around 3032), both mirroring
-	// runtime/handler.js. So both directions of the one-cohort move are
-	// unreachable from here, and the fake-socket cases above are the oracle
-	// for the harness copy as well as the runtime one. What a client CAN see
-	// the harness prove: one announce per membership, and a fresh id for the
-	// cohort that forms after the last member left - which is only the case
-	// when the reference count really reached zero.
+	// plugin's trackedSubscribe cannot re-join a cohort there. Neither can a
+	// client: all three lanes that could re-join a topic the connection
+	// already holds answer the held topic first, each mirroring
+	// runtime/handler.js - `platform.subscribe` returns on `subs.has(topic)`,
+	// the single recover lane re-checks after its resume await and acks, and
+	// the batch landing reads its own per-iteration `held` before joining.
+	//
+	// So neither direction of the one-cohort move is reachable in
+	// `createTestServer`, and NOTHING here pins the harness copy of that code:
+	// the cases above drive the BUILT runtime's cohort module, not
+	// `joinCohortT`. It is a mirror kept faithful by reading, which is the gap
+	// the cohort-hook card describes. What a client CAN see the harness prove
+	// is what this case is for: one announce per membership, and a fresh id for
+	// the cohort that forms after the last member left - which happens only if
+	// the reference count really reached zero.
 	it('announces once per membership and draws a fresh id after the last member leaves', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
@@ -345,29 +349,42 @@ describeUWS('the outcome counter counts native calls, not logical publishes', ()
 		expect(outcomesTotal(after) - outcomesTotal(before)).toBe(2);
 	});
 
-	it('a shared topic with no binary cohort reports one, because that call is the guarded one', async () => {
-		// The other quadrant, and the one the two-outcome number reads as
-		// impossible unless it is pinned: a subscriber that advertised no
-		// capability puts nobody in the binary cohort, so `getSharedWireId`
-		// answers undefined and the binary publish is skipped entirely. One
-		// native call, one outcome, no `no_subscribers` for a cohort that was
-		// never built. A different topic from the case above, whose binary
-		// cohort would otherwise still be holding a reference.
-		const jsonOnly = await connectClient(server.wsUrl, [], 'cohort-json-only');
+	it('the same split reports one once its binary cohort is empty', async () => {
+		// The other number the split can report, and the case has to reach the
+		// SPLIT to say anything about it: with no connection advertising the
+		// capability at all, `publishWire` takes the JSON fast path above the
+		// split instead (platform.js, `!capCounts.has(wire.capability)`), which
+		// also makes one call - so a caps-less client alone would measure 1 and
+		// prove nothing about the branch under test.
+		//
+		// So: a capable client forms the binary cohort on its own topic, then
+		// UNSUBSCRIBES. Its connection stays open, so the capability count
+		// still routes the publish into the split; its reference is released,
+		// so the binary call inside the split is skipped. The binary frame it
+		// received before unsubscribing is what proves the cohort had formed.
+		const topic = 'cohort-emptied';
+		const capable = await connectClient(server.wsUrl, [CAP], topic);
+		const jsonOnly = await connectClient(server.wsUrl, [], topic);
 		try {
-			jsonOnly.send({ type: 'shared-publish', topic: 'cohort-json-only', n: 1 });
-			await until(() => jsonOnly.frames.json.length >= 1, 'the first shared envelope');
+			capable.send({ type: 'shared-publish', topic, n: 1 });
+			await until(() => capable.frames.binary.length >= 1, 'the binary frame that proves the cohort formed');
+			await until(() => jsonOnly.frames.json.length >= 1, 'the envelope on the JSON cohort');
 			expect(jsonOnly.frames.binary, 'a JSON-only client is sent the envelope, never the frame').toHaveLength(0);
 			expect(jsonOnly.frames.wireIds, 'and is announced no shared id').toHaveLength(0);
 
+			capable.send({ type: 'unsubscribe', topic });
+			await sleep(60);
+
 			const before = await scrapeLabelled(server.httpUrl);
-			jsonOnly.send({ type: 'shared-publish', topic: 'cohort-json-only', n: 2 });
+			jsonOnly.send({ type: 'shared-publish', topic, n: 2 });
 			await until(() => jsonOnly.frames.json.length >= 2, 'the measured shared envelope');
 			const after = await scrapeLabelled(server.httpUrl);
 
-			expect(outcomesTotal(after) - outcomesTotal(before)).toBe(1);
+			expect(outcomesTotal(after) - outcomesTotal(before), 'the emptied binary cohort costs no call').toBe(1);
+			expect(capable.frames.binary, 'and the departed member is sent nothing more').toHaveLength(1);
 		} finally {
 			jsonOnly.close();
+			capable.close();
 		}
 	});
 });

@@ -1090,14 +1090,13 @@ export interface WebSocketOptions {
 	 *   walk. A publish that excludes a socket is delivered by a per-socket
 	 *   walk instead of one native call, so it is counted by
 	 *   `ws_publishes_total` and is absent here: the two do not sum. In the
-	 *   other direction, one publish on a topic served by a `shared: true`
-	 *   codec makes the JSON-cohort call always and the binary-cohort call
-	 *   only while some connection holds the binary cohort, so it contributes
-	 *   two outcomes while that cohort has a member and one when it has none.
-	 *   Either call can come back `no_subscribers`: the cohort it names is
-	 *   empty while the other one carries the topic. Read that on a shared
-	 *   topic as "one cohort is empty", not as "nobody received it";
-	 *   `ws_publishes_total` is the count of logical publishes.
+	 *   other direction, a publish that splits its topic into cohorts - what a
+	 *   `shared: true` codec's publish does - makes one native call per cohort
+	 *   it publishes to, and contributes one outcome for each. So an outcome
+	 *   answers for one CALL, not for the publish: a `no_subscribers` on a
+	 *   cohort-split topic is one empty cohort, and says nothing by itself
+	 *   about whether the other call delivered. `ws_publishes_total` is the
+	 *   count of logical publishes.
 	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
 	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
 	 * - `ws_backpressure_connections` - sampled connections holding a
