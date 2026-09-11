@@ -63,6 +63,30 @@ describe('ADAPTER-ERR-LISTEN emission fidelity', () => {
 		expect(line).toContain('[ADAPTER-ERR-LISTEN]');
 	});
 
+	it('reports the bind reason a transport hands it, and the placeholder when there is none', () => {
+		// The record declares an `error` field, and what fills it depends on the
+		// transport rather than on this package: uWebSockets.js answers a failed
+		// listen with a falsy socket and no reason, while a transport that
+		// rejects with EADDRINUSE has the whole answer and passes it. Both
+		// records go through the same formatter, so an operator reads the cause
+		// in the declared field either way.
+		const placeholder = listenFailureDiagnostic('127.0.0.1', 4321);
+		expect(placeholder.error.code, 'the two-argument form keeps the placeholder').toBe('LISTEN_FAILED');
+
+		const reported = Object.assign(new Error('listen EADDRINUSE: address already in use 127.0.0.1:4321'), { code: 'EADDRINUSE' });
+		const carried = listenFailureDiagnostic('127.0.0.1', 4321, reported);
+		expect(carried.error, 'the reported error is carried, not copied into a new one').toBe(reported);
+		const line = formatOperationalDiagnostic(carried);
+		expect(line.startsWith(entry.messagePrefix), 'and the line still resolves to this entry').toBe(true);
+		expect(line).toContain('EADDRINUSE');
+		// A transport with no Error object of its own is not a shape error: the
+		// record's own field builder takes a string.
+		expect(formatOperationalDiagnostic(listenFailureDiagnostic('127.0.0.1', 4321, 'bind refused'))).toContain('bind refused');
+		// An explicit null means "no reason", which is what the field's own
+		// absent form is - it must not resurrect the placeholder.
+		expect(listenFailureDiagnostic('127.0.0.1', 4321, null).error).toBe(null);
+	});
+
 	it('keeps the prose bound to the three outcomes the code delivers', () => {
 		// The failure loop differs per mode, and the old sentences promised the
 		// single-process outcome for all three - "exits with status 1", "does

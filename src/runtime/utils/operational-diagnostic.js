@@ -109,7 +109,22 @@ export function emitOperationalDiagnostic(input) {
 	return emitOperationalEvent({ ...record, message: composedMessage(record) });
 }
 
-export function listenFailureDiagnostic(host, port) {
+/**
+ * The fatal record for a listen that never bound.
+ *
+ * `error` is optional because the transport decides whether there is one to
+ * report. uWebSockets.js answers a failed listen with a falsy socket and
+ * nothing else, so the placeholder below is the honest content of the declared
+ * field there; a transport that rejects with the real reason (EADDRINUSE from
+ * `node:http`, say) passes it and the operator reads the cause in the field
+ * that exists for it. The call sites here pass two arguments and keep the
+ * placeholder.
+ *
+ * @param {string} host
+ * @param {number | string} port
+ * @param {unknown} [error] - the bind error the transport reported, if any
+ */
+export function listenFailureDiagnostic(host, port, error) {
 	const definition = adapterErrorDefinition(ADAPTER_ERROR_IDS.LISTEN);
 	return {
 		level: 'fatal',
@@ -122,7 +137,9 @@ export function listenFailureDiagnostic(host, port) {
 		willRetry: false,
 		host,
 		port,
-		error: Object.assign(new Error('uWebSockets.js returned no listen socket'), { code: 'LISTEN_FAILED' })
+		error: error === undefined
+			? Object.assign(new Error('uWebSockets.js returned no listen socket'), { code: 'LISTEN_FAILED' })
+			: error
 	};
 }
 
