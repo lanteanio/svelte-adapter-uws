@@ -473,6 +473,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`vite dev` no longer withholds an echo that production delivers.** The dev
+  plugin read `options.excludeWs` on `platform.publish`, and on `batch` and
+  `publishBatched` through it, while production reads no exclusion on any of
+  those three: that lane is one native fan-out, and skipping a single socket
+  means falling back to a per-connection walk. An app developed against the dev
+  server saw the sender suppressed and got the echo under `npm start`, with
+  nothing to notice in between. Exclusion stays declared and implemented where
+  the walk already lives - `publishWire` and `publishWireBatch` - and those
+  honour it in dev exactly as before, including the JSON fallback a codec takes
+  when it declines a frame, which is the supported way to skip the sender
+  without a binary payload.
 - **A JSON array no longer reaches the app hook as a pre-parsed envelope.**
   `MessageContext.msg` is declared to carry a plain object envelope and to be
   absent for null, an array and a primitive, but the runtime tested

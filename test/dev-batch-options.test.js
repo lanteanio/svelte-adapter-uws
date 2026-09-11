@@ -124,26 +124,41 @@ describe('dev platform.batch() carries each entry OPTIONS (src/vite.js)', () => 
 		).toBe(250);
 	});
 
-	it('honours a batch entry EXCLUSION, so the excluded socket is not a recipient', async () => {
-		// The second observable option, and the one whose loss is silent in the
-		// other direction: dropping `excludeWs` delivers a frame to a socket that
-		// asked not to receive it, rather than omitting a field.
+	it("ignores a batch entry exclusion, because production's batch ignores it", async () => {
+		// The option this lane must NOT read. Production's batch snapshots seq,
+		// relay, compress and jitterMs - no exclusion - and its publish reads
+		// none either, because that lane is one native fan-out and skipping one
+		// socket means a per-connection walk. Sender exclusion is a WIRE-lane
+		// option, and honouring it here made `vite dev` suppress an echo that
+		// `npm start` delivers, silently.
 		const { ws, frames, waitFor } = await bootDev({});
 		const platform = ws.getUserData()[WS_PLATFORM];
 		expect(await platform.subscribe(ws, 'room')).toBeNull();
 
 		const delivered = platform.batch([
-			{ topic: 'room', event: 'excluded', data: { n: 1 }, options: { excludeWs: ws } }
+			{ topic: 'room', event: 'not-excluded', data: { n: 1 }, options: { excludeWs: ws } }
 		]);
-		expect(delivered, 'the only recipient was excluded, so nothing was sent').toEqual([false]);
-
-		// Prove the topic is live, so the absence above is the exclusion and not
-		// a broken subscription.
-		platform.batch([{ topic: 'room', event: 'included', data: { n: 2 } }]);
-		expect(await waitFor((f) => f?.event === 'included'), 'the topic must be live').not.toBeNull();
+		expect(delivered, 'the frame goes out, as it does under npm start').toEqual([true]);
 		expect(
-			frames.find((f) => f?.event === 'excluded'),
-			'the excluded socket must never have received the frame'
+			await waitFor((f) => f?.event === 'not-excluded'),
+			'and reaches the socket the option named'
+		).not.toBeNull();
+
+		// The wire lane is where exclusion lives, and it still honours it here -
+		// otherwise this parity would have been bought by breaking the lane that
+		// declares the option.
+		const wire = { capability: 'dev.exclude:1', schemaVersion: 1, encode: () => null };
+		expect(
+			platform.publishWire('room', 'wire-excluded', { n: 2 }, wire, { excludeWs: ws }),
+			'the only recipient was excluded, so the wire lane sent nothing'
+		).toBe(false);
+		// Drain: wait for a frame published AFTER it, so the absence below is an
+		// exclusion rather than a frame still in flight.
+		platform.publish('room', 'drain', { n: 3 });
+		expect(await waitFor((f) => f?.event === 'drain'), 'the topic must be live').not.toBeNull();
+		expect(
+			frames.find((f) => f?.event === 'wire-excluded'),
+			'the wire lane must still withhold from the excluded socket'
 		).toBeUndefined();
 	});
 });

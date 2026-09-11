@@ -440,20 +440,22 @@ export default function uws(options = {}) {
 	}
 
 	/**
-	 * Publish to all subscribers of a topic.
+	 * The one delivery point for every dev lane: builds the envelope, charges
+	 * egress once, and writes to each local subscriber.
+	 *
+	 * `excludeWs` is an ARGUMENT rather than something read from `options`,
+	 * because which lanes exclude is a contract: the wire lanes do and
+	 * `platform.publish` does not. Matched as either the uWS-shaped wrapper
+	 * handlers receive or the underlying raw socket.
+	 *
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {unknown} [data]
-	 * @param {{ relay?: boolean, excludeWs?: object }} [options] - `relay` is
-	 *   accepted for API parity with production and ignored in dev
-	 *   (single-process). `excludeWs` withholds delivery from that one
-	 *   connection - matched as either the uWS-shaped wrapper handlers
-	 *   receive or the underlying raw socket - mirroring the production
-	 *   sender-exclusion contract.
+	 * @param {{ relay?: boolean, jitterMs?: number }} [options]
+	 * @param {object | null} [excludeWs] - the connection this delivery skips
 	 * @returns {boolean}
 	 */
-	function publish(topic, event, data, options) {
-		const excludeWs = (options && options.excludeWs) || null;
+	function deliver(topic, event, data, options, excludeWs = null) {
 		// Mirror the production `{ jitterMs }` de-herd window stamp (platform.publish):
 		// carry the window so each client rolls its own dispatch delay.
 		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
@@ -491,6 +493,30 @@ export default function uws(options = {}) {
 			}
 		}
 		return sent;
+	}
+
+	/**
+	 * Publish to all subscribers of a topic - `platform.publish`.
+	 *
+	 * @param {string} topic
+	 * @param {string} event
+	 * @param {unknown} [data]
+	 * @param {{ relay?: boolean, jitterMs?: number }} [options] - `relay` is
+	 *   accepted for API parity with production and ignored in dev
+	 *   (single-process).
+	 *
+	 *   `excludeWs` is NOT read here, because production's `publish` does not
+	 *   read it either: that lane is one native fan-out, and excluding one
+	 *   socket means a per-connection walk. Sender exclusion is declared and
+	 *   implemented on the wire lanes, which own that walk - and a codec that
+	 *   declines the frame publishes the envelope with the exclusion honoured,
+	 *   which is the supported way to skip the sender on JSON bytes. Reading it
+	 *   here would echo differently in dev than in production, silently, which
+	 *   is the one thing a dev mirror must not do.
+	 * @returns {boolean}
+	 */
+	function publish(topic, event, data, options) {
+		return deliver(topic, event, data, options, null);
 	}
 
 	/**
@@ -823,10 +849,12 @@ export default function uws(options = {}) {
 		// optional). This mirrors dev's existing simpler-than-prod posture
 		// (dev also skips per-topic seq stamping). The full binary `0x03` path
 		// ships and is tested in production (src/runtime/handler.js) and the test
-		// server (testing.js). Publish options flow through unchanged, so
-		// sender exclusion (`excludeWs`) behaves identically in dev.
+		// server (testing.js). Sender exclusion behaves identically in dev
+		// because these lanes hand it to the delivery seam themselves - it is a
+		// wire-lane option, and `platform.publish` does not read it here any
+		// more than production's does.
 		publishWire(topic, event, data, _wire, options) {
-			return publish(topic, event, data, options);
+			return deliver(topic, event, data, options, (options && options.excludeWs) || null);
 		},
 		sendWire(ws, topic, event, data, _wire, options) {
 			return send(ws, topic, event, data, options);
@@ -924,7 +952,7 @@ export default function uws(options = {}) {
 					if (excludes[i] != null) per.excludeWs = excludes[i];
 					if (entrySeq !== undefined) per.seq = entrySeq;
 				}
-				ok = publish(topic, event, datas[i], per) || ok;
+				ok = deliver(topic, event, datas[i], per, (per && per.excludeWs) || null) || ok;
 			}
 			return ok;
 		},
@@ -949,10 +977,12 @@ export default function uws(options = {}) {
 				const { topic, event, data, options } = messages[i];
 				// Each entry carries its own options, exactly as it does through
 				// production's batch and the harness's: this method is a loop over
-				// independent publishes, so an entry's `excludeWs` or `jitterMs` is
-				// as load-bearing here as it is when the caller publishes directly.
-				// Dropping them made a dev batch quietly deliver a different frame
-				// than the same call under `npm start`.
+				// independent publishes, so an entry's `jitterMs` is as
+				// load-bearing here as it is when the caller publishes directly.
+				// Dropping it made a dev batch quietly deliver a different frame
+				// than the same call under `npm start`. Exclusion is not among
+				// them: production's batch snapshots seq, relay, compress and
+				// jitterMs, and no exclusion, so neither does this.
 				results.push(publish(topic, event, data, options));
 			}
 			return results;
@@ -1267,7 +1297,7 @@ export default function uws(options = {}) {
 			// topic's local subscribers EXCLUDING the sender (echo suppression),
 			// echoing the sender's client id. Sender match handles both a raw
 			// socket (the wire handler passes the connection socket) and its
-			// wrapper (server-side app code), mirroring publish()'s excludeWs.
+			// wrapper (server-side app code), as the wire lanes' exclusion does.
 			// Dev-live egress: the sender's frozen attribution is the tenant,
 			// as production; a refusal stamps and delivers nothing.
 			let egressRecipients = 0;
