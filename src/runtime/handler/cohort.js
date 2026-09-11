@@ -85,8 +85,8 @@ export function joinSharedCohort(ws, ud, topic, capability) {
 		// poisons the capability's wire state, so the join a plugin's
 		// trackedSubscribe makes for a topic the connection still holds now
 		// takes this branch. Leaving it subscribed to the binary cohort would
-		// give it every shared publish twice, and its reference would go on
-		// counting toward the binary cohort in the egress split.
+		// send it every shared publish twice, and its reference would still
+		// count toward the binary cohort in the egress split.
 		const held = ud[WS_SHARED_COHORTS];
 		if (held && held.delete(topic)) {
 			releaseSharedWireId(topic);

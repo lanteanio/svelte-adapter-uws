@@ -499,9 +499,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wire state - moves it the other way, out of the binary cohort and off
   its reference. Both in the runtime and in `createTestServer`.
   `ws_publish_outcomes_total` is unchanged and stays per native call: a shared
-  publish makes one call per cohort that exists, so it reports two once a
-  topic has both and one while every subscriber is JSON-only, which is now
-  stated where the metric is documented rather than left to be discovered.
+  publish makes the JSON-cohort call always and the binary one only while some
+  connection holds that cohort, so it reports two while the binary cohort has
+  a member and one when it has none. That asymmetry is now stated where the
+  metric is documented rather than left to be discovered.
 - **A failing `unsubscribe` hook no longer takes the worker or the message
   handler with it.** The hook is fire-and-forget and was invoked bare at
   thirty sites across the runtime, the test server and the dev plugin, so an

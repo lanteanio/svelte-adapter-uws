@@ -939,7 +939,10 @@ export async function createTestServer(options = {}) {
 			const held = ud[WS_SHARED_COHORTS];
 			if (held && held.delete(topic)) {
 				sharedWireIds.release(topic);
-				ws.unsubscribe(bin);
+				// Charged like the refusal path above and like production: a
+				// socket that closed under this call throws, and the count is
+				// what says so.
+				try { ws.unsubscribe(bin); } catch { closedWsAbortsT++; }
 			}
 			ws.subscribe(json);
 		}

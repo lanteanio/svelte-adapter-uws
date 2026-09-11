@@ -19,10 +19,11 @@
 //    documented (index.d.ts, README) as the result of each native TopicTree
 //    publish: an excluding publish takes the per-socket walk and reports
 //    nothing, a batch reports once for the N events its single frame carries,
-//    and a shared publish makes one call per cohort that exists, so it
-//    reports two once the topic has both and one while every subscriber is
-//    JSON-only. Merging the shared lane's two into one would make it the only
-//    lane answering a different question.
+//    and a shared publish makes the JSON call always and the binary call only
+//    while some connection holds the binary cohort, so it reports two while
+//    that cohort has a member and one when it has none. Merging the shared
+//    lane's two into one would make it the only lane answering a different
+//    question.
 //
 // Layers: the built cohort module with the real wire-id table, the test
 // server through what a client can see, and the built runtime's own /metrics
@@ -39,12 +40,15 @@ const CAP = 'fixture.shared:1';
 const TOPIC = 'cohort-accounting';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function until(pred, timeout = 3000, step = 20) {
+async function until(pred, what = 'the condition', timeout = 3000, step = 20) {
 	const deadline = Date.now() + timeout;
 	for (;;) {
 		const value = pred();
 		if (value) return value;
-		if (Date.now() > deadline) throw new Error('until() timed out');
+		// Named, because every wait here is for something the server should
+		// have sent: a bare timeout says which line stopped, never which frame
+		// never came.
+		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
 		await sleep(step);
 	}
 }
@@ -73,7 +77,7 @@ async function connectClient(url, caps, topic = TOPIC) {
 	// The ack, not merely an answer: `subscribe-denied` carries the same ref,
 	// and settling on one would let a denied client go on to fail somewhere
 	// further away from the reason.
-	await until(() => frames.acks.find((a) => a.ref === 1 && a.type === 'subscribed'));
+	await until(() => frames.acks.find((a) => a.ref === 1 && a.type === 'subscribed'), `the subscribed ack for ${topic}`);
 	return {
 		ws, frames,
 		send(msg) { ws.send(JSON.stringify(msg)); },
@@ -163,7 +167,7 @@ describeUWS('joinSharedCohort holds one wire-id reference per membership', () =>
 		// connection announce poisons the capability - and the re-join is the
 		// same plugin trackedSubscribe the held-topic guard above is about.
 		// Left on both cohorts, this connection receives every shared publish
-		// twice and its reference keeps pricing it as a binary member.
+		// twice, and the egress split keeps charging it as a binary member.
 		const wireState = await import('./fixture/build/handler/wire-state.js');
 		for (const lose of [
 			(socket) => { socket.ud[WS_CAPS] = new Set(); },
@@ -225,10 +229,17 @@ describeUWS('the test server announces one wire id per cohort membership', () =>
 
 	// The harness installs no cohort hooks on the membership primitive, so a
 	// plugin's trackedSubscribe cannot re-join a cohort there and the guard in
-	// its join is reached only the way production reaches it. What a client
-	// CAN see the harness prove: one announce per membership, and a fresh id
-	// for the cohort that forms after the last member left - which is only the
-	// case when the reference count really reached zero.
+	// its join is reached only the way production reaches it. Neither can a
+	// client: every lane that could re-join a topic the connection already
+	// holds answers the held topic first - `platform.subscribe` returns on
+	// `subs.has(topic)` (testing.js around 1815), and the recover lane
+	// re-checks after its resume await and acks (around 3032), both mirroring
+	// runtime/handler.js. So both directions of the one-cohort move are
+	// unreachable from here, and the fake-socket cases above are the oracle
+	// for the harness copy as well as the runtime one. What a client CAN see
+	// the harness prove: one announce per membership, and a fresh id for the
+	// cohort that forms after the last member left - which is only the case
+	// when the reference count really reached zero.
 	it('announces once per membership and draws a fresh id after the last member leaves', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
@@ -244,27 +255,27 @@ describeUWS('the test server announces one wire id per cohort membership', () =>
 		const a = await connectClient(server.wsUrl, [CAP]);
 		clients.push(a);
 		server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec());
-		await until(() => a.frames.binary.length >= 1);
+		await until(() => a.frames.binary.length >= 1, 'the first shared frame');
 		expect(a.frames.wireIds).toHaveLength(1);
 		const firstId = a.frames.wireIds[0].id;
 
 		// A plugin-style tracked join of the held topic is idempotent on the
 		// registry and, with no cohort hook installed, touches no cohort.
 		a.send({ type: 'tracked-join', topic: TOPIC });
-		const joined = await until(() => a.frames.probes.find((p) => p.event === 'tracked-joined'));
+		const joined = await until(() => a.frames.probes.find((p) => p.event === 'tracked-joined'), 'the tracked-join answer');
 		expect(joined.data.ok).toBe(true);
 		server.platform.publishWire(TOPIC, 'snapshot', { tick: 2 }, sharedCodec());
-		await until(() => a.frames.binary.length >= 2);
+		await until(() => a.frames.binary.length >= 2, 'the second shared frame');
 		expect(a.frames.wireIds).toHaveLength(1);
 
 		a.send({ type: 'unsubscribe', topic: TOPIC });
 		await sleep(50);
 		const b = await connectClient(server.wsUrl, [CAP]);
 		clients.push(b);
-		await until(() => b.frames.wireIds.length >= 1);
+		await until(() => b.frames.wireIds.length >= 1, 'the new cohort announce');
 		expect(b.frames.wireIds[0].id, 'a reclaimed id is retired, so the next cohort draws a new one').not.toBe(firstId);
 		server.platform.publishWire(TOPIC, 'snapshot', { tick: 3 }, sharedCodec());
-		await until(() => b.frames.binary.length >= 1);
+		await until(() => b.frames.binary.length >= 1, 'a shared frame on the new id');
 		expect(parseBinaryFrame(b.frames.binary[0]).topicId).toBe(b.frames.wireIds[0].id);
 	});
 });
@@ -309,11 +320,11 @@ describeUWS('the outcome counter counts native calls, not logical publishes', ()
 		// The first shared publish marks the topic shared and cohorts the
 		// existing subscriber; its own outcomes land in the before-scrape.
 		client.send({ type: 'shared-publish', topic: TOPIC, n: 1 });
-		await until(() => client.frames.binary.length >= 1);
+		await until(() => client.frames.binary.length >= 1, 'the first shared frame');
 
 		const before = await scrapeLabelled(server.httpUrl);
 		client.send({ type: 'shared-publish', topic: TOPIC, n: 2 });
-		await until(() => client.frames.binary.length >= 2);
+		await until(() => client.frames.binary.length >= 2, 'the measured shared frame');
 		const after = await scrapeLabelled(server.httpUrl);
 
 		// TWO, and the trade is deliberate. The one capable member puts every
@@ -326,9 +337,37 @@ describeUWS('the outcome counter counts native calls, not logical publishes', ()
 		// `ws_publishes_total`. Merging these two into one would leave this the
 		// only lane answering a different question, so the number is a
 		// contract, not an accident, and a change to it is a change to the
-		// metric. An all-JSON topic makes ONE call and reports one, because
-		// the binary publish is skipped without a cohort to make it to.
+		// metric. Note WHICH cohort being empty makes it two: the JSON publish
+		// is unconditional, so an empty JSON cohort still costs its call and
+		// its `no_subscribers` - as it does here. A topic with no binary
+		// cohort reports ONE, because that call is the guarded one.
 		expect(outcomesTotal(before), 'the first shared publish must already have been counted').toBeGreaterThan(0);
 		expect(outcomesTotal(after) - outcomesTotal(before)).toBe(2);
+	});
+
+	it('a shared topic with no binary cohort reports one, because that call is the guarded one', async () => {
+		// The other quadrant, and the one the two-outcome number reads as
+		// impossible unless it is pinned: a subscriber that advertised no
+		// capability puts nobody in the binary cohort, so `getSharedWireId`
+		// answers undefined and the binary publish is skipped entirely. One
+		// native call, one outcome, no `no_subscribers` for a cohort that was
+		// never built. A different topic from the case above, whose binary
+		// cohort would otherwise still be holding a reference.
+		const jsonOnly = await connectClient(server.wsUrl, [], 'cohort-json-only');
+		try {
+			jsonOnly.send({ type: 'shared-publish', topic: 'cohort-json-only', n: 1 });
+			await until(() => jsonOnly.frames.json.length >= 1, 'the first shared envelope');
+			expect(jsonOnly.frames.binary, 'a JSON-only client is sent the envelope, never the frame').toHaveLength(0);
+			expect(jsonOnly.frames.wireIds, 'and is announced no shared id').toHaveLength(0);
+
+			const before = await scrapeLabelled(server.httpUrl);
+			jsonOnly.send({ type: 'shared-publish', topic: 'cohort-json-only', n: 2 });
+			await until(() => jsonOnly.frames.json.length >= 2, 'the measured shared envelope');
+			const after = await scrapeLabelled(server.httpUrl);
+
+			expect(outcomesTotal(after) - outcomesTotal(before)).toBe(1);
+		} finally {
+			jsonOnly.close();
+		}
 	});
 });
