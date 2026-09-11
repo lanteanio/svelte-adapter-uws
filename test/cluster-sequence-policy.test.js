@@ -250,12 +250,12 @@ describe('cluster sequence authority policy', () => {
 		expect(publish.indexOf('assertStampableSeq('), 'publish must refuse the value before it admits')
 			.toBeLessThan(publish.indexOf('admitPublishEgress('));
 		expectStatement(wire, 'if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);', 'publishWire vets cluster sequence authority origin-side');
-		// The wire slice runs on into the batch surfaces; the one-read counts
-		// must cover exactly the publishWire body, which ends at the next JSDoc.
-		// `indexOf` may not find a following doc comment now that the wire carve
-		// ends at one: -1 as a slice bound silently drops the last character and
-		// keeps every assertion green, which is the failure this file's own
-		// carve helper exists to refuse.
+		// The one-read counts must cover exactly the publishWire body. The carve
+		// ends at the method's close, so no doc comment follows inside it and
+		// `indexOf` answers -1 - which as a slice bound silently drops the last
+		// character and keeps every assertion green, the failure this file's
+		// own carve helper exists to refuse. The cut is kept for a carve that
+		// does run on into the next member.
 		const wireBodyEnd = wire.indexOf('\n\t/**');
 		const wireBody = wireBodyEnd === -1 ? wire : wire.slice(0, wireBodyEnd);
 		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs']) {

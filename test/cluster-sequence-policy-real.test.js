@@ -19,6 +19,8 @@ try { WebSocket = require('ws'); } catch { WebSocket = null; }
 let hasUws = true;
 try { require.resolve('uWebSockets.js'); } catch { hasUws = false; }
 const describeReal = hasUws && WebSocket !== null ? describe : describe.skip;
+/** The topic the fixture's sequence-policy probe publishes on when none is named. */
+const PROBE_TOPIC = 'sequence-policy:room';
 
 describeReal('real clustered sequence-authority policy', () => {
 	let child = null;
@@ -69,10 +71,45 @@ describeReal('real clustered sequence-authority policy', () => {
 			ws.once('error', reject);
 		});
 		let nonce = 0;
+		// Every frame on the watched topic, in arrival order. This listener is
+		// registered before any probe's, so for a given frame it has run by the
+		// time a probe reads the reply - and a delivery the server wrote ahead
+		// of the reply arrives ahead of it on the same socket.
+		let watched = null;
+		const seen = [];
+		ws.on('message', (data) => {
+			let frame;
+			try { frame = JSON.parse(data.toString()); } catch { return; }
+			if (watched !== null && frame.topic === watched) seen.push(frame);
+		});
 		return {
 			output: () => output,
+			/**
+			 * Subscribe this same connection to `topic` and watch it, so a probe
+			 * can say what went out on the topic before its reply came back:
+			 * the reply says whether the call was refused, the frames say
+			 * whether anything fanned out first.
+			 */
+			async subscribe(topic) {
+				await new Promise((resolve, reject) => {
+					const timer = setTimeout(() => reject(new Error(`subscribe ack timed out\n${output}`)), 10_000);
+					const onMessage = (data) => {
+						let frame;
+						try { frame = JSON.parse(data.toString()); } catch { return; }
+						if (frame.type !== 'subscribed' || frame.topic !== topic) return;
+						clearTimeout(timer);
+						ws.off('message', onMessage);
+						resolve(undefined);
+					};
+					ws.on('message', onMessage);
+					// The ack is sent only for a subscribe that carries a ref.
+					ws.send(JSON.stringify({ type: 'subscribe', topic, ref: 1 }));
+				});
+				watched = topic;
+			},
 			async probe(entry, options, extra) {
 				const wanted = ++nonce;
+				const from = seen.length;
 				return new Promise((resolve, reject) => {
 					const timer = setTimeout(() => reject(new Error(`sequence policy response timed out\n${output}`)), 10_000);
 					const onMessage = (data) => {
@@ -81,7 +118,9 @@ describeReal('real clustered sequence-authority policy', () => {
 						if (frame.topic !== 'probe' || frame.event !== 'sequence-policy' || frame.data?.nonce !== wanted) return;
 						clearTimeout(timer);
 						ws.off('message', onMessage);
-						resolve(frame.data);
+						// `delivered`: the watched topic's frames that arrived between
+						// this probe's send and its reply.
+						resolve({ ...frame.data, delivered: seen.slice(from) });
 					};
 					ws.on('message', onMessage);
 					ws.send(JSON.stringify({ type: 'sequence-policy-probe', entry, options, nonce: wanted, ...extra }));
@@ -159,42 +198,59 @@ describeReal('real clustered sequence-authority policy', () => {
 		// worker never runs it. Asked here of a real two-worker runtime, on both
 		// lanes - the stateless reroute and the stateful snapshot pass, selected
 		// by whether the codec carries `state`.
+		//
+		// The connection is subscribed to the probe topic, so each refusal is
+		// asked two things: the reply says the batch was refused, and the
+		// topic's frames say nothing fanned out ahead of it. The second is what
+		// makes a pre-pass a pre-pass - a check moved into the fan-out loop
+		// answers the same error with the first entry already delivered - and
+		// it is the only question the stateless lane can fail, because that
+		// lane reroutes each entry through publishWire, which asks the
+		// authority question again on its own.
 		const server = await boot(2);
+		await server.subscribe(PROBE_TOPIC);
 		for (const entry of ['wire-batch-entry-seq', 'wire-batch-entry-seq-stateless']) {
 			// The clustered spelling: options renounce the counter AND the
-			// relay, entries carry the authority.
-			expect((await server.probe(entry, { seq: false, relay: false })).ok, entry).toBe(true);
+			// relay, entries carry the authority. Both entries reach the
+			// subscriber, which is also the control for the absences below.
+			const taken = await server.probe(entry, { seq: false, relay: false });
+			expect(taken.ok, `${entry}: ${taken.error}`).toBe(true);
+			expect(taken.delivered.map((frame) => frame.data.n), entry).toEqual([1, 2]);
 			// With the relay left on, the adapter's own multi-origin fan-out
 			// would carry an externally ordered number it cannot keep ordered.
-			expect((await server.probe(entry, { seq: false })).error, entry)
-				.toBe(BATCH_ENTRY_SEQUENCE_ERROR);
-			expect((await server.probe(entry, { seq: false, relay: true })).error, entry)
-				.toBe(BATCH_ENTRY_SEQUENCE_ERROR);
+			for (const options of [{ seq: false }, { seq: false, relay: true }]) {
+				const refused = await server.probe(entry, options);
+				expect(refused.error, entry).toBe(BATCH_ENTRY_SEQUENCE_ERROR);
+				expect(refused.delivered, `${entry}: a refused batch fans out nothing`).toEqual([]);
+			}
 		}
 		server.close();
 	}, 60_000);
 
-	it('refuses an entry drawing the per-worker counter on both batch lanes', async () => {
+	it('refuses an entry drawing the per-worker counter on both batch lanes, before anything fans out', async () => {
 		// The second refusal the same pre-pass carries, and equally invisible
 		// off-cluster. `{ seq: true }` on an entry asks for the local counter,
-		// which no other worker shares, so a clustered batch refuses it whatever
-		// the options say - `{ seq: false, relay: false }` included, which is the
-		// spelling that makes an explicit entry seq legal.
+		// which no other worker shares, so a clustered batch refuses it under
+		// the spelling that makes an explicit entry seq legal; the relay
+		// setting is not read for the counter form at all.
 		//
-		// WHAT THIS DISCRIMINATES, measured: removing the STATEFUL branch's draw
-		// makes this fail. Removing the stateless branch's does not, because that
-		// branch reroutes each entry through publishWire, which asks the same
-		// value question again - so what the stateless pre-pass buys is not the
-		// refusal but its TIMING, whole-batch-or-nothing before the first entry
-		// fans out. Observing that needs a subscriber on the topic, and it is
-		// carded rather than claimed here.
+		// Same two questions as above. The stateful lane's draw is what the
+		// error answers for; the stateless lane reroutes each entry through
+		// publishWire, which refuses a counter draw on its own, so what its
+		// pre-pass adds is that the refusal lands before the first entry goes
+		// out - and that is what the empty delivery pins.
 		const server = await boot(2);
+		await server.subscribe(PROBE_TOPIC);
 		for (const entry of ['wire-batch-entry-counter', 'wire-batch-entry-counter-stateless']) {
-			expect((await server.probe(entry, { seq: false, relay: false })).error, entry)
-				.toBe(CLUSTER_SEQUENCE_ERROR);
-			expect((await server.probe(entry, { seq: false })).error, entry)
-				.toBe(CLUSTER_SEQUENCE_ERROR);
+			const refused = await server.probe(entry, { seq: false, relay: false });
+			expect(refused.error, entry).toBe(CLUSTER_SEQUENCE_ERROR);
+			expect(refused.delivered, `${entry}: a refused batch fans out nothing`).toEqual([]);
 		}
+		// The control for those absences: the same lanes on the same topic, with
+		// nothing to refuse, reach the subscriber with both entries.
+		const taken = await server.probe('wire-batch', { seq: false });
+		expect(taken.ok, taken.error).toBe(true);
+		expect(taken.delivered.map((frame) => frame.data.n)).toEqual([1, 2]);
 		server.close();
 	}, 60_000);
 
