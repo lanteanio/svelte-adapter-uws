@@ -18,27 +18,35 @@
  * `expectStatement` asks for a LINE whose trimmed text is exactly the
  * statement, AND which runs on its own where it stands. Deleting the call
  * fails it, renaming it fails it, and anything written on the same line
- * around it fails it because the line is no longer that statement. Three
- * shapes leave the pinned line byte-identical and are refused by reading what
- * is above it: a one-line wrapper - `if (false)`, `else`, `false &&`, an
- * arrow header - because the pinned line is then that line's body; an
- * unconditional `return` / `throw` / `break` / `continue` immediately above
- * it, because nothing after that runs; and an enclosing block opened
- * `if (false) {` or `while (0) {`, found by walking the braces outward.
+ * around it fails it because the line is no longer that statement. Four
+ * shapes leave the pinned line byte-identical, and each is refused by reading
+ * what is around it:
+ *
+ * - a one-line wrapper - `if (false)`, `else`, `false &&`, an arrow header -
+ *   because the pinned line is then that line's body, not a statement;
+ * - a jump out of the block immediately above it, `return` / `throw` /
+ *   `break` / `continue`, with or without an `if (true)` in front, because
+ *   nothing after it in that block runs;
+ * - an enclosing block whose condition is one false literal (`if (false) {`,
+ *   `while (0) {`, `if (null) {`) or which opens after `false &&`, found by
+ *   walking the braces outward however far the header is;
+ * - a place inside a `switch` body that no `case` has reached yet.
+ *
  * Comments and the inside of a literal that spans lines are blanked first, so
  * `/* stmt *\/`, `// stmt` and a template literal whose own line reads as the
  * statement are not lines either. The failure names the line it found and
  * what took it over instead of reporting a bare `false`, so a neutralized
  * guard identifies itself.
  *
- * WHAT THIS STILL CANNOT SEE, because seeing it means evaluating the program:
- * a block whose condition is a NAME that is false, a braced function nothing
- * calls, and a caller that stops reaching the statement's lane at all. A
- * statement whose meaning depends on its neighbours - a callback argument, a
- * continuation of the line above - is pinned with `expectStatementBlock`,
- * which requires the lines CONSECUTIVELY, so a neutralization of the line
- * that owns the call changes the block. Those are what the behavioural case
- * beside a pin exists for.
+ * WHAT THIS STILL CANNOT SEE needs the program EVALUATED: a condition that is
+ * a name (`if (disabled) {`) or an expression of literals (`if (0 === 1) {`),
+ * a braced function nothing calls, and a caller that stops reaching the
+ * statement's lane at all. A statement whose meaning depends on its
+ * neighbours - a callback argument, a continuation of the line above - is
+ * pinned with `expectStatementBlock`, which requires the lines CONSECUTIVELY
+ * and requires the first of them to stand where it is, so a neutralization of
+ * the line that owns the call changes the block. The rest is what the
+ * behavioural case beside a pin exists for.
  */
 
 import { expect } from 'vitest';
@@ -222,33 +230,83 @@ function statementLines(slice) {
  *
  * `:` is NOT one of them, because it ends a ternary as readily as a label:
  * `const dead = true ? undefined :` above a pinned call leaves the call dead
- * on a line that terminates. A label really does hand the next line its own
- * statement, so it is matched as a whole line instead.
+ * on a line that terminates. A `case` or `default` label really does hand the
+ * next line its own statement, so those two are matched as whole lines
+ * instead - and only those two, since a bare `ident:` is also what the middle
+ * of a split ternary looks like.
  */
 const STATEMENT_TERMINATORS = new Set([';', '{', '}']);
 
-/** `case x:`, `default:` or a bare label: what follows belongs to it. */
-const LABEL_LINE = /^(?:case\b.+|default|[A-Za-z_$][\w$]*)\s*:$/;
-
-/** A line that leaves the block: nothing after it in that block can run. */
-const UNCONDITIONAL_JUMP = /^(?:return|throw|break|continue)\b/;
-
-/** A block header whose condition is written false: it opens dead code. */
-const DEAD_BLOCK_OPENER = /^(?:\}\s*else\s+)?(?:if|while)\s*\(\s*(?:false|0)\s*\)\s*\{$/;
+/**
+ * A `case x:` or `default:` line: what follows belongs to it.
+ *
+ * Only those two, deliberately. A bare `ident:` reads as a label and is also
+ * how the middle of a ternary looks once it is split over lines - `undefined:`
+ * on its own line is a legal label and a legal ternary alternate, and nothing
+ * on the line tells them apart. This repository writes no labeled statement
+ * (no `break label;` / `continue label;` anywhere in `src/`), so admitting the
+ * shape would buy nothing and cost the hole.
+ */
+const LABEL_LINE = /^(?:case\b.+|default)\s*:$/;
 
 /**
- * The enclosing block header written `if (false) {` (or `while (0) {`, or an
- * `else if`) that the line at `index` sits inside, or null.
+ * A line that leaves the block: nothing after it in that block can run.
+ *
+ * The `if (true)` / `while (1)` prefix is part of it, because `if (true)
+ * return;` above a pinned call is as cheap to write as `if (false)` and ends
+ * in a terminator.
+ */
+const UNCONDITIONAL_JUMP = /^(?:(?:if|while)\s*\(\s*(?:true|1)\s*\)\s*)?(?:return|throw|break|continue)\b/;
+
+/**
+ * A block header that cannot run: a condition written as one false literal, or
+ * a line opening with `false &&` (this repository's own neutralization idiom,
+ * which reads as a block opener when an arrow body starts on that line).
+ *
+ * One LITERAL, not an expression of them: `0 === 1` needs evaluating, and
+ * matching a bare `0 &&` anywhere on the line would refuse the ordinary
+ * `if (x === 0 && y) {`.
+ */
+const DEAD_BLOCK_OPENER = /^(?:\}\s*else\s+)?(?:if|while)\s*\(\s*(?:false|0|null|undefined|!true|!1)\s*\)|^false\s*&&/;
+
+/** A `case`/`default` line, for the switch-body check. */
+const CASE_LINE = /^(?:case\b|default\s*:)/;
+
+/** `line` with the text of its single-line literals removed, so a brace inside one is not counted. */
+function codeOnly(line) {
+	return line.replace(/'[^']*'|"[^"]*"|`[^`]*`/g, '\'\'');
+}
+
+/**
+ * The header of the block opened at `index`, which is that line unless the
+ * brace stands alone - then the line above carries the condition.
+ *
+ * @param {string[]} lines
+ * @param {number} index
+ * @returns {string}
+ */
+function blockHeader(lines, index) {
+	if (lines[index] !== '{') return lines[index];
+	for (let i = index - 1; i >= 0; i--) {
+		if (lines[i] !== '') return `${lines[i]} {`;
+	}
+	return '{';
+}
+
+/**
+ * The enclosing block header that cannot run the line at `index`, or null.
  *
  * Line equality cannot see a dead BLOCK: the pinned line follows an ordinary
  * `{`, which is what every live block looks like too. Walking the braces
  * outward finds the headers that opened the blocks this line is in, and a
- * header that says `false` in as many characters is the neutralization
- * someone reaches for once the one-line and line-above shapes are refused.
+ * header that says false in as many characters is the neutralization someone
+ * reaches for once the one-line and line-above shapes are refused. A
+ * `switch` whose body has not reached a `case` yet is the same thing said
+ * differently, so it counts too.
  *
- * A block whose condition is a name that happens to be false is NOT caught -
- * that is a design decision this cannot see through without evaluating the
- * program, and it is what the behavioural case beside a pin is for.
+ * What this cannot see needs the program EVALUATED: a condition that is a
+ * name, or an expression of literals (`0 === 1`), and a braced function
+ * nothing calls. Those are what the behavioural case beside a pin is for.
  *
  * @param {string[]} lines - trimmed, non-code already blanked
  * @param {number} index
@@ -257,13 +315,21 @@ const DEAD_BLOCK_OPENER = /^(?:\}\s*else\s+)?(?:if|while)\s*\(\s*(?:false|0)\s*\
 function deadEnclosingBlock(lines, index) {
 	let depth = 0;
 	for (let i = index - 1; i >= 0; i--) {
-		const line = lines[i];
+		const line = codeOnly(lines[i]);
 		for (let c = line.length - 1; c >= 0; c--) {
 			if (line[c] === '}') { depth++; continue; }
 			if (line[c] !== '{') continue;
 			if (depth > 0) { depth--; continue; }
 			// An opener of a block this line is inside.
-			if (DEAD_BLOCK_OPENER.test(line)) return line;
+			const header = blockHeader(lines, i);
+			if (DEAD_BLOCK_OPENER.test(header)) return header;
+			// A statement between `switch (x) {` and its first `case` is
+			// unreachable: control enters at a case label or not at all.
+			if (/^switch\s*\(/.test(header)) {
+				let sawCase = false;
+				for (let k = i + 1; k < index; k++) if (CASE_LINE.test(lines[k])) { sawCase = true; break; }
+				if (!sawCase) return header;
+			}
 		}
 	}
 	return null;
@@ -409,10 +475,20 @@ export function expectStatementCount(slice, statement, count, label) {
 export function expectStatementBlock(slice, block, label) {
 	if (block.length < 2) throw new TypeError('expectStatementBlock needs at least two lines; use expectStatement for one');
 	const lines = statementLines(slice);
+	/** @type {number[]} */
+	const consecutive = [];
 	for (let i = 0; i + block.length <= lines.length; i++) {
 		let j = 0;
 		while (j < block.length && lines[i + j] === block[j]) j++;
-		if (j === block.length) return;
+		if (j === block.length) consecutive.push(i);
+	}
+	// The block's OWN first line has to stand where it is, for the same reason
+	// a single pinned statement does: consecutive lines inside `if (false) {`
+	// are as consecutive as anywhere else.
+	if (consecutive.some((i) => startsItsOwnStatement(lines, i))) return;
+	if (consecutive.length > 0) {
+		const owners = consecutive.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ');
+		expect.fail(`${label}: the lines ${JSON.stringify(block)} appear consecutively but do not run where they stand, owned by: ${owners}`);
 	}
 	const anchor = lines.indexOf(block[0]);
 	const detail = anchor === -1

@@ -113,20 +113,27 @@ describe('expectStatement', () => {
 		}
 	});
 
-	it('refuses an owner that ENDS in a terminator and still leaves the statement dead', () => {
+	it('refuses an owner that finishes its own line and still leaves the statement dead', () => {
 		// A line can finish what it was saying and still take the next line
-		// with it. The ternary is the one that reads like a terminator: `:`
-		// closes a label and an alternate alike, and the alternate is a
-		// one-line wrapper with the same cost to write as `if (false)`. The
-		// jumps are the other half - a line that leaves the block ends in `;`,
-		// and everything after it in that block is unreachable.
+		// with it. The ternary is the one that reads finished: `:` closes a
+		// label and an alternate alike, and the alternate is a one-line
+		// wrapper with the same cost to write as `if (false)` - including when
+		// it is split so the line above the pin is a bare `undefined:`, which
+		// is lexically a label. The jumps are the other half: a line that
+		// leaves the block ends in `;`, and everything after it in that block
+		// is unreachable - `if (true)` in front of one changes nothing.
 		for (const owner of [
 			'const dead = true ? undefined :',
+			'undefined:',
+			'null:',
 			'return;',
 			'return value;',
 			'throw new Error(\'x\');',
 			'break;',
-			'continue;'
+			'continue;',
+			'if (true) return;',
+			'if (1) throw new Error(\'x\');',
+			'while (1) break;'
 		]) {
 			expect(() => expectStatement(`before();\n${owner}\n\t${STATEMENT}\nafter();\n`, STATEMENT, 'pin'),
 				owner).toThrow(new RegExp(`pin: .* owned by: ${JSON.stringify(owner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
@@ -137,14 +144,33 @@ describe('expectStatement', () => {
 		// The dead enclosing BLOCK. The pinned line follows an ordinary `{`,
 		// which is what a live block looks like too, so the braces have to be
 		// walked outward to find the header that opened it.
-		for (const header of ['if (false) {', 'while (0) {', '} else if (false) {']) {
-			const slice = `before();\n${header}\n\tx();\n\t${STATEMENT}\n}\nafter();\n`;
+		for (const header of ['if (false) {', 'while (0) {', '} else if (false) {', 'if (null) {', 'if (!true) {', 'false && (() => {']) {
+			const slice = `before();\n${header}\n\tx();\n\tif (ready) {\n\t\ty();\n\t}\n\twhile (n--) {\n\t\tz();\n\t}\n\t${STATEMENT}\n}\nafter();\n`;
 			expect(() => expectStatement(slice, STATEMENT, 'pin'), header)
 				.toThrow(new RegExp(`pin: .* owned by: ${JSON.stringify(header).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 		}
-		// And a live block around a dead one does not launder it.
+		// A live block around a dead one does not launder it.
 		expect(() => expectStatement(`if (ready) {\n\tif (false) {\n\t\t${STATEMENT}\n\t}\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: "if \(false\) \{"/);
+		// The brace on its own line carries the condition from the line above,
+		// so splitting the header does not hide it.
+		expect(() => expectStatement(`if (false)\n{\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: "if \(false\) \{"/);
+		// A brace inside a one-line string is not a brace: it must neither
+		// hide a dead opener nor invent one around live code.
+		expect(() => expectStatement(`if (false) {\n\tconst open = '}';\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: "if \(false\) \{"/);
+		expect(() => expectStatement(`if (false) {\n\tx();\n}\nconst open = '{';\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('refuses a statement sitting in a switch body before the first case', () => {
+		// Control enters a switch body at a case label or not at all, so a
+		// statement above the first one is as dead as an `if (false)` block -
+		// and it is one line to write.
+		expect(() => expectStatement(`switch (kind) {\n\t${STATEMENT}\n\tcase 'a':\n\t\tx();\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: "switch \(kind\) \{"/);
+		// Under a case it is an ordinary statement again.
+		expect(() => expectStatement(`switch (kind) {\n\tcase 'a':\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('takes a statement inside an ordinary block, however deep', () => {
@@ -155,6 +181,16 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(slice, STATEMENT, 'pin')).not.toThrow();
 		// A block that CLOSED above the statement is not enclosing it.
 		expect(() => expectStatement(`if (false) {\n\tx();\n}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		// And a line that merely BEGINS with a jump keyword is not a jump: the
+		// refusal is anchored on the word, not on the letters.
+		for (const above of ['returnValue = 1;', 'breakGlass();', 'continueFrom(x);', 'throwing = false;']) {
+			expect(() => expectStatement(`${above}\n${STATEMENT}\n`, STATEMENT, 'pin'), above).not.toThrow();
+		}
+		// A condition that needs evaluating is admitted deliberately, and the
+		// header says so rather than implying it is caught.
+		for (const header of ['if (disabled) {', 'if (0 === 1) {']) {
+			expect(() => expectStatement(`${header}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'), header).not.toThrow();
+		}
 	});
 
 	it('looks past blank and comment-only lines to find the line that owns it', () => {
@@ -167,7 +203,7 @@ describe('expectStatement', () => {
 		// A terminated statement, an opened block, a closed block, a case
 		// label, and the top of the slice: each is an ordinary place for the
 		// pinned statement to stand, and none of them is a wrapper.
-		for (const above of ['before();', 'if (x) {', '}', "case 'x':", 'default:', 'retry:', '']) {
+		for (const above of ['before();', 'if (x) {', '}', "case 'x':", 'default:', '']) {
 			expect(() => expectStatement(`${above}\n\t${STATEMENT}\n`, STATEMENT, 'pin'), above).not.toThrow();
 		}
 	});
@@ -208,6 +244,19 @@ describe('expectStatementBlock', () => {
 			.toThrow(/its first line "authorize\(ws, \(\) =>" is not in the slice/);
 		expect(() => expectStatementBlock('authorize(ws, () =>\n\t// gap\n\tcheck(ws)\n);\n', block, 'pin'))
 			.toThrow(/its first line is at slice line 1 but what follows is/);
+	});
+
+	it('refuses a block whose own first line does not run where it stands', () => {
+		// Consecutive lines inside a dead block are as consecutive as anywhere
+		// else, so the block's first line answers the same question a single
+		// pinned statement does.
+		expect(() => expectStatementBlock(`if (false) {\n\t${block.join('\n\t')}\n}\n`, block, 'pin'))
+			.toThrow(/appear consecutively but do not run where they stand, owned by: "if \(false\) \{"/);
+		expect(() => expectStatementBlock(`return;\n${block.join('\n')}\n`, block, 'pin'))
+			.toThrow(/owned by: "return;"/);
+		// And the live placement still passes, including the one the block form
+		// exists for: a first line that is itself an owner of what follows it.
+		expect(() => expectStatementBlock(`if (ready) {\n\t${block.join('\n\t')}\n}\n`, block, 'pin')).not.toThrow();
 	});
 
 	it('needs at least two lines', () => {
