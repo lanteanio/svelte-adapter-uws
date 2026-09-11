@@ -194,6 +194,61 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(`if (false) {\n\tx();\n}\nconst open = '{';\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
+	it('judges the line the text question matched, not the character the raw line starts with', () => {
+		// A comment is blanked to spaces for the text question, so a pinned line
+		// behind one still IS the statement - and the first non-space character
+		// of the RAW line is the comment's slash, an offset inside no statement.
+		// Reading the position from the raw line would leave every reachability
+		// rule with nothing to judge and pass all of them.
+		for (const owner of ['if (false)', 'return;', 'false &&']) {
+			expect(() => expectStatement(`before();\n${owner}\n\t/**/ ${STATEMENT}\nafter();\n`, STATEMENT, 'pin'), owner)
+				.toThrow(/pin: .* owned by: /);
+		}
+		// And a comment on a live line is still just a comment.
+		expect(() => expectStatement(`before();\n\t/**/ ${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('refuses a statement under something that never comes back, beyond the bare jumps', () => {
+		const NEVER_RETURNS = [
+			['a try that returns from every path', 'try {\n\treturn;\n} catch {\n\treturn;\n}'],
+			['a try whose finalizer returns', 'try {\n\tmaybe();\n} finally {\n\treturn;\n}'],
+			['a loop nothing leaves', 'while (true) {\n\ttick();\n}'],
+			['a for with no condition and no break', 'for (;;) {\n\ttick();\n}']
+		];
+		for (const [label, above] of NEVER_RETURNS) {
+			expect(() => expectStatement(`before();\n${above}\n${STATEMENT}\n`, STATEMENT, 'pin'), label)
+				.toThrow(/pin: .* owned by: .*always leaves the block/);
+		}
+		// A loop that CAN be left, and one whose body holds the pin, both run.
+		expect(() => expectStatement(`while (true) {\n\tif (done) break;\n}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+		expect(() => expectStatement(`while (true) {\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		// A try that only MIGHT return does not take the next line with it.
+		expect(() => expectStatement(`try {\n\treturn;\n} catch {\n\tlog();\n}\n${STATEMENT}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('refuses a switch case the discriminant cannot reach, and takes the one it can', () => {
+		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		// A `default` can be entered and fall through, and a discriminant the
+		// rule cannot fold says nothing, so both are taken.
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		expect(() => expectStatement(`switch (kind) {\n\tcase 1:\n\t\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
+	it('folds an expression of literals, and answers rather than throwing on one it cannot', () => {
+		// `0 === 1` was the only shape the comparison-only fold caught; an
+		// arithmetic one is the same class and the same single line to write.
+		for (const header of ['if (1 - 1) {', 'if (0 * 1) {', "if ('' + '') {", 'if (2 % 2) {']) {
+			expect(() => expectStatement(`${header}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'), header)
+				.toThrow(/owned by: .*written false/);
+		}
+		// A fold that would THROW is not an answer: a BigInt mixed with a number
+		// must leave the pin judging nothing rather than raising out of it.
+		expect(() => expectStatement(`if (+0n) {\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		expect(() => expectStatement(`if (1n + 1) {\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin')).not.toThrow();
+	});
+
 	it('refuses a carve it cannot parse instead of guessing from the text', () => {
 		// The judgement IS the parse, so a carve that is not a complete
 		// construct has no answer to give. Saying so names what to fix; the

@@ -40,7 +40,10 @@
  *   `if ('') {`, `if (NaN) {`, `if (0 === 1) {`, `for (const x of []) {`,
  *   `0 && (() => {`, the `else` of an `if (true)`;
  * - no earlier statement in its block may always leave: `return`, `throw`,
- *   `break`, `continue`, `if (true) return;`, `{ return; }`.
+ *   `break`, `continue`, `if (true) return;`, `{ return; }`, a `try` that
+ *   leaves down every path it has, a loop written `while (true)` that nothing
+ *   breaks out of;
+ * - and a `switch` case its discriminant cannot reach is not reached either.
  *
  * A carve that does not parse is refused loudly rather than guessed at, since a
  * pin whose rule could not run would read as green. Carves are slices of a
@@ -54,7 +57,8 @@
  * neutralized guard identifies itself.
  *
  * WHAT THIS CANNOT SEE needs the program RUN: a condition that is a name
- * (`if (disabled) {`), a function nothing calls, and a caller that stops
+ * (`if (disabled) {`), a function nothing calls, a call that never returns
+ * (`process.exit()` is an ordinary call to a parse), and a caller that stops
  * reaching the statement's lane at all. A statement whose meaning depends on
  * its neighbours - a callback argument, a continuation of the line above - is
  * pinned with `expectStatementBlock`, which requires the lines CONSECUTIVELY
@@ -236,32 +240,16 @@ function statementLines(slice) {
 }
 
 /**
- * The characters a line ends with when it FINISHES what it was saying: a
- * statement (`;`) or a block that opened or closed (`{`, `}`).
+ * `line` with the text of its quoted literals removed, so an anchor inside a
+ * string is not mistaken for one in the code. Escapes included.
  *
- * Everything else means the line above did not finish - `if (false)`, `else`,
- * `while (x)`, `false &&`, `() =>`, an open argument list - and the line under
- * it is that line's BODY or its continuation, not a statement of its own.
- *
- * `:` is NOT one of them, because it ends a ternary as readily as a label:
- * `const dead = true ? undefined :` above a pinned call leaves the call dead
- * on a line that terminates. A `case` or `default` label really does hand the
- * next line its own statement, so those two are matched as whole lines
- * instead - and only those two, since a bare `ident:` is also what the middle
- * of a split ternary looks like.
- */
-const STATEMENT_TERMINATORS = new Set([';', '{', '}']);
-
-/**
- * `line` with the text of its literals removed, so a brace or an anchor inside
- * one is not read as code. Handles the three quote kinds and a regular
- * expression, escapes included.
+ * Quotes only. A regular expression could hide an anchor too, but telling
+ * `/x/` from a division without a tokenizer erases the span between two
+ * dividing slashes - and that direction is worse: it loses a live anchor and
+ * blames the source for moving.
  */
 function codeOnly(line) {
-	return line.replace(
-		/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\/(?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+\/[a-z]*/g,
-		'\'\''
-	);
+	return line.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '\'\'');
 }
 
 /**
@@ -334,8 +322,8 @@ function staticValue(node) {
 			const inner = staticValue(node.argument);
 			if (!inner) return null;
 			if (node.operator === '!') return { value: !inner.value };
-			if (node.operator === '-') return { value: -(/** @type {any} */ (inner.value)) };
-			if (node.operator === '+') return { value: +(/** @type {any} */ (inner.value)) };
+			if (node.operator === '-') return guarded(() => -(/** @type {any} */ (inner.value)));
+			if (node.operator === '+') return guarded(() => +(/** @type {any} */ (inner.value)));
 			if (node.operator === 'void') return { value: undefined };
 			if (node.operator === 'typeof') return { value: typeof inner.value };
 			return null;
@@ -363,6 +351,15 @@ function staticValue(node) {
 	}
 }
 
+/** `compute()` as a static value, or null when computing it throws (a BigInt mixed with a number). */
+function guarded(compute) {
+	try {
+		return { value: compute() };
+	} catch {
+		return null;
+	}
+}
+
 /** `a <op> b` when both sides are statically known, or null for an operator this does not judge. */
 function staticBinary(operator, a, b) {
 	switch (operator) {
@@ -376,6 +373,18 @@ function staticBinary(operator, a, b) {
 		case '<=': return { value: /** @type {any} */ (a) <= /** @type {any} */ (b) };
 		case '>': return { value: /** @type {any} */ (a) > /** @type {any} */ (b) };
 		case '>=': return { value: /** @type {any} */ (a) >= /** @type {any} */ (b) };
+		case '+': return guarded(() => /** @type {any} */ (a) + /** @type {any} */ (b));
+		case '-': return guarded(() => /** @type {any} */ (a) - /** @type {any} */ (b));
+		case '*': return guarded(() => /** @type {any} */ (a) * /** @type {any} */ (b));
+		case '/': return guarded(() => /** @type {any} */ (a) / /** @type {any} */ (b));
+		case '%': return guarded(() => /** @type {any} */ (a) % /** @type {any} */ (b));
+		case '**': return guarded(() => /** @type {any} */ (a) ** /** @type {any} */ (b));
+		case '&': return guarded(() => /** @type {any} */ (a) & /** @type {any} */ (b));
+		case '|': return guarded(() => /** @type {any} */ (a) | /** @type {any} */ (b));
+		case '^': return guarded(() => /** @type {any} */ (a) ^ /** @type {any} */ (b));
+		case '<<': return guarded(() => /** @type {any} */ (a) << /** @type {any} */ (b));
+		case '>>': return guarded(() => /** @type {any} */ (a) >> /** @type {any} */ (b));
+		case '>>>': return guarded(() => /** @type {any} */ (a) >>> /** @type {any} */ (b));
 		default: return null;
 	}
 }
@@ -400,9 +409,66 @@ function alwaysTerminates(node) {
 		}
 		case 'LabeledStatement':
 			return alwaysTerminates(node.body);
+		case 'TryStatement':
+			// The finalizer runs last, so it decides on its own; otherwise the
+			// block has to leave AND the handler, if there is one, has to leave
+			// with it.
+			if (node.finalizer && alwaysTerminates(node.finalizer)) return true;
+			return alwaysTerminates(node.block) && (!node.handler || alwaysTerminates(node.handler.body));
+		case 'WhileStatement':
+		case 'ForStatement': {
+			// A loop with a condition written true and no way out never returns
+			// to the line after it. `break` inside a nested loop or switch
+			// leaves that one instead, which is why this reads the body's own
+			// text rather than claiming to know: any `break` at all is enough to
+			// decline the answer.
+			const test = staticValue(node.test);
+			const endless = node.type === 'ForStatement' && node.test === null;
+			const truthy = endless || Boolean(test && test.value);
+			return truthy && !containsBreakOrReturn(node.body);
+		}
 		default:
 			return false;
 	}
+}
+
+/** Whether `node` holds a `break` or a `return` anywhere inside it. */
+function containsBreakOrReturn(node) {
+	let found = false;
+	const walk = (current) => {
+		if (found || !current || typeof current !== 'object') return;
+		if (Array.isArray(current)) {
+			for (const entry of current) walk(entry);
+			return;
+		}
+		if (current.type === 'BreakStatement' || current.type === 'ReturnStatement') { found = true; return; }
+		for (const [key, child] of Object.entries(current)) {
+			if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
+			walk(child);
+		}
+	};
+	walk(node);
+	return found;
+}
+
+/**
+ * Whether `switchNode` can never reach `caseNode`, because its discriminant is
+ * written as a literal that no case in it matches.
+ *
+ * Conservative on purpose: every case test has to be static and there must be
+ * no `default`, since control can enter a default and fall through into the
+ * case holding the pinned line.
+ */
+function switchCannotReach(switchNode, caseNode) {
+	const discriminant = staticValue(switchNode.discriminant);
+	if (!discriminant) return false;
+	for (const entry of switchNode.cases) {
+		if (entry.test === null) return false;
+		const test = staticValue(entry.test);
+		if (!test) return false;
+		if (test.value === discriminant.value) return false;
+	}
+	return switchNode.cases.includes(caseNode);
 }
 
 /** The statement-list node kinds: a statement standing in one of these stands on its own. */
@@ -475,13 +541,19 @@ function notRunningHere(slice, line) {
 		);
 	}
 	const lines = slice.split('\n');
-	// The character offset of the first non-space character on that line, in the
-	// WRAPPED source the parse saw - so the wrapper's own prefix counts. Looking
-	// the prefix up by its line count instead would pick the first wrapper with
-	// one newline and read every function-wrapped carve five characters short.
+	// The offset has to be read from the BLANKED view, the same one the text
+	// question uses. Blanking replaces a comment with spaces and keeps every
+	// position, so `\t/**/ stmt();` matches the statement there - and its first
+	// non-space character in the RAW line is the comment's slash, an offset
+	// inside no statement node, which would leave every rule below with nothing
+	// to judge.
+	//
+	// The wrapper's own prefix counts too, since the offset indexes the WRAPPED
+	// source the parse saw.
+	const blanked = blankNonCode(slice).split('\n');
 	let offset = parsed.prefixLength;
 	for (let i = 0; i < line; i++) offset += lines[i].length + 1;
-	offset += lines[line].length - lines[line].trimStart().length;
+	offset += blanked[line].length - blanked[line].trimStart().length;
 
 	const chain = ancestryAt(parsed.program, offset);
 	if (chain.length === 0) return null;
@@ -490,10 +562,11 @@ function notRunningHere(slice, line) {
 		return at >= 0 && at < lines.length ? lines[at].trim() : node.type;
 	};
 
-	// Walk outward from the innermost node covering the line.
-	for (let i = chain.length - 1; i >= 1; i--) {
-		const { node, key } = chain[i];
-		const parent = chain[i - 1].node;
+	// Walk outward from the innermost node covering the line, each with the
+	// parent the walk recorded for it.
+	for (let i = chain.length - 1; i >= 0; i--) {
+		const { node, key, parent } = chain[i];
+		if (!parent) continue;
 		if (parent.type === 'IfStatement') {
 			const test = staticValue(parent.test);
 			if (key === 'consequent' && test && !test.value) return { reason: 'an `if` whose condition is written false', owner: text(parent) };
@@ -529,11 +602,17 @@ function notRunningHere(slice, line) {
 			}
 			if (node.type !== 'BlockStatement') return { reason: 'the bare body of a loop', owner: text(parent) };
 		}
-		if ((parent.type === 'DoWhileStatement' || parent.type === 'LabeledStatement' || parent.type === 'WithStatement') && key === 'body' && node.type !== 'BlockStatement') {
-			return { reason: `the bare body of a \`${parent.type === 'LabeledStatement' ? 'label' : parent.type.replace('Statement', '').toLowerCase()}\``, owner: text(parent) };
+		if ((parent.type === 'DoWhileStatement' || parent.type === 'LabeledStatement') && key === 'body' && node.type !== 'BlockStatement') {
+			return {
+				reason: `the bare body of a \`${parent.type === 'LabeledStatement' ? 'label' : 'do'}\``,
+				owner: text(parent)
+			};
 		}
 		if (parent.type === 'ArrowFunctionExpression' && key === 'body' && node.type !== 'BlockStatement') {
 			return { reason: 'a concise arrow body, not a statement', owner: text(parent) };
+		}
+		if (parent.type === 'SwitchStatement' && key === 'cases' && switchCannotReach(parent, node)) {
+			return { reason: 'a `switch` case its discriminant cannot reach', owner: text(parent) };
 		}
 		// An earlier statement in the same list that never comes back.
 		if (STATEMENT_LISTS.has(parent.type)) {
