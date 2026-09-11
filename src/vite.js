@@ -243,12 +243,11 @@ export default function uws(options = {}) {
 		envelopeWireBytes(envelope, recipients, egressAccountV.bytesEnabled);
 	/**
 	 * Local recipients of a topic on this dev server, for the egress admission.
-	 * `excludeWs` is the same pair `deliver` matches - the lanes that exclude
-	 * pass it to both - so a lane's admission counts exactly the recipients its
-	 * delivery will charge. `excludeWs` withholds one
-	 * connection, matched as either the uWS-shaped wrapper a handler receives
-	 * or the underlying raw socket - the same pair `publish` matches, so a
-	 * batch's admission counts exactly the recipients its entries will charge.
+	 * `excludeWs` withholds one connection, matched as either the uWS-shaped
+	 * wrapper a handler receives or the underlying raw socket - the same pair
+	 * `deliver` matches, so an admission counts exactly the recipients the
+	 * delivery will charge. `publishWireBatch` hands its exclusion to both;
+	 * `publishWire` counts inside `deliver` itself; `publish` has none to hand.
 	 *
 	 * @param {string} topic
 	 * @param {object} [excludeWs]
