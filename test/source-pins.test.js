@@ -265,8 +265,12 @@ describe('expectStatement', () => {
 		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
 			.toThrow(/owned by: .*discriminant cannot reach/);
 		// With a default before the pin, the same unknown decides whether the
-		// default is entered, so nothing is known and the pin is taken.
+		// default is entered, so nothing is known and the pin is taken -
+		// unless a case after the unknown matches, which takes control past
+		// the pin whatever the unknown does.
 		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tx();\n\tcase 0:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
 	});
 
 	it('refuses the catch of a try with nothing in it to throw', () => {
@@ -309,14 +313,15 @@ describe('expectStatement', () => {
 			.toThrow(/pin: .* owned by: .*always leaves the block/);
 		// An UNLABELLED break inside the label's body targets the loop around
 		// it, not the label, so it leaves - a label wrapped around a `break`
-		// must not launder the neutralization the loop rule refuses.
+		// must not launder the bare `break` above a pin that the statement
+		// scan refuses. The owner is the label, not the loop.
 		const laundered = 'outer: {\n\tbreak;\n}';
 		expect(() => expectStatement(`while (more()) {\n\tbefore();\n\t${laundered.replace(/\n/g, '\n\t')}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
-			.toThrow(/pin: .* owned by: .*always leaves the block/);
+			.toThrow(/pin: .* owned by: .*always leaves the block: "outer: \{"/);
 		// And a break to a label FURTHER OUT leaves the inner label's block.
 		const further = 'outer: {\n\tinner: {\n\t\tbreak outer;\n\t}\n\t' + STATEMENT + '\n}';
 		expect(() => expectStatement(`before();\n${further}\n`, STATEMENT, 'pin'))
-			.toThrow(/pin: .* owned by: .*always leaves the block/);
+			.toThrow(/pin: .* owned by: .*always leaves the block: "inner: \{"/);
 	});
 
 	it('does not read a jump inside a nested function as the loop\'s own', () => {
