@@ -399,10 +399,12 @@ function staticBinary(operator, a, b) {
  * after it in that list runs.
  *
  * A `break` leaves the list it stands in - the statements after it never run
- * - unless it targets a label whose statement encloses that list, since then
- * it comes back to the line after the label. `labels` are those labels, for
- * the construct being judged: `break outer` inside `outer: { ... }` comes back,
- * a `break` to any other label targets something further out and does leave.
+ * - unless it targets a label carried by the construct being judged or by
+ * something inside it on the way down, since then it comes back to the line
+ * after that label, which is still inside the judged construct. `labels` are
+ * those labels, gathered on the way down: `break outer` inside `outer: { ... }`
+ * comes back, a `break` to any other label targets something further out and
+ * does leave.
  * A `switch` case's `break` lands after the switch, and the switch arm below
  * declines on any break rather than deciding what it targets. `return`,
  * `throw` and `continue` leave from anywhere.
