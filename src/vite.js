@@ -505,17 +505,29 @@ export default function uws(options = {}) {
 	}
 
 	/**
-	 * Refuse every message's seq value before a batch lane delivers any of
-	 * them - the same all-or-nothing production's `batch` and `publishBatched`
-	 * keep. Dev stamps none of these values; it refuses what production refuses.
+	 * Snapshot every message's options and refuse each seq value before a
+	 * batch lane delivers any of them - the same all-or-nothing production's
+	 * `batch` and `publishBatched` keep. The lanes publish from the snapshots,
+	 * not from the caller's objects: an accessor that answers the check with
+	 * one value and a later read with another would otherwise throw from
+	 * inside the delivery for message k with 0..k-1 already out, and a
+	 * snapshot reads inherited fields the spread it replaces did not. Dev
+	 * stamps none of these values; it refuses what production refuses.
 	 *
-	 * @param {Array<{ options?: { seq?: unknown } }>} messages
+	 * @param {Array<{ options?: { seq?: unknown, relay?: boolean, compress?: boolean, jitterMs?: number } }>} messages
+	 * @returns {Array<{ seq: any, relay: boolean | undefined, compress: boolean | undefined, jitterMs: number | undefined } | null | undefined>}
 	 */
-	function vetBatchSeqValues(messages) {
+	function snapshotBatchOptions(messages) {
+		const snapshots = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
 			const o = messages[i].options;
-			assertStampableSeq(/** @type {any} */ (o != null ? o.seq : undefined));
+			const snap = o == null
+				? o
+				: { seq: o.seq, relay: o.relay, compress: o.compress, jitterMs: o.jitterMs };
+			assertStampableSeq(/** @type {any} */ (snap != null ? snap.seq : undefined));
+			snapshots[i] = snap;
 		}
+		return snapshots;
 	}
 
 	/**
@@ -554,17 +566,17 @@ export default function uws(options = {}) {
 	 * field. Tests that need to exercise the seq protocol should run
 	 * against `createTestServer` (testing.js).
 	 *
-	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean } }>} messages
+	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { seq?: boolean | number | bigint | null, relay?: boolean, compress?: boolean, jitterMs?: number } }>} messages
 	 */
 	function publishBatched(messages) {
 		if (!Array.isArray(messages) || messages.length === 0) return;
 		messages = collapseByCoalesceKey(messages);
 		if (messages.length === 0) return;
-		// Every entry's seq value is refused before EITHER path delivers, as
-		// production's batch refuses it: a bad entry throws with nothing of
-		// the batch out. Vetting inside the per-event fall-back would deliver
-		// the entries before the bad one first.
-		vetBatchSeqValues(messages);
+		// Every entry's options are snapshotted and its seq value refused
+		// before EITHER path delivers, as production's batch does: a bad entry
+		// throws with nothing of the batch out. Vetting inside the per-event
+		// fall-back would deliver the entries before the bad one first.
+		const snapshots = snapshotBatchOptions(messages);
 		const firstTopic = messages[0].topic;
 		let allSameTopic = true;
 		for (let i = 1; i < messages.length; i++) {
@@ -596,11 +608,9 @@ export default function uws(options = {}) {
 			if (egressAccountV.enabled && !admitBatchEgressV(messages, null)) return;
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				// Copied unconditionally: reading the caller's object directly
-				// on one branch and a spread snapshot on the other would make
-				// whether an inherited or accessor-carried option is honoured
-				// depend on whether a budget happens to be configured.
-				const per = { ...(m.options || {}) };
+				// The snapshot, never the caller's object: the value vetted
+				// above is the value delivered, whatever an accessor answers now.
+				const per = snapshots[i] ?? {};
 				if (egressAccountV.enabled) markAdmitted(per);
 				publish(m.topic, m.event, m.data, per);
 			}
@@ -1003,14 +1013,15 @@ export default function uws(options = {}) {
 		// surface in parity (see the contract above) without dead machinery.
 		registerWireCodec(_wire) {},
 		batch(messages) {
-			// The value question is asked of every message before the first
-			// publish, as production's batch asks it: a bad value on message k
-			// would otherwise throw from inside publish() with 0..k-1 already
-			// delivered.
-			vetBatchSeqValues(messages);
+			// Every message's options are snapshotted and its value vetted
+			// before the first publish, as production's batch does: a bad value
+			// on message k would otherwise throw from inside publish() with
+			// 0..k-1 already delivered, and an accessor answering the check
+			// with one value and the delivery with another would do the same.
+			const snapshots = snapshotBatchOptions(messages);
 			const results = [];
 			for (let i = 0; i < messages.length; i++) {
-				const { topic, event, data, options } = messages[i];
+				const { topic, event, data } = messages[i];
 				// Each entry carries its own options, exactly as it does through
 				// production's batch and the harness's: this method is a loop over
 				// independent publishes, so an entry's `jitterMs` is as
@@ -1019,7 +1030,7 @@ export default function uws(options = {}) {
 				// than the same call under `npm start`. Exclusion is not among
 				// them: production's batch snapshots seq, relay, compress and
 				// jitterMs, and no exclusion, so neither does this.
-				results.push(publish(topic, event, data, options));
+				results.push(publish(topic, event, data, snapshots[i]));
 			}
 			return results;
 		},

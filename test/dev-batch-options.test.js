@@ -179,8 +179,9 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 			// subscriber on the first's topic: refused before the first goes
 			// out, or a bad batch delivers a prefix. `batch` is a loop of
 			// publishes; `publishBatched` has a fast path for one topic and a
-			// per-event fall-back for a batch the subscriber does not see whole,
-			// and both are driven.
+			// per-event fall-back for a batch the subscriber does not see whole.
+			// One pre-pass guards both, and both shapes are sent so it cannot
+			// quietly move back into one path.
 			expect(() => platform.batch([
 				{ topic: 'room', event: 'bad', data: { n: 1 } },
 				{ topic: 'room', event: 'bad', data: { n: 2 }, options: { seq: value } }
@@ -198,6 +199,21 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 		}
 		// Every refusal was a TypeError, production's class for a value refusal.
 		expect(refusal('x')).toBeInstanceOf(TypeError);
+		// The value vetted is the value delivered: an accessor that answers the
+		// check with an accepted value and every later read with a refused one
+		// is accepted, as production accepts it from its snapshot - not
+		// refused from inside the delivery with the first message already out.
+		let reads = 0;
+		const shifty = { get seq() { return reads++ === 0 ? 7 : 'x'; } };
+		expect(() => platform.batch([
+			{ topic: 'room', event: 'shifty-batch', data: { n: 1 } },
+			{ topic: 'room', event: 'shifty-batch', data: { n: 2 }, options: shifty }
+		])).not.toThrow();
+		reads = 0;
+		expect(() => platform.publishBatched([
+			{ topic: 'room', event: 'shifty-fallback', data: { n: 1 } },
+			{ topic: 'elsewhere', event: 'shifty-fallback', data: { n: 2 }, options: shifty }
+		])).not.toThrow();
 		// The values production takes still deliver, and nothing refused did:
 		// a frame published after them bounds the absence.
 		platform.publish('room', 'accepted', { n: 3 }, { seq: 7 });
@@ -207,6 +223,8 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 		expect(accepted, 'an accepted seq value still delivers').toBeTruthy();
 		expect(accepted.seq, 'and dev stamps no seq on it').toBeUndefined();
 		expect(frames.some((f) => f?.event === 'bad'), 'no refused call delivered anything, not even a prefix').toBe(false);
+		expect(frames.filter((f) => f?.event === 'shifty-batch').length, 'the accessor batch delivered both').toBe(2);
+		expect(frames.filter((f) => f?.event === 'shifty-fallback').length, 'the accessor fall-back delivered its room message').toBe(1);
 	});
 
 	it("ignores a batch entry exclusion, because production's batch ignores it", async () => {
