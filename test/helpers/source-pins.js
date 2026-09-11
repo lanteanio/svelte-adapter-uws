@@ -380,6 +380,77 @@ function startsItsOwnStatement(lines, index) {
 }
 
 /**
+ * Where in `slice` `statement` stands as a statement of its own, as line
+ * indexes into the same blanked, ownership-filtered view the pins judge.
+ *
+ * ORDER BETWEEN TWO PINNED CALLS HAS TO BE ASKED IN THIS VIEW. A pin that
+ * counts qualifying statements and then reads `indexOf` on the RAW carve is
+ * asking two different questions: text that no longer runs - commented out,
+ * prefixed `false &&`, owned by the line above - is gone from the count and
+ * still present for `indexOf`. One neutralized call plus a duplicate of the
+ * live one then satisfies both halves at once, which is exactly the shape a
+ * per-branch count exists to refuse.
+ *
+ * @param {string} slice - the carved source region to search
+ * @param {string} statement - the complete statement as written, including its
+ *   terminating semicolon
+ * @returns {number[]} ascending line indexes
+ */
+export function statementIndexes(slice, statement) {
+	const lines = statementLines(slice);
+	/** @type {number[]} */
+	const found = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i] === statement && startsItsOwnStatement(lines, i)) found.push(i);
+	}
+	return found;
+}
+
+/**
+ * Where in `slice` `block` appears as consecutive lines that stand where they
+ * are, as line indexes into that same view.
+ *
+ * The block form is what pins a call to its PLACE: moving a check out of the
+ * loop it guards, or out of the branch that reaches it, changes the lines
+ * around it even when the call itself is untouched. A window measured in
+ * `indexOf` distances cannot say that - it admits any relocation inside the
+ * window, and windows drawn between two distant anchors are wide.
+ *
+ * @param {string} slice
+ * @param {string[]} block - each line as written, trimmed
+ * @returns {number[]} ascending line indexes of each first line
+ */
+export function statementBlockIndexes(slice, block) {
+	const lines = statementLines(slice);
+	/** @type {number[]} */
+	const found = [];
+	for (let i = 0; i + block.length <= lines.length; i++) {
+		let j = 0;
+		while (j < block.length && lines[i + j] === block[j]) j++;
+		if (j === block.length && startsItsOwnStatement(lines, i)) found.push(i);
+	}
+	return found;
+}
+
+/**
+ * The first line index in `slice` whose code contains `text`, or -1.
+ *
+ * For an ANCHOR rather than a pin - the publish a check has to precede, say.
+ * It reads the blanked view too, so a mention inside a comment is not the
+ * anchor, and it makes no ownership claim: an anchor is a landmark, and what
+ * is pinned about it is asserted separately.
+ *
+ * @param {string} slice
+ * @param {string} text
+ * @returns {number}
+ */
+export function codeLineIndex(slice, text) {
+	const lines = statementLines(slice);
+	for (let i = 0; i < lines.length; i++) if (lines[i].includes(text)) return i;
+	return -1;
+}
+
+/**
  * Require `slice` to contain a line that is exactly `statement` once trimmed.
  *
  * @param {string} slice - the carved source region to search

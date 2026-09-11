@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { expectStatement, expectStatementCount } from './helpers/source-pins.js';
+import { codeLineIndex, expectStatement, statementBlockIndexes, statementIndexes } from './helpers/source-pins.js';
 import {
 	BATCH_SEQUENCE_ERROR,
 	BATCH_ENTRY_SEQUENCE_ERROR,
@@ -287,49 +287,61 @@ describe('cluster sequence authority policy', () => {
 		// branches (the stateless reroute pre-reads and the stateful snapshot
 		// pass), before anything is stamped or fanned out.
 		//
-		// Counted as exact LINES, not as substring occurrences: a `false &&`
-		// prefix leaves the text in place, which is the neutralization
-		// test/helpers/source-pins.js exists for, and the count has to be of
-		// the statement rather than of a string that appears inside one.
-		expectStatementCount(wireBatch, 'assertBatchEntrySequenceAuthority(opts);', 2,
-			'both batch branches vet per-entry authority');
-		// And the two are one per BRANCH rather than two in the same loop. The
-		// stateless branch publishes at `this.publishWire(`, so a check before
-		// it is that branch's and a check after it is the stateful pre-pass;
-		// requiring the last one on both sides of that line is what a pair of
-		// before-the-publish assertions could not say, since two calls in the
-		// stateless loop satisfy them and leave the stateful lane unvetted.
-		expect(wireBatch.indexOf('assertBatchEntrySequenceAuthority(opts);'),
-			'the stateless reroute must vet per-entry authority before it publishes')
-			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
-		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts);'),
-			'the second per-entry check must be the stateful branch, not a repeat in the stateless loop')
-			.toBeGreaterThan(wireBatch.indexOf('this.publishWire('));
-		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts);'),
-			'the stateful branch must vet per-entry authority before it stamps')
-			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
-		// The per-entry refusal lives in the shared resolveEntrySeq table (one
-		// spelling of the entry lane for production, the harness, and dev), so
-		// the batch body proves it consults that table - removing the call is
-		// removing the refusal.
-		expectStatementCount(wireBatch, 'const resolved = resolveEntrySeq(entry.seq, i);', 2, 'both publishWireBatch branches consult the entry refusal table');
+		// Pinned as the BLOCK it belongs to rather than as a line with a count
+		// beside it, and located in the same blanked view that counts it. Two
+		// reasons, both learned from mutations that passed the pins this
+		// replaces. A count in one view with `indexOf` order in another is two
+		// questions: neutralized text is gone from the count and still there
+		// for `indexOf`, so commenting out one call and duplicating the live
+		// one satisfied both. And a call is only a guard where it STANDS - the
+		// block carries the resolve that feeds it and the latch that fires it
+		// once, so lifting the check out of the branch, or up into the egress
+		// gate below the loop, changes these lines even though the call is
+		// untouched.
+		const entrySeqPrePass = [
+			'const resolved = resolveEntrySeq(entry.seq, i);',
+			'if (resolved !== undefined) {',
+			'if (typeof resolved === \'number\') {',
+			'if (!sawExplicitEntrySeq) {',
+			'assertBatchEntrySequenceAuthority(opts);',
+			'sawExplicitEntrySeq = true;',
+			'}',
+			'} else if (resolved === true) {'
+		];
+		const prePasses = statementBlockIndexes(wireBatch, entrySeqPrePass);
+		expect(prePasses, 'both batch branches vet per-entry authority, each in its own resolve branch').toHaveLength(2);
+		// One per BRANCH rather than two in the same loop. The stateless branch
+		// publishes at `this.publishWire(`, so a pre-pass before that line is
+		// that branch's and one after it is the stateful snapshot pass. Both
+		// sides are read as line indexes of the qualifying blocks, so a
+		// duplicate of the live branch cannot stand in for the dead one.
+		const publishAt = codeLineIndex(wireBatch, 'this.publishWire(');
+		expect(publishAt, 'the stateless reroute must still publish through publishWire').toBeGreaterThan(-1);
+		expect(prePasses[0], 'the stateless reroute must vet per-entry authority before it publishes')
+			.toBeLessThan(publishAt);
+		expect(prePasses[1], 'the second pre-pass must be the stateful branch, not a repeat in the stateless loop')
+			.toBeGreaterThan(publishAt);
 		// And an entry-level counter draw takes the cluster refusal in BOTH
 		// pre-passes, before anything fans out: a clustered batch must refuse
 		// { seq: true } on an entry up front, not diverge silently on the
 		// stateful lane or half-deliver on the stateless one. The values form
 		// with `true` is refused for every relay shape in the table above.
-		// Counted and placed the same way as the per-entry check above, and
-		// the whole statement is named rather than its opening: the prefix
-		// alone matches a neutralized line as readily as a live one.
+		// The whole statement is named rather than its opening, because the
+		// prefix alone matches a neutralized line as readily as a live one.
 		const counterDraw = 'assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);';
-		expectStatementCount(wireBatch, counterDraw, 2, 'both batch branches vet an entry-level counter draw');
-		expect(wireBatch.indexOf(counterDraw), 'the stateless reroute must vet the counter draw before it publishes')
-			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
-		expect(wireBatch.lastIndexOf(counterDraw),
-			'the second counter-draw check must be the stateful branch, not a repeat in the stateless loop')
-			.toBeGreaterThan(wireBatch.indexOf('this.publishWire('));
-		expect(wireBatch.lastIndexOf(counterDraw), 'the stateful branch must vet the counter draw before it stamps')
-			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
+		const counterDraws = statementIndexes(wireBatch, counterDraw);
+		expect(counterDraws, 'both batch branches vet an entry-level counter draw').toHaveLength(2);
+		expect(counterDraws[0], 'the stateless reroute must vet the counter draw before it publishes')
+			.toBeLessThan(publishAt);
+		expect(counterDraws[1], 'the second counter-draw check must be the stateful branch, not a repeat in the stateless loop')
+			.toBeGreaterThan(publishAt);
+		// Each draw sits in the `resolved === true` arm its pre-pass opens, so
+		// it is reached by the value that needs refusing rather than parked
+		// somewhere later in the branch.
+		for (const [i, draw] of counterDraws.entries()) {
+			expect(draw, 'the counter draw belongs to its own branch pre-pass').toBeGreaterThan(prePasses[i]);
+			expect(draw - prePasses[i], 'and inside it, not further down the branch').toBeLessThan(entrySeqPrePass.length + 6);
+		}
 		// batch() snapshots each message's option fields once and judges the
 		// snapshot, then hands publish() the SAME snapshot - so the atomic
 		// pre-pass and the per-message stamp cannot disagree.

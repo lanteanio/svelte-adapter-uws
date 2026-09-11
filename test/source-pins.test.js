@@ -5,7 +5,7 @@
 // comment-stripping regex, waved through or misread.
 
 import { describe, expect, it } from 'vitest';
-import { blankNonCode, expectStatement, expectStatementBlock, expectStatementCount } from './helpers/source-pins.js';
+import { blankNonCode, codeLineIndex, expectStatement, expectStatementBlock, expectStatementCount, statementBlockIndexes, statementIndexes } from './helpers/source-pins.js';
 
 const STATEMENT = 'assertStampableSeq(seqOption);';
 
@@ -232,6 +232,29 @@ describe('expectStatementCount', () => {
 		// does for a wrapper above it.
 		expect(() => expectStatementCount(`${STATEMENT}\nif (false) {\n\t${STATEMENT}\n}\n`, STATEMENT, 2, 'pin'))
 			.toThrow(/found 1 \(1 more line\(s\) do not run on their own, owned by: "if \(false\) \{"\)/);
+	});
+});
+
+describe('statementIndexes, statementBlockIndexes and codeLineIndex', () => {
+	it('reports only the occurrences that run, so order and count read one view', () => {
+		// The pair a pin needs when it asks BOTH how many and in what order: a
+		// count taken in the filtered view and an order taken on the raw text
+		// are two questions, and one neutralized call beside one duplicate of a
+		// live call answers both.
+		const slice = `${STATEMENT}\nif (false)\n\t${STATEMENT}\nx();\n// ${STATEMENT}\ny();\n${STATEMENT}\n`;
+		expect(statementIndexes(slice, STATEMENT)).toEqual([0, 6]);
+		expect(statementIndexes(slice, 'absent();')).toEqual([]);
+	});
+
+	it('reports a block only where its lines are consecutive and stand where they are', () => {
+		const block = ['guard(ws);', 'act(ws);'];
+		const slice = `guard(ws);\nact(ws);\nif (false) {\n\tguard(ws);\n\tact(ws);\n}\nguard(ws);\n// gap\nact(ws);\n`;
+		expect(statementBlockIndexes(slice, block)).toEqual([0]);
+	});
+
+	it('anchors on code, not on a mention inside a comment', () => {
+		expect(codeLineIndex('// this.publishWire(x)\nthis.publishWire(y);\n', 'this.publishWire(')).toBe(1);
+		expect(codeLineIndex('nothing();\n', 'this.publishWire(')).toBe(-1);
 	});
 });
 
