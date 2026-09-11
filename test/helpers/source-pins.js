@@ -604,15 +604,74 @@ export function statementIndexes(slice, statement) {
  * @returns {number[]} ascending line indexes of each first line
  */
 export function statementBlockIndexes(slice, block) {
-	const lines = statementLines(slice);
+	return blockMatches(statementLines(slice), block)
+		.filter((i) => ownedBy(slice, i) === null);
+}
+
+/**
+ * Every line index where `block` appears as consecutive CODE lines, blank and
+ * comment-only lines skipped between them.
+ *
+ * Skipped, because a comment between two pinned lines is not a change to the
+ * code and a pin that fails on one is a pin people learn to edit rather than
+ * trust. A real statement between them still breaks the match, which is the
+ * property the block form is for: the lines have to stay each other's
+ * neighbours.
+ *
+ * @param {string[]} lines - the blanked, trimmed view
+ * @param {string[]} block
+ * @returns {number[]}
+ */
+function blockMatches(lines, block) {
 	/** @type {number[]} */
 	const found = [];
-	for (let i = 0; i + block.length <= lines.length; i++) {
-		let j = 0;
-		while (j < block.length && lines[i + j] === block[j]) j++;
-		if (j === block.length && ownedBy(slice, i) === null) found.push(i);
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i] !== block[0]) continue;
+		let matched = 1;
+		let at = i + 1;
+		while (matched < block.length && at < lines.length) {
+			if (lines[at] === '') { at++; continue; }
+			if (lines[at] !== block[matched]) break;
+			matched++;
+			at++;
+		}
+		if (matched === block.length) found.push(i);
 	}
 	return found;
+}
+
+/**
+ * Require `block` to appear exactly `count` times as consecutive lines that run
+ * where they stand, and answer with where.
+ *
+ * The count and the POSITIONS come from one call because a lane that must run a
+ * check on each of its exits needs both, and asking them separately invites the
+ * two halves to be asked of different views - a count of what runs beside an
+ * order taken over text that does not.
+ *
+ * @param {string} slice
+ * @param {string[]} block
+ * @param {number} count
+ * @param {string} label
+ * @returns {number[]} the line index of each block's first line, ascending
+ */
+export function expectStatementBlockCount(slice, block, count, label) {
+	if (block.length < 2) throw new TypeError('expectStatementBlockCount needs at least two lines; use expectStatementCount for one');
+	const lines = statementLines(slice);
+	const consecutive = blockMatches(lines, block);
+	const running = consecutive.filter((i) => ownedBy(slice, i) === null);
+	if (running.length === count) return running;
+	const owned = consecutive.filter((i) => ownedBy(slice, i) !== null);
+	const detail = [
+		owned.length > 0
+			? `${owned.length} more do not run where they stand, owned by: ${owned.map((i) => ownedBy(slice, i) ?? '').join(' | ')}`
+			: '',
+		lines.filter((line) => line === block[0]).length > consecutive.length
+			? `${lines.filter((line) => line === block[0]).length - consecutive.length} more start with its first line but do not continue into the rest`
+			: ''
+	].filter(Boolean).join('; ');
+	expect.fail(`${label}: expected ${count} occurrence(s) of ${JSON.stringify(block)}, found ${running.length}${detail ? ` (${detail})` : ''}`);
+	return running;
 }
 
 /**
@@ -629,7 +688,7 @@ export function statementBlockIndexes(slice, block) {
  */
 export function codeLineIndex(slice, text) {
 	const lines = statementLines(slice);
-	for (let i = 0; i < lines.length; i++) if (lines[i].includes(text)) return i;
+	for (let i = 0; i < lines.length; i++) if (codeOnly(lines[i]).includes(text)) return i;
 	return -1;
 }
 
@@ -729,13 +788,7 @@ export function expectStatementCount(slice, statement, count, label) {
 export function expectStatementBlock(slice, block, label) {
 	if (block.length < 2) throw new TypeError('expectStatementBlock needs at least two lines; use expectStatement for one');
 	const lines = statementLines(slice);
-	/** @type {number[]} */
-	const consecutive = [];
-	for (let i = 0; i + block.length <= lines.length; i++) {
-		let j = 0;
-		while (j < block.length && lines[i + j] === block[j]) j++;
-		if (j === block.length) consecutive.push(i);
-	}
+	const consecutive = blockMatches(lines, block);
 	// The block's OWN first line has to stand where it is, for the same reason
 	// a single pinned statement does: consecutive lines inside `if (false) {`
 	// are as consecutive as anywhere else.

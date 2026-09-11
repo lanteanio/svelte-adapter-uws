@@ -288,10 +288,16 @@ describe('statementIndexes, statementBlockIndexes and codeLineIndex', () => {
 		expect(statementIndexes(slice, 'absent();')).toEqual([]);
 	});
 
-	it('reports a block only where its lines are consecutive and stand where they are', () => {
+	it('reports a block only where its lines are neighbours and stand where they are', () => {
 		const block = ['guard(ws);', 'act(ws);'];
+		// Three occurrences: the live one, one inside a dead block, and one with
+		// a comment between the two lines. A comment is not a change to the
+		// code, so the third counts; the dead one does not.
 		const slice = `guard(ws);\nact(ws);\nif (false) {\n\tguard(ws);\n\tact(ws);\n}\nguard(ws);\n// gap\nact(ws);\n`;
-		expect(statementBlockIndexes(slice, block)).toEqual([0]);
+		expect(statementBlockIndexes(slice, block)).toEqual([0, 6]);
+		// A STATEMENT between them does break it: the lines have to stay each
+		// other's neighbours, which is what the block form pins.
+		expect(statementBlockIndexes(`guard(ws);\nbetween();\nact(ws);\n`, block)).toEqual([]);
 	});
 
 	it('anchors on code, not on a mention inside a comment', () => {
@@ -307,8 +313,12 @@ describe('expectStatementBlock', () => {
 		expect(() => expectStatementBlock('a();\nauthorize(ws, () =>\n\tcheck(ws)\n);\n', block, 'pin')).not.toThrow();
 		expect(() => expectStatementBlock('authorize(ws, () => true ||\n\tcheck(ws)\n);\n', block, 'pin'))
 			.toThrow(/its first line "authorize\(ws, \(\) =>" is not in the slice/);
-		expect(() => expectStatementBlock('authorize(ws, () =>\n\t// gap\n\tcheck(ws)\n);\n', block, 'pin'))
-			.toThrow(/its first line is at slice line 1 but what follows is/);
+		// A comment between the lines is not a change to the code.
+		expect(() => expectStatementBlock('a();\nauthorize(ws, () =>\n\t// gap\n\tcheck(ws)\n);\n', block, 'pin')).not.toThrow();
+		// A statement between them is: the block says these lines are each
+		// other's neighbours.
+		expect(() => expectStatementBlock('authorize(ws, () =>\n\tbetween() ||\n\tcheck(ws)\n);\n', block, 'pin'))
+			.toThrow(/do not appear consecutively/);
 	});
 
 	it('refuses a block whose own first line does not run where it stands', () => {
