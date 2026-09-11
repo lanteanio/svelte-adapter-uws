@@ -23,6 +23,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { WS_PLATFORM } from '../src/runtime/utils/ws-symbols.js';
+import { assertStampableSeq } from '../src/runtime/utils/epoch.js';
 
 /** @type {any} */
 let httpServer = null;
@@ -155,6 +156,45 @@ describe('dev platform.batch() reads the entry options production reads (src/vit
 			batched.j,
 			'a batch entry carries its own options, so the de-herd window must survive'
 		).toBe(250);
+	});
+
+	it('refuses the seq values production refuses, on every lane, with nothing delivered', async () => {
+		// Production runs assertStampableSeq on the value before it admits, so
+		// `{ seq: 'x' }` throws under `npm start`. Dev stamps no seq, and used
+		// to read none either, so the same call delivered here - found only by
+		// switching servers. The expected message is production's own, read
+		// from the same table, so the case cannot drift from it.
+		const { ws, frames, waitFor } = await bootDev({});
+		const platform = ws.getUserData()[WS_PLATFORM];
+		expect(await platform.subscribe(ws, 'room')).toBeNull();
+		const refusal = (value) => {
+			try { assertStampableSeq(value); } catch (error) { return error; }
+			throw new Error('production accepts this value, so it is no test of a refusal');
+		};
+		for (const value of ['x', 0, -1, 1.5, {}]) {
+			const expected = refusal(value);
+			expect(() => platform.publish('room', 'bad', { n: 1 }, { seq: value }), `publish ${String(value)}`)
+				.toThrow(expected.message);
+			expect(() => platform.batch([{ topic: 'room', event: 'bad', data: { n: 1 }, options: { seq: value } }]), `batch ${String(value)}`)
+				.toThrow(expected.message);
+			// The batched fast path: two entries on one topic, the second bad.
+			// Refused before the first goes out, or a bad batch delivers a prefix.
+			expect(() => platform.publishBatched([
+				{ topic: 'room', event: 'bad', data: { n: 1 } },
+				{ topic: 'room', event: 'bad', data: { n: 2 }, options: { seq: value } }
+			]), `publishBatched ${String(value)}`).toThrow(expected.message);
+			expect(() => platform.publishWire('room', 'bad', { n: 1 }, { capability: 'dev.seq:1', schemaVersion: 1, encode: () => null }, { seq: value }), `publishWire ${String(value)}`)
+				.toThrow(expected.message);
+		}
+		// Every refusal was a TypeError, production's class for a value refusal.
+		expect(refusal('x')).toBeInstanceOf(TypeError);
+		// The values production takes still deliver, and nothing refused did:
+		// a frame published after them bounds the absence.
+		platform.publish('room', 'accepted', { n: 3 }, { seq: 7 });
+		platform.publish('room', 'drain', { n: 4 }, { seq: false });
+		expect(await waitFor((f) => f?.event === 'drain'), 'the drain must arrive').not.toBeNull();
+		expect(frames.some((f) => f?.event === 'accepted'), 'an accepted seq value still delivers').toBe(true);
+		expect(frames.some((f) => f?.event === 'bad'), 'no refused call delivered anything').toBe(false);
 	});
 
 	it("ignores a batch entry exclusion, because production's batch ignores it", async () => {

@@ -16,6 +16,7 @@ import {
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority, assertClusterSequenceAuthorityValues } from './runtime/handler/cluster-sequence-policy.js';
+import { assertStampableSeq } from './runtime/utils/epoch.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
@@ -458,6 +459,12 @@ export default function uws(options = {}) {
 	 * @returns {boolean}
 	 */
 	function deliver(topic, event, data, options, excludeWs = null) {
+		// The seq VALUE is refused here exactly as production refuses it,
+		// though dev stamps none: a string, a zero, a negative or a fraction
+		// throws the same TypeError under `vite dev` as under `npm start`,
+		// instead of delivering here and throwing there. The cluster-topology
+		// refusals stay out - dev is one process.
+		assertStampableSeq(options != null ? options.seq : undefined);
 		// Mirror the production `{ jitterMs }` de-herd window stamp (platform.publish):
 		// carry the window so each client rolls its own dispatch delay.
 		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
@@ -505,9 +512,10 @@ export default function uws(options = {}) {
 	 * @param {unknown} [data]
 	 * @param {{ seq?: boolean | number | bigint | null, relay?: boolean, compress?: boolean, jitterMs?: number }} [options] -
 	 *   the four fields production's `publish` reads. `relay` is accepted for
-	 *   API parity and ignored in dev (single-process), and dev stamps no
-	 *   `seq` at all (documented on `publishBatched`); `jitterMs` lands in the
-	 *   envelope as `j` here exactly as it does in production.
+	 *   API parity and ignored in dev (single-process); `seq` is refused on
+	 *   the values production refuses and otherwise not stamped (documented
+	 *   on `publishBatched`); `jitterMs` lands in the envelope as `j` here
+	 *   exactly as it does in production.
 	 *
 	 *   `excludeWs` is NOT read here, because production's `publish` does not
 	 *   read it either: that lane is one native fan-out, and excluding one
@@ -579,7 +587,13 @@ export default function uws(options = {}) {
 			}
 			return;
 		}
-		// Fast path: build envelopes and a shared batch frame.
+		// Fast path: build envelopes and a shared batch frame. Every entry's
+		// seq value is refused first, as production's batch refuses it, so a
+		// bad entry throws with nothing of the batch delivered.
+		for (let i = 0; i < messages.length; i++) {
+			const o = messages[i].options;
+			assertStampableSeq(o != null ? o.seq : undefined);
+		}
 		const events = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
