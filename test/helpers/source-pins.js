@@ -397,27 +397,33 @@ function staticBinary(operator, a, b) {
  * Whether `node` always leaves the statement list it stands in, so nothing
  * after it in that list runs.
  *
- * `breakLeaves` says what an unlabelled `break` means from where the question
- * is asked. Inside a list it ends, it leaves - the statements after it never
- * run. But a `break` inside a `switch` case lands on the line AFTER the
- * switch, and one inside a labelled statement's body lands after the label,
- * so when the question is whether the SWITCH or the LABEL leaves the block
- * around it, a `break` is the opposite of an answer: it is the way back.
- * `return`, `throw` and `continue` leave from anywhere.
+ * A `break` means different things depending on where the question is asked
+ * from, and the two extra arguments say where that is. `breakLeaves` is what
+ * an UNLABELLED `break` means: inside a list it ends, it leaves - the
+ * statements after it never run - but inside a `switch` case it lands on the
+ * line AFTER the switch, so when the question is whether the switch leaves the
+ * block around it, that `break` is the way back. `labels` are the labels whose
+ * `break` lands right after the construct being judged, for the same reason:
+ * `break outer` inside `outer: { ... }` comes back to the line after the label,
+ * while a `break` to any other label, or an unlabelled one inside a labelled
+ * block, targets something further out and does leave. `return`, `throw` and
+ * `continue` leave from anywhere.
  *
  * @param {any} node
  * @param {boolean} [breakLeaves]
+ * @param {readonly string[]} [labels]
  */
-function alwaysTerminates(node, breakLeaves = true) {
+function alwaysTerminates(node, breakLeaves = true, labels = NO_LABELS) {
 	if (!node) return false;
-	const leaves = (child) => alwaysTerminates(child, breakLeaves);
+	const leaves = (child) => alwaysTerminates(child, breakLeaves, labels);
 	switch (node.type) {
 		case 'ReturnStatement':
 		case 'ThrowStatement':
 		case 'ContinueStatement':
 			return true;
 		case 'BreakStatement':
-			return breakLeaves;
+			if (node.label === null) return breakLeaves;
+			return !labels.includes(node.label.name);
 		case 'BlockStatement':
 			// A bare block that returns takes the statements after it with it.
 			return node.body.some(leaves);
@@ -428,15 +434,16 @@ function alwaysTerminates(node, breakLeaves = true) {
 			return Boolean(node.alternate) && leaves(node.consequent) && leaves(node.alternate);
 		}
 		case 'LabeledStatement':
-			// A `break` to this label lands after it; only a jump that leaves the
-			// label's own body from further in counts.
-			return alwaysTerminates(node.body, false);
+			// A `break` to THIS label lands after it. An unlabelled one inside
+			// the body still targets the loop or switch around the label, so it
+			// keeps the caller's meaning.
+			return alwaysTerminates(node.body, breakLeaves, [...labels, node.label.name]);
 		case 'SwitchStatement': {
-			// Every case leaves the switch itself - a `break` only leaves the
-			// case - and a `default` catches the rest, so no value of the
-			// discriminant returns to the line after it.
+			// Every case leaves the switch itself - an unlabelled `break` only
+			// leaves the case - and a `default` catches the rest, so no value of
+			// the discriminant returns to the line after it.
 			const hasDefault = node.cases.some((entry) => entry.test === null);
-			return hasDefault && node.cases.every((entry) => entry.consequent.some((child) => alwaysTerminates(child, false)));
+			return hasDefault && node.cases.every((entry) => entry.consequent.some((child) => alwaysTerminates(child, false, labels)));
 		}
 		case 'TryStatement':
 			// The finalizer runs last, so it decides on its own; otherwise the
@@ -460,6 +467,9 @@ function alwaysTerminates(node, breakLeaves = true) {
 			return false;
 	}
 }
+
+/** The label list an unlabelled question starts with. */
+const NO_LABELS = Object.freeze([]);
 
 /**
  * Whether `node` holds a `break` or a `return` that belongs to it.
@@ -491,11 +501,13 @@ function containsBreakOrReturn(node) {
 
 /**
  * Whether `switchNode` can never reach `caseNode`, because its discriminant is
- * written as a literal that no case in it matches.
+ * written as a literal and control, entering where that literal sends it,
+ * never falls through as far as the case holding the pinned line.
  *
- * Conservative on purpose: every case test has to be static and there must be
- * no `default`, since control can enter a default and fall through into the
- * case holding the pinned line.
+ * Conservative where it has to be: a case test the fold cannot read is a case
+ * that may be the entry, and then nothing is known - unless it stands after
+ * the pin with no `default` before it, where the pin is dead whether or not
+ * it matches.
  */
 function switchCannotReach(switchNode, caseNode) {
 	const discriminant = staticValue(switchNode.discriminant);
@@ -507,15 +519,23 @@ function switchCannotReach(switchNode, caseNode) {
 	// before the pin is passed over by a matching case after it. A test this
 	// cannot fold before the first match is a case that may be the entry, and
 	// then nothing is known.
+	const defaultAt = switchNode.cases.findIndex((candidate) => candidate.test === null);
 	let entry = -1;
 	for (let i = 0; i < switchNode.cases.length; i++) {
 		const candidate = switchNode.cases[i];
 		if (candidate.test === null) continue;
 		const test = staticValue(candidate.test);
-		if (!test) return false;
+		if (!test) {
+			// Unknown. Before the pin it may be the entry. After the pin it
+			// only matters if NOT matching would hand control to a default
+			// before the pin; otherwise every outcome enters past the pin, or
+			// nowhere, and the pin is dead either way.
+			if (i <= at || (defaultAt !== -1 && defaultAt <= at)) return false;
+			continue;
+		}
 		if (test.value === discriminant.value) { entry = i; break; }
 	}
-	if (entry === -1) entry = switchNode.cases.findIndex((candidate) => candidate.test === null);
+	if (entry === -1) entry = defaultAt;
 	if (entry === -1 || entry > at) return true;
 	// From the entry the pinned case is reached by falling through, and any
 	// case on the way that always leaves - a `break` included, it ends the

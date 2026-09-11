@@ -259,6 +259,14 @@ describe('expectStatement', () => {
 		// A test the fold cannot read AFTER the first match changes nothing,
 		// because the first match in source order is where control enters.
 		expect(() => expectStatement(`switch (0) {\n\tcase 0:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin')).not.toThrow();
+		// One AFTER the pin with nothing matching before it and no default
+		// before it either: whether it matches or not, control enters past the
+		// pin or nowhere, so the pin is dead and the unknown does not save it.
+		expect(() => expectStatement(`switch (0) {\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/owned by: .*discriminant cannot reach/);
+		// With a default before the pin, the same unknown decides whether the
+		// default is entered, so nothing is known and the pin is taken.
+		expect(() => expectStatement(`switch (0) {\n\tdefault:\n\tcase 1:\n\t\t${STATEMENT}\n\tcase kind:\n\t\tbreak;\n}\n`, STATEMENT, 'pin')).not.toThrow();
 	});
 
 	it('refuses the catch of a try with nothing in it to throw', () => {
@@ -298,6 +306,16 @@ describe('expectStatement', () => {
 		// A return inside the label's body still leaves.
 		const labelledReturn = 'outer: {\n\treturn;\n}';
 		expect(() => expectStatement(`before();\n${labelledReturn}\n${STATEMENT}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
+		// An UNLABELLED break inside the label's body targets the loop around
+		// it, not the label, so it leaves - a label wrapped around a `break`
+		// must not launder the neutralization the loop rule refuses.
+		const laundered = 'outer: {\n\tbreak;\n}';
+		expect(() => expectStatement(`while (more()) {\n\tbefore();\n\t${laundered.replace(/\n/g, '\n\t')}\n\t${STATEMENT}\n}\n`, STATEMENT, 'pin'))
+			.toThrow(/pin: .* owned by: .*always leaves the block/);
+		// And a break to a label FURTHER OUT leaves the inner label's block.
+		const further = 'outer: {\n\tinner: {\n\t\tbreak outer;\n\t}\n\t' + STATEMENT + '\n}';
+		expect(() => expectStatement(`before();\n${further}\n`, STATEMENT, 'pin'))
 			.toThrow(/pin: .* owned by: .*always leaves the block/);
 	});
 
