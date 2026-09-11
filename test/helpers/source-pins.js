@@ -15,40 +15,55 @@
  * blind to the one mutation someone would use to test it, and the check comes
  * back green.
  *
- * `expectStatement` asks for a LINE whose trimmed text is exactly the
- * statement, AND which runs on its own where it stands. Deleting the call
- * fails it, renaming it fails it, and anything written on the same line
- * around it fails it because the line is no longer that statement. Four
- * shapes leave the pinned line byte-identical, and each is refused by reading
- * what is around it:
+ * `expectStatement` asks two questions, and only the first is about text: the
+ * line's trimmed text must be exactly the statement, and the statement must
+ * RUN where it stands. Deleting the call fails the first, renaming it fails it,
+ * and anything written on the same line around it fails it because the line is
+ * no longer that statement.
  *
- * - a one-line wrapper - `if (false)`, `else`, `false &&`, an arrow header -
- *   because the pinned line is then that line's body, not a statement;
- * - a jump out of the block immediately above it, `return` / `throw` /
- *   `break` / `continue`, with or without an `if (true)` in front, because
- *   nothing after it in that block runs;
- * - an enclosing block whose condition is one false literal (`if (false) {`,
- *   `while (0) {`, `if (null) {`) or which opens after `false &&`, found by
- *   walking the braces outward however far the header is;
- * - a place inside a `switch` body that no `case` has reached yet.
+ * THE SECOND QUESTION IS ANSWERED FROM A PARSE, not from the text around the
+ * line, because it is a structural question: whether a statement runs where it
+ * stands depends on the constructs enclosing it, and a neutralization one line
+ * long leaves every character of the pinned line intact. A wrapper on the
+ * previous line, a ternary whose `:` reads like a label, `undefined:` which IS
+ * a label, `if (true) return;` which ends in a semicolon, `false &&` which
+ * ends in a brace: reading neighbouring text answers those one at a time and
+ * the next spelling is always cheap to write, while reading the tree answers
+ * the whole class. So the carve is parsed, and the pinned line is judged by
+ * its place in it:
  *
- * Comments and the inside of a literal that spans lines are blanked first, so
- * `/* stmt *\/`, `// stmt` and a template literal whose own line reads as the
- * statement are not lines either. The failure names the line it found and
- * what took it over instead of reporting a bare `false`, so a neutralized
- * guard identifies itself.
+ * - it must stand in a statement LIST - a block, a program, a class static
+ *   block, a switch case - and never be the bare body of an `if`, an `else`, a
+ *   loop or a label, and never sit in an expression position (a ternary arm,
+ *   the right of `&&`, a concise arrow body);
+ * - nothing enclosing it may be statically dead: `if (false) {`, `while (0) {`,
+ *   `if ('') {`, `if (NaN) {`, `if (0 === 1) {`, `for (const x of []) {`,
+ *   `0 && (() => {`, the `else` of an `if (true)`;
+ * - no earlier statement in its block may always leave: `return`, `throw`,
+ *   `break`, `continue`, `if (true) return;`, `{ return; }`.
  *
- * WHAT THIS STILL CANNOT SEE needs the program EVALUATED: a condition that is
- * a name (`if (disabled) {`) or an expression of literals (`if (0 === 1) {`),
- * a braced function nothing calls, and a caller that stops reaching the
- * statement's lane at all. A statement whose meaning depends on its
- * neighbours - a callback argument, a continuation of the line above - is
+ * A carve that does not parse is refused loudly rather than guessed at, since a
+ * pin whose rule could not run would read as green. Carves are slices of a
+ * file, so a small ladder of wrappers supplies the context a method body or a
+ * `} finally {` continuation needs.
+ *
+ * Comments and the inside of a literal that spans lines are blanked before the
+ * text question, so `/* stmt *\/`, `// stmt` and a template literal whose own
+ * line reads as the statement are not lines either. The failure names the
+ * construct that owns the line rather than reporting a bare `false`, so a
+ * neutralized guard identifies itself.
+ *
+ * WHAT THIS CANNOT SEE needs the program RUN: a condition that is a name
+ * (`if (disabled) {`), a function nothing calls, and a caller that stops
+ * reaching the statement's lane at all. A statement whose meaning depends on
+ * its neighbours - a callback argument, a continuation of the line above - is
  * pinned with `expectStatementBlock`, which requires the lines CONSECUTIVELY
  * and requires the first of them to stand where it is, so a neutralization of
  * the line that owns the call changes the block. The rest is what the
  * behavioural case beside a pin exists for.
  */
 
+import { parse } from 'acorn';
 import { expect } from 'vitest';
 
 /** The characters after which a `/` opens a regular expression rather than dividing. */
@@ -238,97 +253,296 @@ function statementLines(slice) {
 const STATEMENT_TERMINATORS = new Set([';', '{', '}']);
 
 /**
- * A `case x:` or `default:` line: what follows belongs to it.
- *
- * Only those two, deliberately. A bare `ident:` reads as a label and is also
- * how the middle of a ternary looks once it is split over lines - `undefined:`
- * on its own line is a legal label and a legal ternary alternate, and nothing
- * on the line tells them apart. This repository writes no labeled statement
- * (no `break label;` / `continue label;` anywhere in `src/`), so admitting the
- * shape would buy nothing and cost the hole.
+ * `line` with the text of its literals removed, so a brace or an anchor inside
+ * one is not read as code. Handles the three quote kinds and a regular
+ * expression, escapes included.
  */
-const LABEL_LINE = /^(?:case\b.+|default)\s*:$/;
-
-/**
- * A line that leaves the block: nothing after it in that block can run.
- *
- * The `if (true)` / `while (1)` prefix is part of it, because `if (true)
- * return;` above a pinned call is as cheap to write as `if (false)` and ends
- * in a terminator.
- */
-const UNCONDITIONAL_JUMP = /^(?:(?:if|while)\s*\(\s*(?:true|1)\s*\)\s*)?(?:return|throw|break|continue)\b/;
-
-/**
- * A block header that cannot run: a condition written as one false literal, or
- * a line opening with `false &&` (this repository's own neutralization idiom,
- * which reads as a block opener when an arrow body starts on that line).
- *
- * One LITERAL, not an expression of them: `0 === 1` needs evaluating, and
- * matching a bare `0 &&` anywhere on the line would refuse the ordinary
- * `if (x === 0 && y) {`.
- */
-const DEAD_BLOCK_OPENER = /^(?:\}\s*else\s+)?(?:if|while)\s*\(\s*(?:false|0|null|undefined|!true|!1)\s*\)|^false\s*&&/;
-
-/** A `case`/`default` line, for the switch-body check. */
-const CASE_LINE = /^(?:case\b|default\s*:)/;
-
-/** `line` with the text of its single-line literals removed, so a brace inside one is not counted. */
 function codeOnly(line) {
-	return line.replace(/'[^']*'|"[^"]*"|`[^`]*`/g, '\'\'');
+	return line.replace(
+		/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\/(?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+\/[a-z]*/g,
+		'\'\''
+	);
 }
 
 /**
- * The header of the block opened at `index`, which is that line unless the
- * brace stands alone - then the line above carries the condition.
- *
- * @param {string[]} lines
- * @param {number} index
- * @returns {string}
+ * The wrappers a carve may need before it parses. A carve is a SLICE of a
+ * file - usually one method of a class - so it is rarely a program on its own.
+ * Each wrapper's prefix ends in a newline, so a line number in the wrapped
+ * source is the slice's line number plus `lines`.
  */
-function blockHeader(lines, index) {
-	if (lines[index] !== '{') return lines[index];
-	for (let i = index - 1; i >= 0; i--) {
-		if (lines[i] !== '') return `${lines[i]} {`;
+const SLICE_WRAPPERS = [
+	{ prefix: '', suffix: '', lines: 0 },
+	{ prefix: 'class __Carve__ {\n', suffix: '\n}', lines: 1 },
+	{ prefix: 'function __carve__() {\n', suffix: '\n}', lines: 1 },
+	{ prefix: 'const __carve__ = {\n', suffix: '\n};', lines: 1 },
+	// A carve anchored on a continuation: `} finally {` or `} catch {` opens
+	// the slice, so the construct it belongs to has to be supplied for it to
+	// parse at all.
+	{ prefix: 'try {\n', suffix: '\n}', lines: 1 }
+];
+
+/** Parsed carves, keyed by the carve text: a suite pins the same slice many times. */
+const parsedSlices = new Map();
+
+/**
+ * `slice` parsed under the first wrapper that accepts it, with the line offset
+ * that wrapper introduced - or null when nothing parses it.
+ *
+ * @param {string} slice
+ * @returns {{ program: any, lineOffset: number, prefixLength: number } | null}
+ */
+function parsedSlice(slice) {
+	if (parsedSlices.has(slice)) return parsedSlices.get(slice);
+	/** @type {{ program: any, lineOffset: number, prefixLength: number } | null} */
+	let parsed = null;
+	for (const wrapper of SLICE_WRAPPERS) {
+		try {
+			const program = parse(wrapper.prefix + slice + wrapper.suffix, {
+				ecmaVersion: 'latest',
+				sourceType: 'module',
+				locations: true
+			});
+			parsed = { program, lineOffset: wrapper.lines, prefixLength: wrapper.prefix.length };
+			break;
+		} catch { /* the next wrapper, or none */ }
 	}
-	return '{';
+	parsedSlices.set(slice, parsed);
+	return parsed;
+}
+
+/** The statically known value of `node`, as `{ value }`, or null when it has none. */
+function staticValue(node) {
+	if (!node) return null;
+	switch (node.type) {
+		case 'Literal':
+			// A regular expression literal is an object, so it is truthy; its
+			// `value` is engine-dependent, which is why it answers as a shape.
+			return node.regex ? { value: {} } : { value: node.value };
+		case 'TemplateLiteral':
+			return node.expressions.length === 0 ? { value: node.quasis[0].value.cooked } : null;
+		case 'Identifier':
+			if (node.name === 'undefined') return { value: undefined };
+			if (node.name === 'NaN') return { value: NaN };
+			if (node.name === 'Infinity') return { value: Infinity };
+			return null;
+		case 'ArrayExpression':
+			// Only the empty one, which is what a `for (const x of [])` needs.
+			return node.elements.length === 0 ? { value: [] } : null;
+		case 'ObjectExpression':
+			return node.properties.length === 0 ? { value: {} } : null;
+		case 'UnaryExpression': {
+			const inner = staticValue(node.argument);
+			if (!inner) return null;
+			if (node.operator === '!') return { value: !inner.value };
+			if (node.operator === '-') return { value: -(/** @type {any} */ (inner.value)) };
+			if (node.operator === '+') return { value: +(/** @type {any} */ (inner.value)) };
+			if (node.operator === 'void') return { value: undefined };
+			if (node.operator === 'typeof') return { value: typeof inner.value };
+			return null;
+		}
+		case 'BinaryExpression': {
+			const left = staticValue(node.left);
+			const right = staticValue(node.right);
+			if (!left || !right) return null;
+			return staticBinary(node.operator, left.value, right.value);
+		}
+		case 'LogicalExpression': {
+			const left = staticValue(node.left);
+			if (!left) return null;
+			if (node.operator === '&&') return left.value ? staticValue(node.right) : left;
+			if (node.operator === '||') return left.value ? left : staticValue(node.right);
+			if (node.operator === '??') return left.value === null || left.value === undefined ? staticValue(node.right) : left;
+			return null;
+		}
+		case 'SequenceExpression':
+			return staticValue(node.expressions[node.expressions.length - 1]);
+		case 'ParenthesizedExpression':
+			return staticValue(node.expression);
+		default:
+			return null;
+	}
+}
+
+/** `a <op> b` when both sides are statically known, or null for an operator this does not judge. */
+function staticBinary(operator, a, b) {
+	switch (operator) {
+		case '===': return { value: a === b };
+		case '!==': return { value: a !== b };
+		// eslint-disable-next-line eqeqeq
+		case '==': return { value: a == b };
+		// eslint-disable-next-line eqeqeq
+		case '!=': return { value: a != b };
+		case '<': return { value: /** @type {any} */ (a) < /** @type {any} */ (b) };
+		case '<=': return { value: /** @type {any} */ (a) <= /** @type {any} */ (b) };
+		case '>': return { value: /** @type {any} */ (a) > /** @type {any} */ (b) };
+		case '>=': return { value: /** @type {any} */ (a) >= /** @type {any} */ (b) };
+		default: return null;
+	}
+}
+
+/** Whether `node` always leaves the block it is in, so nothing after it runs. */
+function alwaysTerminates(node) {
+	if (!node) return false;
+	switch (node.type) {
+		case 'ReturnStatement':
+		case 'ThrowStatement':
+		case 'BreakStatement':
+		case 'ContinueStatement':
+			return true;
+		case 'BlockStatement':
+			// A bare block that returns takes the statements after it with it.
+			return node.body.some(alwaysTerminates);
+		case 'IfStatement': {
+			const test = staticValue(node.test);
+			if (test && test.value) return alwaysTerminates(node.consequent);
+			if (test && !test.value) return alwaysTerminates(node.alternate);
+			return Boolean(node.alternate) && alwaysTerminates(node.consequent) && alwaysTerminates(node.alternate);
+		}
+		case 'LabeledStatement':
+			return alwaysTerminates(node.body);
+		default:
+			return false;
+	}
+}
+
+/** The statement-list node kinds: a statement standing in one of these stands on its own. */
+const STATEMENT_LISTS = new Set(['Program', 'BlockStatement', 'StaticBlock', 'SwitchCase']);
+
+/**
+ * Every node whose span covers `index`, outermost first, each with the key it
+ * occupies in its parent.
+ *
+ * @param {any} program
+ * @param {number} index - a character offset into the wrapped source
+ * @returns {Array<{ node: any, key: string, parent: any }>}
+ */
+function ancestryAt(program, index) {
+	/** @type {Array<{ node: any, key: string, parent: any }>} */
+	const chain = [];
+	const visit = (node, key, parent) => {
+		if (!node || typeof node.type !== 'string') return;
+		if (!(node.start <= index && index < node.end)) return;
+		chain.push({ node, key, parent });
+		for (const [childKey, child] of Object.entries(node)) {
+			if (childKey === 'type' || childKey === 'loc' || childKey === 'start' || childKey === 'end') continue;
+			if (Array.isArray(child)) {
+				for (const entry of child) visit(entry, childKey, node);
+			} else visit(child, childKey, node);
+		}
+	};
+	visit(program, 'root', null);
+	return chain;
 }
 
 /**
- * The enclosing block header that cannot run the line at `index`, or null.
+ * Why the code at line `line` of `slice` does not run where it stands, or null
+ * when it does.
  *
- * Line equality cannot see a dead BLOCK: the pinned line follows an ordinary
- * `{`, which is what every live block looks like too. Walking the braces
- * outward finds the headers that opened the blocks this line is in, and a
- * header that says false in as many characters is the neutralization someone
- * reaches for once the one-line and line-above shapes are refused. A
- * `switch` whose body has not reached a `case` yet is the same thing said
- * differently, so it counts too.
+ * TWO QUESTIONS, both answered from the parse rather than from the text of the
+ * line above. Line equality alone was defeated three times running, each time
+ * by a neutralization one line long: a wrapper on the previous line, a ternary
+ * whose `:` looked like a label, a jump above it, a `false &&` opening a block.
+ * Reading what is AROUND a line cannot settle those; reading the tree can.
  *
- * What this cannot see needs the program EVALUATED: a condition that is a
- * name, or an expression of literals (`0 === 1`), and a braced function
- * nothing calls. Those are what the behavioural case beside a pin is for.
+ * 1. STANDS ON ITS OWN. The pinned statement's parent must be a statement list
+ *    - a block, a program, a class static block, a switch case. A statement
+ *    that is instead the bare body of an `if`, an `else`, a loop or a label, or
+ *    that sits in an expression position (a ternary arm, the right of `&&`, a
+ *    concise arrow body), is that construct's body and not a statement of its
+ *    own, whatever the condition says.
+ * 2. IS REACHED. No enclosing construct may be statically dead - `if (false)`,
+ *    `while (0)`, `if ('')`, `for (const x of [])`, `0 &&`, a ternary arm the
+ *    test rules out - and no earlier statement in the same block may always
+ *    leave it (`return;`, `throw`, `break`, `continue`, `if (true) return;`,
+ *    `{ return; }`).
  *
- * @param {string[]} lines - trimmed, non-code already blanked
- * @param {number} index
- * @returns {string | null}
+ * Conditions are judged by static evaluation of literals: `if (0 === 1)` is
+ * dead, `if (disabled)` is not, because seeing the second needs the program
+ * RUN. Reachability of a FUNCTION - whether anything calls it - is out of
+ * reach for the same reason, and is what the behavioural case beside a pin is
+ * for.
+ *
+ * @param {string} slice
+ * @param {number} line - 0-based line index into `slice`
+ * @returns {{ reason: string, owner: string } | null}
  */
-function deadEnclosingBlock(lines, index) {
-	let depth = 0;
-	for (let i = index - 1; i >= 0; i--) {
-		const line = codeOnly(lines[i]);
-		for (let c = line.length - 1; c >= 0; c--) {
-			if (line[c] === '}') { depth++; continue; }
-			if (line[c] !== '{') continue;
-			if (depth > 0) { depth--; continue; }
-			// An opener of a block this line is inside.
-			const header = blockHeader(lines, i);
-			if (DEAD_BLOCK_OPENER.test(header)) return header;
-			// A statement between `switch (x) {` and its first `case` is
-			// unreachable: control enters at a case label or not at all.
-			if (/^switch\s*\(/.test(header)) {
-				let sawCase = false;
-				for (let k = i + 1; k < index; k++) if (CASE_LINE.test(lines[k])) { sawCase = true; break; }
-				if (!sawCase) return header;
+function notRunningHere(slice, line) {
+	const parsed = parsedSlice(slice);
+	if (!parsed) {
+		throw new Error(
+			'source-pins: the carve does not parse, so no pin over it can say whether a statement runs. ' +
+			'Widen or narrow the carve to a complete construct (a whole method, a whole function) and pin that.'
+		);
+	}
+	const lines = slice.split('\n');
+	// The character offset of the first non-space character on that line, in the
+	// WRAPPED source the parse saw - so the wrapper's own prefix counts. Looking
+	// the prefix up by its line count instead would pick the first wrapper with
+	// one newline and read every function-wrapped carve five characters short.
+	let offset = parsed.prefixLength;
+	for (let i = 0; i < line; i++) offset += lines[i].length + 1;
+	offset += lines[line].length - lines[line].trimStart().length;
+
+	const chain = ancestryAt(parsed.program, offset);
+	if (chain.length === 0) return null;
+	const text = (node) => {
+		const at = node.loc.start.line - parsed.lineOffset - 1;
+		return at >= 0 && at < lines.length ? lines[at].trim() : node.type;
+	};
+
+	// Walk outward from the innermost node covering the line.
+	for (let i = chain.length - 1; i >= 1; i--) {
+		const { node, key } = chain[i];
+		const parent = chain[i - 1].node;
+		if (parent.type === 'IfStatement') {
+			const test = staticValue(parent.test);
+			if (key === 'consequent' && test && !test.value) return { reason: 'an `if` whose condition is written false', owner: text(parent) };
+			if (key === 'alternate' && test && test.value) return { reason: 'an `else` whose `if` is written true', owner: text(parent) };
+			// An `else if` chain is an IfStatement in the alternate, which is
+			// ordinary; a bare statement there is the else's body.
+			if (key === 'alternate' && node.type !== 'BlockStatement' && node.type !== 'IfStatement') {
+				return { reason: 'the bare body of an `else`', owner: text(parent) };
+			}
+			if (key === 'consequent' && node.type !== 'BlockStatement') return { reason: 'the bare body of an `if`', owner: text(parent) };
+		}
+		if (parent.type === 'ConditionalExpression') {
+			const test = staticValue(parent.test);
+			if (key === 'consequent' && test && !test.value) return { reason: 'a ternary arm its condition rules out', owner: text(parent) };
+			if (key === 'alternate' && test && test.value) return { reason: 'a ternary arm its condition rules out', owner: text(parent) };
+			if (key !== 'test') return { reason: 'a ternary arm, not a statement', owner: text(parent) };
+		}
+		if (parent.type === 'LogicalExpression' && key === 'right') {
+			const left = staticValue(parent.left);
+			if (parent.operator === '&&' && left && !left.value) return { reason: 'the right of a `&&` whose left is written false', owner: text(parent) };
+			if (parent.operator === '||' && left && left.value) return { reason: 'the right of a `||` whose left is written true', owner: text(parent) };
+			return { reason: `the right of a \`${parent.operator}\`, not a statement`, owner: text(parent) };
+		}
+		if ((parent.type === 'WhileStatement' || parent.type === 'ForStatement') && key === 'body') {
+			const test = staticValue(parent.test);
+			if (test && !test.value) return { reason: 'a loop whose condition is written false', owner: text(parent) };
+			if (node.type !== 'BlockStatement') return { reason: 'the bare body of a loop', owner: text(parent) };
+		}
+		if ((parent.type === 'ForOfStatement' || parent.type === 'ForInStatement') && key === 'body') {
+			const right = staticValue(parent.right);
+			if (right && (Array.isArray(right.value) || (right.value && typeof right.value === 'object' && Object.keys(right.value).length === 0))) {
+				return { reason: 'a loop over an empty literal', owner: text(parent) };
+			}
+			if (node.type !== 'BlockStatement') return { reason: 'the bare body of a loop', owner: text(parent) };
+		}
+		if ((parent.type === 'DoWhileStatement' || parent.type === 'LabeledStatement' || parent.type === 'WithStatement') && key === 'body' && node.type !== 'BlockStatement') {
+			return { reason: `the bare body of a \`${parent.type === 'LabeledStatement' ? 'label' : parent.type.replace('Statement', '').toLowerCase()}\``, owner: text(parent) };
+		}
+		if (parent.type === 'ArrowFunctionExpression' && key === 'body' && node.type !== 'BlockStatement') {
+			return { reason: 'a concise arrow body, not a statement', owner: text(parent) };
+		}
+		// An earlier statement in the same list that never comes back.
+		if (STATEMENT_LISTS.has(parent.type)) {
+			const list = parent.type === 'SwitchCase' ? parent.consequent : parent.body;
+			if (Array.isArray(list)) {
+				for (const sibling of list) {
+					if (sibling === node) break;
+					if (alwaysTerminates(sibling)) return { reason: 'a statement above it that always leaves the block', owner: text(sibling) };
+				}
 			}
 		}
 	}
@@ -336,47 +550,16 @@ function deadEnclosingBlock(lines, index) {
 }
 
 /**
- * What owns the line at `index` instead of letting it stand as a statement of
- * its own, or null when nothing does.
+ * What keeps the line at `index` from running, as a phrase naming the owner, or
+ * null when nothing does.
  *
- * This is what closes the neutralizations line equality could not see. A
- * wrapper written on the PREVIOUS line leaves the pinned line byte-identical,
- * so `if (false)` above a pinned call passed a pin that `if (false) call();`
- * on one line fails; reading the line above tells the two apart, because a
- * free-standing statement always follows a line that terminated. Two more
- * shapes terminate a line and still leave the pinned call dead: an
- * unconditional `return` / `throw` / `break` / `continue` above it, and a
- * `if (false) {` block around it.
- *
- * Blank lines are skipped; comment-only lines are already blank by the time
- * these lines are produced. A statement at the top of the slice has nothing
- * above it and stands on its own.
- *
- * @param {string[]} lines - trimmed, non-code already blanked
+ * @param {string} slice
  * @param {number} index
  * @returns {string | null}
  */
-function ownedBy(lines, index) {
-	for (let i = index - 1; i >= 0; i--) {
-		const previous = lines[i];
-		if (previous === '') continue;
-		if (UNCONDITIONAL_JUMP.test(previous)) return previous;
-		if (LABEL_LINE.test(previous)) break;
-		if (!STATEMENT_TERMINATORS.has(previous[previous.length - 1])) return previous;
-		break;
-	}
-	return deadEnclosingBlock(lines, index);
-}
-
-/**
- * Whether the line at `index` stands on its own.
- *
- * @param {string[]} lines - trimmed, non-code already blanked
- * @param {number} index
- * @returns {boolean}
- */
-function startsItsOwnStatement(lines, index) {
-	return ownedBy(lines, index) === null;
+function ownedBy(slice, index) {
+	const verdict = notRunningHere(slice, index);
+	return verdict === null ? null : `${verdict.reason}: ${JSON.stringify(verdict.owner)}`;
 }
 
 /**
@@ -401,7 +584,7 @@ export function statementIndexes(slice, statement) {
 	/** @type {number[]} */
 	const found = [];
 	for (let i = 0; i < lines.length; i++) {
-		if (lines[i] === statement && startsItsOwnStatement(lines, i)) found.push(i);
+		if (lines[i] === statement && ownedBy(slice, i) === null) found.push(i);
 	}
 	return found;
 }
@@ -427,7 +610,7 @@ export function statementBlockIndexes(slice, block) {
 	for (let i = 0; i + block.length <= lines.length; i++) {
 		let j = 0;
 		while (j < block.length && lines[i + j] === block[j]) j++;
-		if (j === block.length && startsItsOwnStatement(lines, i)) found.push(i);
+		if (j === block.length && ownedBy(slice, i) === null) found.push(i);
 	}
 	return found;
 }
@@ -463,7 +646,7 @@ export function expectStatement(slice, statement, label) {
 	/** @type {number[]} */
 	const exact = [];
 	for (let i = 0; i < lines.length; i++) if (lines[i] === statement) exact.push(i);
-	if (exact.some((i) => startsItsOwnStatement(lines, i))) return;
+	if (exact.some((i) => ownedBy(slice, i) === null)) return;
 
 	// Report the near misses rather than a bare false. A wrapped, owned or
 	// commented call still contains the text, and naming the line that holds
@@ -471,7 +654,7 @@ export function expectStatement(slice, statement, label) {
 	// is the difference between "the pin failed" and "here is what someone
 	// did to it".
 	if (exact.length > 0) {
-		const owners = exact.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ');
+		const owners = exact.map((i) => ownedBy(slice, i) ?? '').join(' | ');
 		expect.fail(`${label}: ${JSON.stringify(statement)} is its own line but does not run on its own, owned by: ${owners}`);
 	}
 	const wrapped = lines.filter((line) => line.includes(statement));
@@ -514,13 +697,13 @@ export function expectStatementCount(slice, statement, count, label) {
 	// wrapping it in a block written false would otherwise leave the count
 	// intact, which is the whole reason this function exists rather than a
 	// `toContain`.
-	const owned = exact.filter((i) => !startsItsOwnStatement(lines, i));
+	const owned = exact.filter((i) => ownedBy(slice, i) !== null);
 	const found = exact.length - owned.length;
 	if (found === count) return;
 	const wrapped = lines.filter((line) => line !== statement && line.includes(statement));
 	const detail = [
 		owned.length > 0
-			? `${owned.length} more line(s) do not run on their own, owned by: ${owned.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ')}`
+			? `${owned.length} more line(s) do not run on their own, owned by: ${owned.map((i) => ownedBy(slice, i) ?? '').join(' | ')}`
 			: '',
 		wrapped.length > 0
 			? `${wrapped.length} more line(s) contain it without being it: ${wrapped.map((line) => JSON.stringify(line)).join(' | ')}`
@@ -556,9 +739,9 @@ export function expectStatementBlock(slice, block, label) {
 	// The block's OWN first line has to stand where it is, for the same reason
 	// a single pinned statement does: consecutive lines inside `if (false) {`
 	// are as consecutive as anywhere else.
-	if (consecutive.some((i) => startsItsOwnStatement(lines, i))) return;
+	if (consecutive.some((i) => ownedBy(slice, i) === null)) return;
 	if (consecutive.length > 0) {
-		const owners = consecutive.map((i) => JSON.stringify(ownedBy(lines, i) ?? '')).join(' | ');
+		const owners = consecutive.map((i) => ownedBy(slice, i) ?? '').join(' | ');
 		expect.fail(`${label}: the lines ${JSON.stringify(block)} appear consecutively but do not run where they stand, owned by: ${owners}`);
 	}
 	const anchor = lines.indexOf(block[0]);
