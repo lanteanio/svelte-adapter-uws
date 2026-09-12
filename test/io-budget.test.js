@@ -987,7 +987,21 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// it, every one of these digests holds at its previous value. Nothing
 	// executes differently on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered.
-	ingress: '49ba662929ca9e280288c4f4206124e1279643ff20a19992f4630098e600bd50',
+	//
+	// Re-pinned for the request-framing rule. The drift reaches this graph
+	// through utils.js, which re-exports utils/upgrade-admission.js, which
+	// imports utils/request-headers.js: two added exported functions
+	// (framingRefusal, isFramingHeader), a string constant and a digit RegExp
+	// beside them, a local on collectRequestHeaders and one statement added
+	// inside its per-header walk, and a rewritten tail that answers a framing
+	// header ahead of any other repeat. One string was also added to the
+	// upgrade_rejected_total reason enum in observability-manifest.js, which this
+	// graph reaches as declaration data. The collector's one caller in this graph
+	// takes a header snapshot for the waiting room and discards what it answers:
+	// the added tail runs there and nothing acts on it, and the added walk
+	// statement runs only for a header sent twice. No byte path in these modules
+	// moved, and no copy primitive entered the body.
+	ingress: '21fd8ba679e2de487911b4a62e15492acec68f52e623ad3e877004f83569b5b7',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1830,7 +1844,21 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// it, every one of these digests holds at its previous value. Nothing
 	// executes differently on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered.
-	platform: '84d91817f0f9812bb4f6b5a14ed3a754887bb95aa6e90c28712547bac69e50cf',
+	//
+	// Re-pinned for the request-framing rule. The drift reaches this graph
+	// through utils.js, which re-exports utils/upgrade-admission.js, which
+	// imports utils/request-headers.js: two added exported functions
+	// (framingRefusal, isFramingHeader), a string constant and a digit RegExp
+	// beside them, a local on collectRequestHeaders and one statement added
+	// inside its per-header walk, and a rewritten tail that answers a framing
+	// header ahead of any other repeat. One string was also added to the
+	// upgrade_rejected_total reason enum in observability-manifest.js, which this
+	// graph reaches as declaration data. The collector's one caller in this graph
+	// takes a header snapshot for the waiting room and discards what it answers:
+	// the added tail runs there and nothing acts on it, and the added walk
+	// statement runs only for a header sent twice. No byte path in these modules
+	// moved, and no copy primitive entered the body.
+	platform: '2daad64e03d63627f460cb237cc184519ebc9ca07f3c87e9cbc7f9a59500ecd4',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2136,7 +2164,21 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// it, every one of these digests holds at its previous value. Nothing
 	// executes differently on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered.
-	'wire-fanout': 'c98bef8e20671b1294db774b1f35a6c5b013ce77b6a7b4ed6311146a157a6602',
+	//
+	// Re-pinned for the request-framing rule. The drift reaches this graph
+	// through utils.js, which re-exports utils/upgrade-admission.js, which
+	// imports utils/request-headers.js: two added exported functions
+	// (framingRefusal, isFramingHeader), a string constant and a digit RegExp
+	// beside them, a local on collectRequestHeaders and one statement added
+	// inside its per-header walk, and a rewritten tail that answers a framing
+	// header ahead of any other repeat. One string was also added to the
+	// upgrade_rejected_total reason enum in observability-manifest.js, which this
+	// graph reaches as declaration data. The collector's one caller in this graph
+	// takes a header snapshot for the waiting room and discards what it answers:
+	// the added tail runs there and nothing acts on it, and the added walk
+	// statement runs only for a header sent twice. No byte path in these modules
+	// moved, and no copy primitive entered the body.
+	'wire-fanout': '221c8c56b8eb63e5f8f6e0a8bcf1295bceb0de08b36fd1712a2a9d3ca22ea995',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

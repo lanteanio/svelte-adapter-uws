@@ -239,6 +239,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** uWS emits neither `Content-Length` nor `Transfer-Encoding` when no length is reported, and the exchange still completes, so a request pipelined behind the response is answered as before. `vite dev` already sent none, since Node's HTTP server adds no length to a 204 or 304 of its own.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a request that frames its body two ways is refused and its connection closed.** The vendored parser reads the presence of `Transfer-Encoding`, not its value, so `xchunked`, `gzip` and `chunked, chunked` were all decoded as chunked while an intermediary in front read them as something else, which is the disagreement a smuggled request is made of.
+  - **Affects:** Deployments behind a proxy or CDN, where the two readings can be made to disagree. A conformant `Transfer-Encoding: chunked` request is served exactly as before, in any capitalisation.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The refusal is 400 and the connection ends, since the bytes the sender left behind are the ones the two readings disagree about. Every lane refuses a `Transfer-Encoding` naming anything but chunked, the WebSocket handshake included, where `upgrade_rejected_total` gains the reason `ambiguous_framing`. A framing header sent EMPTY or sent TWICE is refused only where the whole header set is read AND acted on, which is the SSR, authenticate, admin and handshake doors; every answer written before such a read serves it, a built asset and a prerendered page among them. That is a measured price rather than an oversight. A refusal that is not about framing, a repeated `Authorization` among them, keeps its connection open as before.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -485,24 +491,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A request may say where its body ends only once, and only in a way this
+  server and the one in front of it read alike.** Measured against the
+  pinned uWebSockets.js: the parser refuses `Content-Length: 0x6`, `+6` and
+  `6abc`, and refuses a request carrying both `Transfer-Encoding` and
+  `Content-Length`, but it reads the PRESENCE of `Transfer-Encoding` rather
+  than its value - `xchunked`, `chunkedX`, `gzip`, `chunked, chunked`,
+  `gzip, chunked` and `chunked, gzip` are all decoded as chunked - and it
+  accepts an empty `Content-Length`. A conformant intermediary reads an
+  unknown coding as one it cannot frame a body with, so it forwards the
+  request as bodyless and treats what follows as the next request, while
+  this server consumes those same bytes as a chunked body. That disagreement
+  is what a smuggled request is made of, so the adapter answers these shapes
+  itself: `Transfer-Encoding` must be exactly `chunked` (RFC 9112 6.1 allows
+  the coding at most once and only as the final one, and this server decodes
+  no other), `Content-Length` must be a bare decimal count, and neither may
+  arrive twice. `framingRefusal` in `src/runtime/utils/request-headers.js`
+  holds the rule, and it is asked twice over. One lookup,
+  `transfer-encoding`, runs in front of EVERY route - wrapped around the
+  registrations rather than written into a handler, so the lanes that answer
+  before acting on any header set (a built asset, a prerendered page, the
+  health and readiness probes, the waiting room's own pages) are covered by
+  the same line as the rest. The doors that read the whole header set and
+  act on it then ask the whole rule, so SSR, authenticate, admin and the
+  handshake also see a framing header sent empty or sent twice.
+- **The handshake asks it for itself.** A WebSocket route takes an options
+  object rather than a handler, so the wrapper never sees it, and the siege,
+  over-capacity and connection-capacity answers in front of the upgrade all
+  keep their connections. An ambiguously framed handshake arriving at a full
+  gate would have been answered 503 on a connection whose remaining bytes
+  are the ones in dispute, so the upgrade callback asks the same one lookup
+  before any of them. A repeat of any other single-valued header no longer
+  masks a framing one either: the framing answer is returned first, because
+  only it says the connection can no longer be read.
+- **What that one lookup does not reach, and why the line is there.** A
+  header lookup answers the empty string for an absent header and for one
+  sent empty alike, and returns the first of a repeated one, so it cannot
+  see those two shapes; a lane that never builds a header set still serves
+  them. The alternatives were measured against the built static lane in
+  `bench/39-request-framing-guard-ab.mjs`. A walk of the header list - the
+  only form that sees an empty or repeated framing header - costs about 8%
+  of that answer, and an integer compare on the key length ahead of the
+  string compare buys none of it back. A lookup form costs at most a few
+  percent, and on the quietest host measured it sat inside the control arm's
+  own drift. Closing those two shapes in front of every route would be paid
+  by every asset request forever, so they are closed where the header set is
+  read and acted on anyway, and left open where the answer comes first. A
+  case in `test/request-framing-real.test.js` pins the served answer, so the
+  line cannot move without a run saying so.
+- **A framing refusal closes the connection.** RFC 9112 6.3: a 400 that
+  keeps reading leaves the ambiguous bytes in place for the next parse, so
+  the refusal ends the connection, and uWS writes the `Connection: close`
+  that says so (the adapter writes none of its own, which would put the
+  field on the wire twice). Scoped to the two headers that frame a body, so
+  a repeated `Authorization` is still answered on a connection that stays
+  open, which `test/request-framing-real.test.js` pins beside the refusals. The handshake door separates the two in its own counter as well:
+  `ambiguous_framing` where the body boundary is in question,
+  `duplicate_header` where it is not.
 - **A HEAD request takes the headers and no payload.** uWS writes whatever
-  `end()` is handed, and a client stops reading a HEAD response at the header
-  terminator (RFC 9112 6.3), so bytes written after it stayed in the
+  `end()` is handed, and a client stops reading a HEAD response at the
+  header terminator (RFC 9112 6.3), so bytes written after it stayed in the
   connection buffer and were parsed as the start of the next response on a
-  keep-alive connection. `curl -I` closes the connection and never showed it.
-  Two lanes wrote such bytes. The generated errors: a 405 on the authenticate
-  path, a 400 from the request edge, a 500 from the SSR failure path and the
-  admin lane's JSON errors and handler bodies all went through `end(text)`.
-  And SvelteKit itself: its endpoint lane routes HEAD to the GET handler and
-  hands that Response back unchanged, pages render in full, and dropping the
-  body is left to the server, which node:http does for adapter-node and uWS
-  does not. The helpers in `http-helpers.js` take a HEAD flag and finish
-  through `endWithoutBody(text.length)`, so `Content-Length` still names
-  the entity size; the admin writers do the same for a handler body; the SSR
-  writer never reads a HEAD body, reports a declared `Content-Length` and
-  otherwise sends no framing header, cancelling the stream. A 413 takes no
-  flag: it answers a request body, which a HEAD never carries.
-  `createTestServer`'s admin mirror follows.
+  keep-alive connection. `curl -I` closes the connection and never showed
+  it. Two lanes wrote such bytes. The generated errors: a 405 on the
+  authenticate path, a 400 from the request edge, a 500 from the SSR failure
+  path and the admin lane's JSON errors and handler bodies all went through
+  `end(text)`. And SvelteKit itself: its endpoint lane routes HEAD to the
+  GET handler and hands that Response back unchanged, pages render in full,
+  and dropping the body is left to the server, which node:http does for
+  adapter-node and uWS does not. The helpers in `http-helpers.js` take a
+  HEAD flag and finish through `endWithoutBody(text.length)`, so
+  `Content-Length` still names the entity size; the admin writers do the
+  same for a handler body; the SSR writer never reads a HEAD body, reports a
+  declared `Content-Length` and otherwise sends no framing header,
+  cancelling the stream. A 413 takes no flag: it answers a request body,
+  which a HEAD never carries. `createTestServer`'s admin mirror follows.
   `test/head-and-204-framing-real.test.js` pins it over raw sockets: a
   second request pipelined behind the HEAD must begin exactly at the header
   terminator, and for the endpoint a lone HEAD read through EOF must end at
@@ -512,19 +575,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success, the SSR writer (SvelteKit's OPTIONS answer and its ETag 304 among
   them) and the admin writers - or through `end()`, which writes the same
   zero: a 204 `Response` an authenticate hook returns, and the static lane's
-  304. RFC 9110 8.6 forbids the header on a 204, and permits it on a 304 only
-  when it names the length of the 200's content, which a zero for a rendered
-  page never does. `endBodyless(res, status, declaredLength, headOnly)` in
-  `http-helpers.js` holds the rule: a 204 reports nothing, a 304 and a HEAD
-  only the length the Response declared (the header may name only the GET's
-  content length, which the Response carries when SvelteKit declared it for a
-  rendered page or an app answering HEAD itself set it), every other bodyless
-  response zero - a declared length with no bytes behind it would leave the
-  client waiting for them, which the SSR writer used to allow. Reported
-  without a length, uWS emits neither `Content-Length` nor
-  `Transfer-Encoding` and still completes the exchange, which the same suite
-  proves by pipelining a request behind each 204 and 304, the built
-  runtime's admin lane 204 included.
+  304. RFC 9110 8.6 forbids the header on a 204, and permits it on a 304
+  only when it names the length of the 200's content, which a zero for a
+  rendered page never does.
+  `endBodyless(res, status, declaredLength, headOnly)` in `http-helpers.js`
+  holds the rule: a 204 reports nothing, a
+  304 and a HEAD only the length the Response declared (the header may name
+  only the GET's content length, which the Response carries when SvelteKit
+  declared it for a rendered page or an app answering HEAD itself set it),
+  every other bodyless response zero - a declared length with no bytes
+  behind it would leave the client waiting for them, which the SSR writer
+  used to allow. Reported without a length, uWS emits neither
+  `Content-Length` nor `Transfer-Encoding` and still completes the exchange,
+  which the same suite proves by pipelining a request behind each 204 and
+  304, the built runtime's admin lane 204 included.
 - **The error reference links the extensions repository's errors document
   where it ships.** `svelte-adapter-uws-extensions` carries it at
   `docs/errors.md`, the path `svelte-realtime` uses too, and `docs/errors.md`

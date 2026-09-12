@@ -529,9 +529,15 @@ export const FIXTURE_VARIANTS = {
 	// zero-config defaults, because the default page IS the surface under
 	// test. Its rest, update, and failure states are browser-rendered
 	// behavior no string-level test can observe.
+	//
+	// Not e2e-only any more: its live-connection ceiling is the one gate a
+	// raw-socket suite can genuinely FILL, which is what the request-framing
+	// ordering needs - a refusal written while the gate is shut keeps its
+	// connection, so a framing answer has to come before it. Building it here
+	// rather than lazily inside a worker keeps that build on the serial path
+	// ahead of the workers instead of under the shared lock.
 	waitingdefault: {
 		out: 'build-waiting-default',
-		e2eOnly: true,
 		handler: null,
 		websocket: {
 			allowedOrigins: '*',

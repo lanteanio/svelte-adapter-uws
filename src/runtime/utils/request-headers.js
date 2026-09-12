@@ -74,6 +74,71 @@ const SINGLE_VALUED = new Set([
 ]);
 
 /**
+ * The only Transfer-Encoding a request may carry. RFC 9112 6.1: chunked must
+ * be applied at most once and must be the final encoding, so `chunked` alone
+ * is the only spelling with one meaning; `chunked, chunked`, `gzip, chunked`
+ * and `chunked, gzip` are all refusals, and so is a coding this server cannot
+ * decode on its own (`gzip`, `xchunked`).
+ *
+ * This matters more than conformance. The vendored parser reads the PRESENCE
+ * of the header, not its value: every spelling above is decoded as chunked
+ * here, while a conformant intermediary in front reads `xchunked` as a coding
+ * it does not know and the request as bodyless. The two then disagree about
+ * where the request ends, which is what a smuggled request is made of.
+ */
+const CHUNKED = 'chunked';
+
+/** A Content-Length is a bare decimal count, and never empty. */
+const DIGITS = /^[0-9]+$/;
+
+/**
+ * Does this request frame its body two ways at once? Returns the header to
+ * name in the refusal, or null when the framing has one reading.
+ *
+ * `undefined` is an ABSENT header and the empty string is one sent with
+ * nothing after the colon. The two are not the same answer: an empty
+ * Transfer-Encoding names no coding at all, which this server still reads as
+ * chunked and a conformant reader in front cannot read as anything, and an
+ * empty Content-Length is a body length that does not say how long. Values
+ * arrive trimmed of surrounding whitespace by the parser.
+ *
+ * Asked two ways. Every lane that builds a header set asks it of the whole
+ * set, where an empty value and a repeat are both visible for free. The
+ * request edge asks it of ONE lookup, `transfer-encoding`, ahead of the lanes
+ * that answer without building a set - see `handleRequest` for what that
+ * covers and what it cannot.
+ *
+ * @param {string | undefined} transferEncoding
+ * @param {string | undefined} contentLength
+ * @returns {'transfer-encoding' | 'content-length' | null}
+ */
+export function framingRefusal(transferEncoding, contentLength) {
+	if (transferEncoding !== undefined) {
+		if (transferEncoding.toLowerCase() !== CHUNKED) return 'transfer-encoding';
+		// Both headers, each naming a different end to the same body. RFC 9112
+		// 6.3 says the chunked framing wins and that the message may be a
+		// smuggling attempt; the vendored parser answers this one before any of
+		// this runs, so the rule is here to own it rather than to rely on that
+		// staying true.
+		if (contentLength !== undefined) return 'transfer-encoding';
+	}
+	if (contentLength !== undefined && !DIGITS.test(contentLength)) return 'content-length';
+	return null;
+}
+
+/**
+ * Is this the name of a header that says where the request body ends? A
+ * refusal naming one of these cannot be answered on a connection that stays
+ * open: the bytes after the response are whatever the sender's own reading of
+ * the framing put there.
+ *
+ * @param {string | null} header
+ */
+export function isFramingHeader(header) {
+	return header === 'content-length' || header === 'transfer-encoding';
+}
+
+/**
  * Headers this runtime, or the app in front of it, reads as ONE value, where
  * the last line is the one to keep.
  *
@@ -198,10 +263,10 @@ const hasOwn = Object.prototype.hasOwnProperty;
  * Callers must treat a non-null return as fatal for that request (400, or a
  * refused upgrade). Collection still completes - uWS offers no way to stop the
  * iteration - and it completes under the SAME policy it started with: a
- * refusal names the first offending header without changing what any other
- * header collects to. So a caller that ignores the return gets today's
- * behaviour for every class except the refused one, and the refused one keeps
- * its first line.
+ * refusal names ONE header - a framing one where the request has one, else the
+ * first offender - without changing what any other header collects to. So a
+ * caller that ignores the return gets today's behaviour for every class except
+ * the refused one, and the refused one keeps its first line.
  *
  * The common path costs one extra property READ per header line compared with a
  * bare assignment: a name seen for the first time reads `undefined` and is
@@ -215,12 +280,15 @@ const hasOwn = Object.prototype.hasOwnProperty;
  *
  * @param {import('uWebSockets.js').HttpRequest} req
  * @param {Record<string, string>} headers - filled in place
- * @returns {string | null} name of the first single-valued header that arrived
- *   more than once, or null when the request is unambiguous
+ * @returns {string | null} the header to name in a refusal - one that frames
+ *   the body two ways, or the first single-valued header that arrived more than
+ *   once - or null when the request has a single reading
  */
 export function collectRequestHeaders(req, headers) {
 	/** @type {string | null} */
 	let ambiguous = null;
+	/** @type {string | null} */
+	let framingRepeat = null;
 	req.forEach((key, value) => {
 		const previous = headers[key];
 		if (previous === undefined || !hasOwn.call(headers, key)) {
@@ -232,6 +300,13 @@ export function collectRequestHeaders(req, headers) {
 			// would make every later repeated header first-wins, which is neither
 			// the documented contract nor a policy anything asked for.
 			if (ambiguous === null) ambiguous = key;
+			// A repeated FRAMING header is remembered separately, because the two
+			// answers do different things for the caller and the first offender is
+			// whichever line the sender chose to put first. Two Origin lines say
+			// the request is ambiguous; two Content-Length lines say the sender
+			// and this server may not agree where it ENDS, and only that answer
+			// makes the caller close the connection.
+			if (framingRepeat === null && isFramingHeader(key)) framingRepeat = key;
 			return;
 		}
 		if (key === 'set-cookie') return;
@@ -243,5 +318,24 @@ export function collectRequestHeaders(req, headers) {
 			? previous + '; ' + value
 			: previous + ', ' + value;
 	});
+	// A framing answer comes FIRST, ahead of any other repeat the walk found.
+	// Both name a header the caller refuses, but only a framing one tells it the
+	// connection can no longer be read, and any other repeated single-valued
+	// header would otherwise mask it - two Origin lines in front of two
+	// Content-Length lines would answer `origin`, and the refusal would keep a
+	// connection whose remaining bytes are exactly what the two readings
+	// disagree about.
+	//
+	// Both dimensions, because they hide from each other: the VALUE question
+	// below reads the header the walk kept, which is the FIRST of a repeated
+	// pair, so a repeat whose first value is a usable one answers null there and
+	// is caught only by `framingRepeat`.
+	//
+	// Free here, where every header has just been read anyway, and reading the
+	// object keeps an absent header apart from one sent empty, which a header
+	// lookup cannot.
+	const framing = framingRefusal(headers['transfer-encoding'], headers['content-length']);
+	if (framing !== null) return framing;
+	if (framingRepeat !== null) return framingRepeat;
 	return ambiguous;
 }

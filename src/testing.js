@@ -1,6 +1,6 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
-import { collectRequestHeaders } from './runtime/utils/request-headers.js';
+import { collectRequestHeaders, framingRefusal, isFramingHeader } from './runtime/utils/request-headers.js';
 import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
@@ -36,6 +36,33 @@ import { runtimeVersionInfo } from './runtime/version-info.js';
 import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './runtime/diagnostic.js';
 import { createDivergenceDiagnosticStore } from './runtime/divergence-diagnostics.js';
+
+/**
+ * The production runtime refuses a request whose Transfer-Encoding names
+ * anything but chunked, in front of every route, and ends the connection with
+ * the 400. This harness answers the same way on the routes it mirrors, because
+ * an app that verifies its own handling against this server must not be shown
+ * a request the real one would never have delivered.
+ *
+ * One lookup, the same one production can afford; the doors here that build a
+ * whole header set ask the whole rule of it, as they do there.
+ *
+ * @param {(res: any, req: any) => void} handler
+ */
+const guardFramingMirror = (handler) => (res, req) => {
+	if (framingRefusal(req.getHeader('transfer-encoding') || undefined, undefined) !== null) {
+		const headOnly = req.getMethod() === 'head';
+		res.cork(() => {
+			res.writeStatus('400 Bad Request');
+			res.writeHeader('content-type', 'text/plain');
+			// uWS writes `connection: close` itself for the flag below.
+			if (headOnly) res.endWithoutBody('Bad Request'.length, true);
+			else res.end('Bad Request', true);
+		});
+		return;
+	}
+	handler(res, req);
+};
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -2472,6 +2499,20 @@ export async function createTestServer(options = {}) {
 		sendPingsAutomatically: true,
 
 		upgrade(res, req, context) {
+			// Ahead of every capacity answer below, as production does it: the
+			// handshake takes an options object rather than a handler, so the
+			// route wrapper never sees it, and the capacity refusals keep their
+			// connections.
+			if (framingRefusal(req.getHeader('transfer-encoding') || undefined, undefined) !== null) {
+				mUpgradeRejectedT?.inc({ reason: 'ambiguous_framing' });
+				res.cork(() => {
+					res.writeStatus('400 Bad Request');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Bad Request', true);
+				});
+				return;
+			}
+
 			// Cursor-only upgrade lane (the worker's second WebSocket).
 			// Mirrors the production handler: route through the reserved
 			// cursor sub-budget only when a lane is configured.
@@ -2612,12 +2653,16 @@ export async function createTestServer(options = {}) {
 			// mirror must not see an ambiguity the real server rejects.
 			/** @type {Record<string, string>} */
 			const headers = {};
-			if (collectRequestHeaders(req, headers) !== null) {
-				mUpgradeRejectedT?.inc({ reason: 'duplicate_header' });
+			const ambiguousUpgradeHeader = collectRequestHeaders(req, headers);
+			if (ambiguousUpgradeHeader !== null) {
+				const framingUpgrade = isFramingHeader(ambiguousUpgradeHeader);
+				// A literal per branch; see the production door for why.
+				if (framingUpgrade) mUpgradeRejectedT?.inc({ reason: 'ambiguous_framing' });
+				else mUpgradeRejectedT?.inc({ reason: 'duplicate_header' });
 				res.cork(() => {
 					res.writeStatus('400 Bad Request');
 					res.writeHeader('content-type', 'text/plain');
-					res.end('Bad Request');
+					res.end('Bad Request', framingUpgrade);
 				});
 				releaseInFlight();
 				return;
@@ -3518,7 +3563,7 @@ export async function createTestServer(options = {}) {
 				? WAITING_ROOM.jitteredRetryAfter(spread)
 				: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
 		};
-		app.get(wsPath, (res, req) => {
+		app.get(wsPath, guardFramingMirror((res, req) => {
 			res.onAborted(() => {});
 			const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
 			if (!atCapacity) {
@@ -3553,7 +3598,7 @@ export async function createTestServer(options = {}) {
 				res.writeHeader('retry-after', String(retryAfter));
 				res.end('Server is at upgrade capacity, please retry');
 			});
-		});
+		}));
 	}
 
 	// Waiting-room poll + holding page. Mirrors the production handler routes:
@@ -3565,7 +3610,7 @@ export async function createTestServer(options = {}) {
 		const pollCounter = createPollCounter(WAITING_ROOM.pollIntervalMs);
 		const currentQueueDepth = () => pollCounter.depth(now());
 
-		app.get(WAITING_ROOM.admitCheckPath, (res) => {
+		app.get(WAITING_ROOM.admitCheckPath, guardFramingMirror((res) => {
 			res.onAborted(() => {});
 			pollCounter.record(now());
 			// Siege always reports busy, even with free slots; normal/elevated
@@ -3594,16 +3639,16 @@ export async function createTestServer(options = {}) {
 					',"pollAfterMs":' + pollAfterMs + '}'
 				);
 			});
-		});
+		}));
 
-		app.get(WAITING_ROOM.path, (res, req) => {
+		app.get(WAITING_ROOM.path, guardFramingMirror((res, req) => {
 			res.onAborted(() => {});
 			const page = WAITING_ROOM.renderResponse(
 				currentQueueDepth(),
 				createWaitingRoomRequest(req)
 			);
 			sendWaitingRoomPage(res, page);
-		});
+		}));
 	}
 
 	// Reserved admin / observability route, mirroring handler.js: when the app's
@@ -3613,7 +3658,7 @@ export async function createTestServer(options = {}) {
 	// mirror buffers the request body fully before constructing the Request
 	// (production streams it); both deliver the same Request to the handler.
 	if (adminPath !== false && typeof handler.admin === 'function') {
-		app.any(adminPath + '/*', (res, req) => {
+		app.any(adminPath + '/*', guardFramingMirror((res, req) => {
 			const method = req.getMethod().toUpperCase();
 			const pathname = req.getUrl();
 			const query = req.getQuery();
@@ -3637,19 +3682,19 @@ export async function createTestServer(options = {}) {
 			let adminAborted = false;
 			res.onAborted(() => { adminAborted = true; });
 
-			const failAdmin = (status) => {
+			const failAdmin = (status, closeConnection = false) => {
 				if (adminAborted) return;
 				res.cork(() => {
 					res.writeStatus(String(status));
 					res.writeHeader('content-type', 'application/json');
 					res.writeHeader('cache-control', 'no-store');
 					res.writeHeader('x-content-type-options', 'nosniff');
-					endText(res, status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}', headOnly);
+					endText(res, status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}', headOnly, closeConnection);
 				});
 			};
 
 			if (ambiguousAdminHeader !== null) {
-				failAdmin(400);
+				failAdmin(400, isFramingHeader(ambiguousAdminHeader));
 				return;
 			}
 
@@ -3717,7 +3762,7 @@ export async function createTestServer(options = {}) {
 				adminChunks.push(Buffer.from(new Uint8Array(chunk)));
 				if (isLast) runAdmin(adminChunks.length ? Buffer.concat(adminChunks) : undefined);
 			});
-		});
+		}));
 	}
 
 	// Liveness route, mirroring handler.js: always 200 while the process is up,
@@ -3735,8 +3780,8 @@ export async function createTestServer(options = {}) {
 				else res.end('OK');
 			});
 		};
-		app.get(healthCheckPath, liveness);
-		app.head(healthCheckPath, liveness);
+		app.get(healthCheckPath, guardFramingMirror(liveness));
+		app.head(healthCheckPath, guardFramingMirror(liveness));
 	}
 
 	// Readiness route, mirroring handler.js: 200 'ready' in the one ready state,
@@ -3761,8 +3806,8 @@ export async function createTestServer(options = {}) {
 				});
 			}
 		};
-		app.get(readinessCheckPath, readiness);
-		app.head(readinessCheckPath, readiness);
+		app.get(readinessCheckPath, guardFramingMirror(readiness));
+		app.head(readinessCheckPath, guardFramingMirror(readiness));
 	}
 
 	return new Promise((resolve, reject) => {

@@ -125,7 +125,7 @@ export interface TestServerOptions {
 	 * `metrics` option at the upgrade branches this harness mirrors:
 	 * `upgrade_admitted_total` and `upgrade_rejected_total` with reasons
 	 * `siege`, `over_capacity`, `connection_capacity`, `cursor_lane`, `auth_rejected`,
-	 * `hook_error`, `duplicate_header` and `deferred_overflow`, plus the
+	 * `hook_error`, `duplicate_header`, `ambiguous_framing` and `deferred_overflow`, plus the
 	 * pacing-queue trio `upgrade_deferred_depth`,
 	 * `upgrade_deferred_oldest_age_seconds` (event-driven here) and
 	 * `upgrade_deferred_rejected_total`. When `maxConnections` is enabled,

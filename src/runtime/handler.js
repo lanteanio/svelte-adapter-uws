@@ -60,7 +60,7 @@ import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSub
 import { startPostureExport } from './utils/posture-export.js';
 import { hasMultipleWorkers } from './handler/cluster-sequence-policy.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
-import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
+import { collectRequestHeaders, declareSingleValuedProxyHeaders, framingRefusal, isFramingHeader } from './utils/request-headers.js';
 import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './utils/message-admission.js';
 import { createConnectionPermitCarrier } from './utils/connection-permit.js';
@@ -219,7 +219,40 @@ import { registerRoute } from './handler/route-registry.js';
 // force-closes anything it cannot route, so an unrecorded route would vanish
 // for every SNI-matched connection after the first cert renewal.
 let transportMetricHooks = null;
+
+/**
+ * Refuse a request whose Transfer-Encoding names anything but chunked, before
+ * the handler behind it runs.
+ *
+ * Wrapped around every HTTP route rather than written into one of them: the
+ * lanes that answer before acting on a header set - a built asset, a
+ * prerendered page, the health and readiness probes, the waiting room's pages,
+ * the non-upgrade answer on the WebSocket path - would each have to remember,
+ * and the one that forgot would be the one a fronting proxy polls. What the
+ * refusal protects is the CONNECTION, so it does not matter which lane would
+ * have answered.
+ *
+ * One lookup, which is what it can afford: see `handleRequest` for the reach
+ * that buys and what it cannot see, and bench/39-request-framing-guard-ab.mjs
+ * for what the alternatives cost. Every lane that goes on to build a header set
+ * asks the whole rule of it there, and sees the rest.
+ *
+ * @param {(res: any, req: any) => void} handler
+ */
+const guardFraming = (handler) => (res, req) => {
+	if (framingRefusal(req.getHeader('transfer-encoding') || undefined, undefined) !== null) {
+		send400(res, req.getMethod() === 'head', true);
+		return;
+	}
+	handler(res, req);
+};
+
 const route = (method, ...args) => {
+	// Ahead of the metric wrapper, so a refusal is counted like any other
+	// answer rather than vanishing from the request totals.
+	if (method !== 'ws' && typeof args[args.length - 1] === 'function') {
+		args[args.length - 1] = guardFraming(args[args.length - 1]);
+	}
 	if (transportMetricHooks !== null) {
 		const last = args.length - 1;
 		if (method === 'ws' && args[last] !== null && typeof args[last] === 'object') {
@@ -1370,8 +1403,9 @@ if (WS_ENABLED) {
 			// neither can be given one of two possible readings.
 			/** @type {Record<string, string>} */
 			const authHeaders = {};
-			if (collectRequestHeaders(req, authHeaders) !== null) {
-				send400(res);
+			const ambiguousAuthHeader = collectRequestHeaders(req, authHeaders);
+			if (ambiguousAuthHeader !== null) {
+				send400(res, false, isFramingHeader(ambiguousAuthHeader));
 				return;
 			}
 			const method = 'POST';
@@ -1414,9 +1448,10 @@ if (WS_ENABLED) {
 			// `get_origin` derives the base origin from the Host (and the
 			// configured PROTOCOL / HOST / PORT headers) when ORIGIN is unset -
 			// the zero-config default. It THROWS on a value it cannot make an
-			// origin out of, and nothing wraps this route: an unguarded throw
-			// escapes the uWS callback as a synchronous exception, so no response
-			// is ever written and the request hangs until the client gives up.
+			// origin out of, and nothing that wraps this route answers in its
+			// place: an unguarded throw escapes the uWS callback as a synchronous
+			// exception, so no response is ever written and the request hangs
+			// until the client gives up.
 			// The reachable trigger is a client-supplied PROTOCOL_HEADER /
 			// PORT_HEADER value on a deployment configured for one; a Host-less
 			// request cannot reach here, because uWS answers that itself.
@@ -1645,6 +1680,22 @@ if (WS_ENABLED) {
 	route('ws', WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
+			// AHEAD of every capacity answer below. The handshake does not go
+			// through the route wrapper - uWS takes an options object here, not
+			// a handler - and a refusal written by the siege, over-capacity or
+			// connection-capacity paths keeps its connection, so an ambiguous
+			// handshake arriving while the gate is full would be answered 503
+			// on a connection whose remaining bytes are the ones in dispute.
+			//
+			// One lookup, the same one every route pays; the whole rule is
+			// asked further down, where the header set is built.
+			if (framingRefusal(req.getHeader('transfer-encoding') || undefined, undefined) !== null) {
+				mUpgradeRejected?.inc({ reason: 'ambiguous_framing' });
+				traceUpgradeRejection(req, undefined, 'ambiguous_framing');
+				send400(res, false, true);
+				return;
+			}
+
 			// Cursor-only upgrade lane (the worker's second WebSocket). Read the
 			// requested subprotocol and route the upgrade through the reserved
 			// cursor sub-budget only when a lane is configured; an unconfigured
@@ -1813,10 +1864,25 @@ if (WS_ENABLED) {
 			// in-flight slot acquired above is handed back on the way out.
 			/** @type {Record<string, string>} */
 			const headers = {};
-			if (collectRequestHeaders(req, headers) !== null) {
-				mUpgradeRejected?.inc({ reason: 'duplicate_header' });
-				traceUpgradeRejection(req, null, 'duplicate_header');
-				send400(res);
+			const ambiguousUpgradeHeader = collectRequestHeaders(req, headers);
+			if (ambiguousUpgradeHeader !== null) {
+				// Two ways to arrive: the same header twice, or one header whose
+				// value frames the body two ways. A handshake carries no body at
+				// all, so the second says the sender and this server disagree
+				// about where the request even ends, and the connection is not
+				// one to keep reading.
+				// A literal per branch, not one variable read twice: the label
+				// contract is checked by reading these call sites, and a name it
+				// cannot fold to a string leaves this door unchecked.
+				if (isFramingHeader(ambiguousUpgradeHeader)) {
+					mUpgradeRejected?.inc({ reason: 'ambiguous_framing' });
+					traceUpgradeRejection(req, null, 'ambiguous_framing');
+					send400(res, false, true);
+				} else {
+					mUpgradeRejected?.inc({ reason: 'duplicate_header' });
+					traceUpgradeRejection(req, null, 'duplicate_header');
+					send400(res, false, false);
+				}
 				releaseInFlight();
 				return;
 			}

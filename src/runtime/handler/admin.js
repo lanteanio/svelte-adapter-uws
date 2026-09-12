@@ -1,7 +1,7 @@
 import { origin, get_origin, body_size_limit, ADMIN_PATH } from './config.js';
 import { METHODS, FORBIDDEN_METHODS, send405, endBodyless } from './http-helpers.js';
 import { readBody } from './ssr.js';
-import { collectRequestHeaders } from '../utils/request-headers.js';
+import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
@@ -57,16 +57,19 @@ function runAdminHandler(request, res, state, span, headOnly) {
  * @param {number} status
  * @param {string} message
  * @param {boolean} [headOnly]
+ * @param {boolean} [closeConnection] for a refusal that leaves the
+ *   connection's remaining bytes untrustworthy
  */
-function sendAdminError(res, status, message, headOnly = false) {
+function sendAdminError(res, status, message, headOnly = false, closeConnection = false) {
 	const body = JSON.stringify({ error: message });
 	res.cork(() => {
 		res.writeStatus(String(status));
 		res.writeHeader('content-type', 'application/json');
 		res.writeHeader('cache-control', 'no-store');
 		res.writeHeader('x-content-type-options', 'nosniff');
-		if (headOnly) res.endWithoutBody(Buffer.byteLength(body));
-		else res.end(body);
+		// uWS writes `connection: close` itself for the flag below.
+		if (headOnly) res.endWithoutBody(Buffer.byteLength(body), closeConnection);
+		else res.end(body, closeConnection);
 	});
 }
 
@@ -169,8 +172,9 @@ export function handleAdminRequest(res, req) {
 	// than handed on as whichever line happened to arrive last.
 	/** @type {Record<string, string>} */
 	const headers = {};
-	if (collectRequestHeaders(req, headers) !== null) {
-		sendAdminError(res, 400, 'bad request', headOnly);
+	const ambiguousHeader = collectRequestHeaders(req, headers);
+	if (ambiguousHeader !== null) {
+		sendAdminError(res, 400, 'bad request', headOnly, isFramingHeader(ambiguousHeader));
 		return;
 	}
 

@@ -35,10 +35,12 @@ const ALLOW_HEADER = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {string} text ASCII, so its length is its byte length
  * @param {boolean} headOnly
+ * @param {boolean} [closeConnection] end the TCP connection with the response,
+ *   for a refusal that leaves the connection's remaining bytes untrustworthy
  */
-export function endText(res, text, headOnly) {
-	if (headOnly) res.endWithoutBody(text.length);
-	else res.end(text);
+export function endText(res, text, headOnly, closeConnection = false) {
+	if (headOnly) res.endWithoutBody(text.length, closeConnection);
+	else res.end(text, closeConnection);
 }
 
 /**
@@ -57,12 +59,16 @@ export function send405(res, headOnly = false) {
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {boolean} [headOnly]
+ * @param {boolean} [closeConnection] see `endText`
  */
-export function send400(res, headOnly = false) {
+export function send400(res, headOnly = false, closeConnection = false) {
 	res.cork(() => {
 		res.writeStatus('400 Bad Request');
 		res.writeHeader('content-type', 'text/plain');
-		endText(res, 'Bad Request', headOnly);
+		// No `connection: close` written here: uWS emits the field itself for a
+		// response finished with its close flag, and writing one too puts it on
+		// the wire twice.
+		endText(res, 'Bad Request', headOnly, closeConnection);
 	});
 }
 

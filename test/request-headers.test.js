@@ -155,16 +155,87 @@ describe('collectRequestHeaders refuses an ambiguous single-valued header', () =
 		'origin'
 	];
 
+	// The two framing names carry a value the VALUE rule accepts, so the repeat
+	// is the only thing left that can answer for them. Give them `first` and
+	// `second` like the rest and they are refused for naming an unreadable
+	// coding and a length that is not a count, and the repeat tracking could be
+	// deleted without either case noticing.
+	const REPEATABLE = { 'content-length': ['1', '2'], 'transfer-encoding': ['chunked', 'chunked'] };
 	for (const name of REFUSED) {
 		it(`reports a repeated ${name}`, () => {
-			const { ambiguous } = collect([[name, 'first'], [name, 'second']]);
+			const [first, second] = REPEATABLE[name] || ['first', 'second'];
+			const { ambiguous } = collect([[name, first], [name, second]]);
 			expect(ambiguous).toBe(name);
 		});
 	}
 
 	it('accepts every one of them when it arrives once', () => {
-		const { ambiguous } = collect(REFUSED.map((name) => /** @type {[string, string]} */ ([name, 'only'])));
-		expect(ambiguous).toBe(null);
+		// Two things this case cannot do any more, both of them rules rather
+		// than accidents: a framing header carries a usable value, because one
+		// naming a coding this server cannot read is refused unrepeated; and
+		// the two framing headers never appear together, because a request
+		// carrying both frames its body twice and is refused for that alone.
+		// Each of those is its own case below. So the identity headers are
+		// walked together, and each framing header joins them on its own.
+		const IDENTITY = REFUSED.filter((name) => name !== 'content-length' && name !== 'transfer-encoding');
+		const pairs = (extra) => /** @type {[string, string][]} */ (
+			IDENTITY.map((name) => [name, 'only']).concat(extra)
+		);
+		expect(collect(pairs([])).ambiguous).toBe(null);
+		expect(collect(pairs([['content-length', '0']])).ambiguous).toBe(null);
+		expect(collect(pairs([['transfer-encoding', 'chunked']])).ambiguous).toBe(null);
+	});
+
+	describe('a header that frames the body, arriving once', () => {
+		// The walk cannot see these - nothing is repeated - so they are the rule
+		// asked of the finished header set, and the caller reads the same answer
+		// it reads for a repeat: a framing header it must refuse.
+		it('refuses a Transfer-Encoding naming anything but chunked', () => {
+			for (const value of ['xchunked', 'chunkedX', 'gzip', 'chunked, chunked', 'gzip, chunked', 'chunked, gzip', '']) {
+				const { ambiguous } = collect([['transfer-encoding', value]]);
+				expect(ambiguous, JSON.stringify(value)).toBe('transfer-encoding');
+			}
+		});
+
+		it('accepts chunked in any capitalisation', () => {
+			for (const value of ['chunked', 'Chunked', 'CHUNKED']) {
+				const { ambiguous } = collect([['transfer-encoding', value]]);
+				expect(ambiguous, JSON.stringify(value)).toBe(null);
+			}
+		});
+
+		it('refuses a Content-Length that is not a bare count', () => {
+			for (const value of ['', ' ', '12abc', '0x6', '+6', '-1', '1.5']) {
+				const { ambiguous } = collect([['content-length', value]]);
+				expect(ambiguous, JSON.stringify(value)).toBe('content-length');
+			}
+		});
+
+		it('accepts a count, leading zeros and all', () => {
+			for (const value of ['0', '2', '000002', '9007199254740993']) {
+				const { ambiguous } = collect([['content-length', value]]);
+				expect(ambiguous, JSON.stringify(value)).toBe(null);
+			}
+		});
+
+		it('refuses a request that carries both framing headers', () => {
+			const { ambiguous } = collect([['transfer-encoding', 'chunked'], ['content-length', '2']]);
+			expect(ambiguous).toBe('transfer-encoding');
+		});
+
+		it('answers the framing header even when another single-valued one repeats', () => {
+			// The ordering that decides whether the caller closes the connection.
+			// Two Authorization lines are refused too, but on their own they
+			// leave the connection readable; the unusable Transfer-Encoding does
+			// not, and naming the Authorization instead would keep a connection
+			// whose remaining bytes are the ones in dispute.
+			const { ambiguous } = collect([
+				['authorization', 'Bearer one'],
+				['authorization', 'Bearer two'],
+				['transfer-encoding', 'xchunked']
+			]);
+			expect(ambiguous).toBe('transfer-encoding');
+		});
 	});
 
 	it('names the first offender and still finishes the walk', () => {
@@ -174,13 +245,45 @@ describe('collectRequestHeaders refuses an ambiguous single-valued header', () =
 		const { headers, ambiguous } = collect([
 			['host', 'a.test'],
 			['host', 'b.test'],
-			['content-length', '1'],
-			['content-length', '2'],
+			['origin', 'https://a.test'],
+			['origin', 'https://b.test'],
 			['accept', 'text/html']
 		]);
 		expect(ambiguous).toBe('host');
 		expect(headers.accept).toBe('text/html');
 		expect(headers.host).toBe('a.test');
+	});
+
+	it('names a repeated framing header ahead of any other repeat', () => {
+		// Which name comes back decides whether the caller keeps the connection,
+		// and the first offender is whichever line the SENDER put first. Two
+		// Host lines make the request ambiguous; two Content-Length lines say
+		// the sender and this server may disagree about where the request ENDS,
+		// so the bytes after the response are not ones to keep reading.
+		//
+		// The value question cannot answer this one: the walk keeps the FIRST
+		// value of a repeated header, and `1` is a perfectly good count, so
+		// reading the collected object finds nothing wrong.
+		const { headers, ambiguous } = collect([
+			['host', 'a.test'],
+			['host', 'b.test'],
+			['content-length', '1'],
+			['content-length', '2'],
+			['accept', 'text/html']
+		]);
+		expect(ambiguous).toBe('content-length');
+		expect(headers.accept, 'the walk still finishes').toBe('text/html');
+		expect(headers['content-length'], 'and still keeps the first value').toBe('1');
+	});
+
+	it('names a repeated Transfer-Encoding the same way', () => {
+		const { ambiguous } = collect([
+			['origin', 'https://a.test'],
+			['origin', 'https://b.test'],
+			['transfer-encoding', 'chunked'],
+			['transfer-encoding', 'chunked']
+		]);
+		expect(ambiguous).toBe('transfer-encoding');
 	});
 
 	it('keeps merging every other class after an offender is seen', () => {

@@ -1029,14 +1029,19 @@ export interface WebSocketOptions {
 	 *   duration (histogram with explicit fractional-second buckets).
 	 * - `upgrade_admitted_total` - upgrades accepted (counter).
 	 * - `upgrade_rejected_total{reason}` - upgrades rejected before open
-	 *   (counter). Reasons, in the order the upgrade path can reach them:
-	 *   `siege`, `over_capacity`, `cursor_lane`, `connection_capacity`,
-	 *   `duplicate_header` (a
-	 *   repeated `Host` / `Origin` / `Authorization` / framing header, which
-	 *   cannot be given one reading), `ip_rate_limit`, `bad_origin`,
-	 *   `deferred_overflow`,
-	 *   `auth_timeout`, `auth_rejected`, `hook_error`. One more reason,
-	 *   `auth_rate_limit`, is emitted on the `connect({ auth: true })`
+	 *   (counter). Reasons, roughly in the order the upgrade path can reach
+	 *   them. `ambiguous_framing` comes first of all when the handshake's own
+	 *   `Transfer-Encoding` names anything but chunked: a request whose end
+	 *   this server and the one in front of it read differently is refused
+	 *   before capacity is consulted, and the connection is closed with it.
+	 *   Then `siege`, `over_capacity`, `cursor_lane`, `connection_capacity`,
+	 *   and then one step that answers either `duplicate_header` - a repeated
+	 *   `Host`, `Origin`, `Authorization`, `Proxy-Authorization` or
+	 *   `Content-Type`, which cannot be given one reading - or
+	 *   `ambiguous_framing` again, for a framing header sent empty or sent
+	 *   twice, which only the whole header set shows. Then `ip_rate_limit`,
+	 *   `bad_origin`, `deferred_overflow`, `auth_timeout`, `auth_rejected`,
+	 *   `hook_error`. One more reason, `auth_rate_limit`, is emitted on the `connect({ auth: true })`
 	 *   preflight POST rather than on an upgrade - it shares this counter
 	 *   because it refuses the same client at the door in front of the
 	 *   handshake. That preflight also refuses a repeated framing header

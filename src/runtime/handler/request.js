@@ -1,6 +1,6 @@
 import { counters, staticCache } from './state.js';
 import { METHODS, FORBIDDEN_METHODS, send400, send405 } from './http-helpers.js';
-import { collectRequestHeaders } from '../utils/request-headers.js';
+import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
 import { acquireState, releaseState } from './state-pool.js';
 import { resolveTransportAddress, ADMIN_PATH } from './config.js';
 import { serveStatic, tryPrerendered } from './static-assets.js';
@@ -45,6 +45,22 @@ export function handleRequest(res, req) {
 	// uWS returns lowercase method; we use lowercase comparisons on the fast path
 	// and only the METHODS lookup for SSR where the Request constructor expects it.
 	const method = req.getMethod();
+
+	// A Transfer-Encoding naming anything but chunked was already refused for
+	// every route, this one included, by the wrapper the registrations go
+	// through. What that ONE lookup cannot see is a framing header sent EMPTY
+	// or sent TWICE: a lookup answers the empty string for an absent header and
+	// for an empty one alike, and returns the first of a repeat. Both are
+	// refused where the whole header set is read, which the SSR lane below does
+	// and the static and prerendered answers between here and there do not.
+	//
+	// That line is priced in bench/39-request-framing-guard-ab.mjs against the
+	// built static lane: walking the header list - the only way to see an empty
+	// or repeated one - costs about 8% of that answer, where a lookup form
+	// costs at most a few percent and measured inside the control arm's own
+	// drift on the quietest host tried. Every asset request would pay the walk,
+	// forever.
+
 	const pathname = req.getUrl();
 
 	// === STATIC FILE FAST PATH ===
@@ -197,7 +213,10 @@ export function handleRequest(res, req) {
 	// of two possible meanings.
 	/** @type {Record<string, string>} */
 	const headers = {};
-	if (collectRequestHeaders(req, headers) !== null) return send400(res, METHOD === 'HEAD');
+	const ambiguousHeader = collectRequestHeaders(req, headers);
+	if (ambiguousHeader !== null) {
+		return send400(res, METHOD === 'HEAD', isFramingHeader(ambiguousHeader));
+	}
 
 	// Decode remote address eagerly - uWS may reuse the underlying buffer.
 	// `effective` applies the opt-in PROXY-protocol substitution; `direct` is
