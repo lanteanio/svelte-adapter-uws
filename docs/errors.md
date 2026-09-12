@@ -21,7 +21,7 @@ This is the adapter-owned part of the ecosystem index. The sibling packages
 generate and ship their own runtime-owned references on the same release channel:
 
 - [svelte-realtime errors](https://github.com/lanteanio/svelte-realtime/blob/dev/docs/errors.md)
-- [svelte-adapter-uws-extensions errors](https://github.com/lanteanio/svelte-adapter-uws-extensions/blob/dev/ERRORS.md)
+- [svelte-adapter-uws-extensions errors](https://github.com/lanteanio/svelte-adapter-uws-extensions/blob/dev/docs/errors.md)
 
 | Stable ID | Code or event | Searchable message prefix |
 |---|---|---|

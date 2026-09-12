@@ -34,7 +34,7 @@ const INFORMATIONAL_SEVERITIES = new Set(['debug', 'info', 'trace']);
 // --check here instead of silently shipping a dead link.
 const SIBLING_ERROR_DOCUMENTS = Object.freeze([
 	Object.freeze({ repo: 'svelte-realtime', label: 'svelte-realtime errors', documentPath: 'docs/errors.md' }),
-	Object.freeze({ repo: 'svelte-adapter-uws-extensions', label: 'svelte-adapter-uws-extensions errors', documentPath: 'ERRORS.md' })
+	Object.freeze({ repo: 'svelte-adapter-uws-extensions', label: 'svelte-adapter-uws-extensions errors', documentPath: 'docs/errors.md' })
 ]);
 const SIBLING_DOCUMENT_CANDIDATES = Object.freeze(['docs/errors.md', 'ERRORS.md']);
 
