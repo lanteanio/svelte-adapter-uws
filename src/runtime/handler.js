@@ -39,7 +39,7 @@ import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-di
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
-import { PayloadTooLargeError, METHODS, send400, send413, send500 } from './handler/http-helpers.js';
+import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless } from './handler/http-helpers.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
 import { batchRelay } from './handler/relay.js';
@@ -1512,16 +1512,20 @@ if (WS_ENABLED) {
 							for (const c of result.headers.getSetCookie()) res.writeHeader('set-cookie', c);
 							for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
 							if (buf) res.end(buf);
-							else res.end();
+							// Bodyless: what a 204 or 304 may say about its length is
+							// endBodyless's rule; `end()` would write a zero.
+							else endBodyless(res, result.status, result.headers.get('content-length'), false);
 						});
 						return;
 					}
 
-					// Implicit success: 204 No Content with any Set-Cookie headers
+					// Implicit success: 204 No Content with any Set-Cookie headers.
+					// No length reported: RFC 9110 8.6 forbids Content-Length on a
+					// 204, and uWS then writes neither framing header.
 					res.cork(() => {
 						res.writeStatus('204 No Content');
 						for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
-						res.endWithoutBody(0);
+						res.endWithoutBody();
 					});
 				})
 				.catch((err) => {
@@ -1559,12 +1563,14 @@ if (WS_ENABLED) {
 
 		// Reject non-POST verbs on the auth path so GET/HEAD do not fall through
 		// to the SSR catch-all (which would try to render a SvelteKit route).
-		route('any', authPath, (res) => {
+		// HEAD lands here too, and takes the headers without the payload.
+		route('any', authPath, (res, req) => {
+			const headOnly = req.getMethod() === 'head';
 			res.cork(() => {
 				res.writeStatus('405 Method Not Allowed');
 				res.writeHeader('allow', 'POST');
 				res.writeHeader('content-type', 'text/plain');
-				res.end('Method Not Allowed');
+				endText(res, 'Method Not Allowed', headOnly);
 			});
 		});
 

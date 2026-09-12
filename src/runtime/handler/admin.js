@@ -1,21 +1,21 @@
 import { origin, get_origin, body_size_limit, ADMIN_PATH } from './config.js';
-import { METHODS, FORBIDDEN_METHODS, send405 } from './http-helpers.js';
+import { METHODS, FORBIDDEN_METHODS, send405, endBodyless } from './http-helpers.js';
 import { readBody } from './ssr.js';
 import { collectRequestHeaders } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 
-function runAdminHandler(request, res, state, span) {
+function runAdminHandler(request, res, state, span, headOnly) {
 	return Promise.resolve()
 		.then(() => wsModule.admin(request))
 		.then((response) => {
 			if (state.aborted) return;
 			if (!(response instanceof Response)) {
-				sendAdminError(res, 500, 'internal error');
+				sendAdminError(res, 500, 'internal error', headOnly);
 				return;
 			}
-			return writeAdminResponse(res, response, state);
+			return writeAdminResponse(res, response, state, headOnly);
 		})
 		.catch((err) => {
 			try { span?.recordException?.(err); } catch {}
@@ -28,7 +28,7 @@ function runAdminHandler(request, res, state, span) {
 				message: 'The admin handler failed; the request was answered 500.',
 				attributes: { error: diagnosticError(err) }
 			});
-			if (!state.aborted) sendAdminError(res, 500, 'internal error');
+			if (!state.aborted) sendAdminError(res, 500, 'internal error', headOnly);
 		});
 }
 
@@ -50,17 +50,23 @@ function runAdminHandler(request, res, state, span) {
  * threw, or the request could not be constructed). The app handler owns all
  * application-level status codes; this only covers the plumbing failing.
  *
+ * A HEAD request gets the status and headers and no payload (see
+ * `endText` in http-helpers.js for why the bytes must not be written).
+ *
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {number} status
  * @param {string} message
+ * @param {boolean} [headOnly]
  */
-function sendAdminError(res, status, message) {
+function sendAdminError(res, status, message, headOnly = false) {
+	const body = JSON.stringify({ error: message });
 	res.cork(() => {
 		res.writeStatus(String(status));
 		res.writeHeader('content-type', 'application/json');
 		res.writeHeader('cache-control', 'no-store');
 		res.writeHeader('x-content-type-options', 'nosniff');
-		res.end(JSON.stringify({ error: message }));
+		if (headOnly) res.endWithoutBody(Buffer.byteLength(body));
+		else res.end(body);
 	});
 }
 
@@ -71,16 +77,21 @@ function sendAdminError(res, status, message) {
  * default `x-content-type-options: nosniff` is filled in when the handler did
  * not set one, matching the SSR response writer.
  *
+ * A HEAD request takes the handler's headers and the body's length, never its
+ * bytes. What a bodyless 204 or 304 says about its length is endBodyless's
+ * rule.
+ *
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
  * @param {{ aborted: boolean }} state
+ * @param {boolean} [headOnly]
  */
-async function writeAdminResponse(res, response, state) {
+async function writeAdminResponse(res, response, state, headOnly = false) {
 	let body = null;
 	try {
 		if (response.body) body = Buffer.from(await response.arrayBuffer());
 	} catch {
-		if (!state.aborted) sendAdminError(res, 500, 'internal error');
+		if (!state.aborted) sendAdminError(res, 500, 'internal error', headOnly);
 		return;
 	}
 	if (state.aborted) return;
@@ -98,8 +109,12 @@ async function writeAdminResponse(res, response, state) {
 		for (const cookie of response.headers.getSetCookie()) {
 			res.writeHeader('set-cookie', cookie);
 		}
-		if (body && body.byteLength) res.end(body);
-		else res.endWithoutBody(0);
+		if (body && body.byteLength) {
+			if (headOnly) res.endWithoutBody(body.byteLength);
+			else res.end(body);
+		} else {
+			endBodyless(res, response.status, response.headers.get('content-length'), headOnly);
+		}
 	});
 }
 
@@ -144,6 +159,9 @@ export function handleAdminRequest(res, req) {
 	const mapped = METHODS[method];
 	if (mapped === undefined && FORBIDDEN_METHODS.has(method)) return send405(res);
 	const METHOD = mapped || method.toUpperCase();
+	// uWS routes HEAD to this `any` mount like every other method; every write
+	// below takes this so the payload stays off the wire for it.
+	const headOnly = METHOD === 'HEAD';
 
 	// Repeated header lines are merged per header class. A repeated framing /
 	// identity header cannot be merged into one meaning, and the admin handler
@@ -152,7 +170,7 @@ export function handleAdminRequest(res, req) {
 	/** @type {Record<string, string>} */
 	const headers = {};
 	if (collectRequestHeaders(req, headers) !== null) {
-		sendAdminError(res, 400, 'bad request');
+		sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
 
@@ -171,7 +189,7 @@ export function handleAdminRequest(res, req) {
 	try {
 		base_origin = origin || get_origin(headers);
 	} catch {
-		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		if (!state.aborted) sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
 	const url = query ? `${pathname}?${query}` : pathname;
@@ -195,13 +213,13 @@ export function handleAdminRequest(res, req) {
 	try {
 		parsed = new URL(base_origin + url);
 	} catch {
-		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		if (!state.aborted) sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
 	if (ADMIN_PATH !== false &&
 		parsed.pathname !== ADMIN_PATH &&
 		!parsed.pathname.startsWith(ADMIN_PATH + '/')) {
-		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		if (!state.aborted) sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
 
@@ -234,7 +252,7 @@ export function handleAdminRequest(res, req) {
 			duplex: 'half'
 		});
 	} catch {
-		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		if (!state.aborted) sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
 
@@ -242,12 +260,12 @@ export function handleAdminRequest(res, req) {
 	// Resolve through Promise.resolve so a synchronous throw inside the app
 	// handler is caught here too, not just a rejected promise.
 	if (!tracingEnabled) {
-		void runAdminHandler(request, res, state, null);
+		void runAdminHandler(request, res, state, null, headOnly);
 		return;
 	}
 	traceOperation('adapter.http.admin', {
 		kind: 'server',
 		parent: extractTraceContext(headers),
 		attributes: { 'http.request.method': METHOD, 'http.route.type': 'admin' }
-	}, (span) => runAdminHandler(request, res, state, span));
+	}, (span) => runAdminHandler(request, res, state, span, headOnly));
 }

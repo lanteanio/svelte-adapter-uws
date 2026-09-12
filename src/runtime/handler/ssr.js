@@ -7,7 +7,7 @@ import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
-import { PayloadTooLargeError, send413, send500 } from './http-helpers.js';
+import { PayloadTooLargeError, send413, send500, endText, endBodyless } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { declaresBodyPastCap, isDedupBufferable, readBodyUpTo } from './ssr-dedup.js';
@@ -161,6 +161,7 @@ export function handleSSR(res, method, url, headers, remoteAddress, state, direc
 
 async function handleSSRTraced(res, method, url, headers, remoteAddress, state, directAddress, span) {
 	const requestId = resolveRequestId(headers['x-request-id']) || randomUuid();
+	const headOnly = method === 'HEAD';
 	try {
 		const base_origin = origin || get_origin(headers);
 
@@ -291,7 +292,8 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 							headers: shared.headers
 						}),
 						state,
-						respAcceptEncoding
+						respAcceptEncoding,
+						headOnly
 					);
 					return;
 				}
@@ -317,7 +319,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 					// leader's content to waiters that may legitimately differ.
 					if (response.headers.has('set-cookie') || !response.body) {
 						resolveShared(null);
-						await writeResponse(res, response, state, respAcceptEncoding);
+						await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 						return;
 					}
 					const varyHeader = response.headers.get('vary');
@@ -327,7 +329,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 						);
 						if (personalized) {
 							resolveShared(null);
-							await writeResponse(res, response, state, respAcceptEncoding);
+							await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 							return;
 						}
 					}
@@ -339,7 +341,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 					// render is buffered and shared below.
 					if (!isDedupBufferable(response)) {
 						resolveShared(null);
-						await writeResponse(res, response, state, respAcceptEncoding);
+						await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 						return;
 					}
 
@@ -352,7 +354,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 					// which is what the cap exists to prevent.
 					if (declaresBodyPastCap(response, MAX_SSR_DEDUP_BODY)) {
 						resolveShared(null);
-						await writeResponse(res, response, state, respAcceptEncoding);
+						await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 						return;
 					}
 					const read = await readBodyUpTo(response.body, MAX_SSR_DEDUP_BODY);
@@ -371,7 +373,8 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 								headers: response.headers
 							}),
 							state,
-							respAcceptEncoding
+							respAcceptEncoding,
+							headOnly
 						);
 						return;
 					}
@@ -392,7 +395,8 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 							headers: response.headers
 						}),
 						state,
-						respAcceptEncoding
+						respAcceptEncoding,
+						headOnly
 					);
 				} catch (err) {
 					resolveShared(null);
@@ -405,7 +409,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 		// Normal (non-dedup) path
 		const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
 		if (state.aborted) return;
-		await writeResponse(res, response, state, respAcceptEncoding);
+		await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
 		if (state.aborted && !state.closedByServer) return;
@@ -430,7 +434,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 		// response can be delivered: the streaming path has either ended or
 		// abruptly closed the exchange, and writing a 500 into it would be a
 		// second response. The event above is the failure's record.
-		if (!state.aborted && !state.responseStarted) send500(res, requestId);
+		if (!state.aborted && !state.responseStarted) send500(res, requestId, method === 'HEAD');
 	}
 }
 
@@ -479,19 +483,20 @@ function writeHeaders(res, response) {
  *   can no longer be sent, and `closedByServer` marks an abort this teardown
  *   inflicted on itself so the failure path can tell it from a client abort.
  * @param {string} [acceptEncoding]
+ * @param {boolean} [headOnly] the request was a HEAD: headers go out, the
+ *   body never does
  */
-async function writeResponse(res, response, state, acceptEncoding) {
-	// No body - write headers + end in a single cork (one syscall).
-	// For HEAD responses SvelteKit sets Content-Length to the full body size;
-	// pass it to endWithoutBody() so the client knows the entity size.
+async function writeResponse(res, response, state, acceptEncoding, headOnly = false) {
+	// No body - write headers + end in a single cork (one syscall). What the
+	// response may say about its length - and when a declared Content-Length
+	// counts - is endBodyless's rule.
 	if (!response.body) {
 		if (state.aborted) return;
 		const cl = response.headers.get('content-length');
 		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
-			if (cl) res.endWithoutBody(parseInt(cl, 10));
-			else res.endWithoutBody(0);
+			endBodyless(res, response.status, cl, headOnly);
 		});
 		return;
 	}
@@ -502,11 +507,34 @@ async function writeResponse(res, response, state, acceptEncoding) {
 		res.cork(() => {
 			res.writeStatus('500 Internal Server Error');
 			res.writeHeader('content-type', 'text/plain');
-			res.end(
+			endText(res,
 				'Fatal error: Response body is locked. ' +
-					"This can happen when the response was already read (for example through 'response.json()' or 'response.text()')."
-			);
+					"This can happen when the response was already read (for example through 'response.json()' or 'response.text()').",
+				headOnly);
 		});
+		return;
+	}
+
+	// HEAD: SvelteKit renders it as the GET - its endpoint lane routes HEAD to
+	// the GET handler and hands that Response back unchanged, and pages render
+	// in full - and leaves dropping the body to the server (adapter-node gets
+	// that from node:http, which uWS does not replicate). The body is never
+	// read; endBodyless reports a declared Content-Length or none. No encoding
+	// is negotiated for it either, a trade taken deliberately: the length
+	// named is the identity one and no Content-Encoding or Vary of the
+	// adapter's own accompanies it, so a HEAD sent with Accept-Encoding sees a
+	// consistent identity header set rather than the coded length the GET
+	// would carry (RFC 9110 9.3.2 lets a HEAD omit fields settled only while
+	// generating the content; the GET's coded length is one).
+	if (headOnly) {
+		if (state.aborted) return;
+		const cl = response.headers.get('content-length');
+		state.responseStarted = true;
+		res.cork(() => {
+			writeHeaders(res, response);
+			endBodyless(res, response.status, cl, true);
+		});
+		response.body.cancel().catch(() => {});
 		return;
 	}
 

@@ -23,26 +23,54 @@ export const FORBIDDEN_METHODS = new Set(['connect', 'trace', 'track']);
 // METHODS carries, which is what this adapter can actually deliver to a route.
 const ALLOW_HEADER = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
-export function send405(res) {
+/**
+ * Finish a generated response whose payload is a short ASCII text. A HEAD
+ * request gets the same status and headers and NO payload: uWS writes whatever
+ * `end()` is handed, and a client stops reading a HEAD response at the header
+ * terminator (RFC 9112 6.3), so payload bytes written after it sit in the
+ * connection buffer and are parsed as the start of the next response on a
+ * keep-alive connection. Content-Length still names the entity size, exactly as
+ * it does for the GET.
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {string} text ASCII, so its length is its byte length
+ * @param {boolean} headOnly
+ */
+export function endText(res, text, headOnly) {
+	if (headOnly) res.endWithoutBody(text.length);
+	else res.end(text);
+}
+
+/**
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {boolean} [headOnly]
+ */
+export function send405(res, headOnly = false) {
 	res.cork(() => {
 		res.writeStatus('405 Method Not Allowed');
 		res.writeHeader('allow', ALLOW_HEADER);
 		res.writeHeader('content-type', 'text/plain');
-		res.end('Method Not Allowed');
+		endText(res, 'Method Not Allowed', headOnly);
 	});
 }
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
-export function send400(res) {
+/**
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {boolean} [headOnly]
+ */
+export function send400(res, headOnly = false) {
 	res.cork(() => {
 		res.writeStatus('400 Bad Request');
 		res.writeHeader('content-type', 'text/plain');
-		res.end('Bad Request');
+		endText(res, 'Bad Request', headOnly);
 	});
 }
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
+/**
+ * No HEAD flag: a 413 answers a request body, which a HEAD never carries.
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ */
 export function send413(res) {
 	res.cork(() => {
 		res.writeStatus('413 Content Too Large');
@@ -52,14 +80,43 @@ export function send413(res) {
 }
 
 /**
+ * Finish a response that carries no content, choosing what to say about its
+ * length. A 204 never reports one: RFC 9110 8.6 forbids Content-Length there.
+ * A 304 reports one only when the app declared it, because the header is
+ * permitted on a 304 only when it names the length of the 200's content, and
+ * a zero on a 304 for a rendered page is never that. A HEAD is the same
+ * case: the header may only name the GET's content length, and the Response
+ * carries that only when whoever built it declared it - SvelteKit does for a
+ * rendered page, an app answering HEAD itself does by hand - so a HEAD
+ * reports the declared length or none. Every other bodyless response names zero, whatever
+ * it declared: a length with no bytes behind it would leave the client
+ * waiting for them. With no length reported uWS emits neither Content-Length
+ * nor Transfer-Encoding.
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {number} status
+ * @param {string | null | undefined} declaredLength the response's own
+ *   Content-Length header, when it carries one
+ * @param {boolean} headOnly the request was a HEAD
+ */
+export function endBodyless(res, status, declaredLength, headOnly) {
+	if (status === 204) res.endWithoutBody();
+	else if (status === 304 || headOnly) {
+		if (declaredLength) res.endWithoutBody(parseInt(declaredLength, 10));
+		else res.endWithoutBody();
+	} else res.endWithoutBody(0);
+}
+
+/**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {string} [requestId]
+ * @param {boolean} [headOnly]
  */
-export function send500(res, requestId) {
+export function send500(res, requestId, headOnly = false) {
 	res.cork(() => {
 		res.writeStatus('500 Internal Server Error');
 		res.writeHeader('content-type', 'text/plain');
 		if (requestId) res.writeHeader('x-request-id', requestId);
-		res.end('Internal Server Error');
+		endText(res, 'Internal Server Error', headOnly);
 	});
 }

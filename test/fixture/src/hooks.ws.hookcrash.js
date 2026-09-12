@@ -87,7 +87,15 @@ export function admin(request) {
 			headers: { 'content-type': 'application/json' }
 		});
 	}
-	return new Response(JSON.stringify({ ok: true, path: new URL(request.url).pathname }), {
+	const path = new URL(request.url).pathname;
+	// Bodyless answers, so the wire the admin writer produces for them is
+	// observable on a real build: a 204, and a 200 that declares a length it
+	// carries no bytes for (what a HEAD-answering handler does).
+	if (path.endsWith('/empty')) return new Response(null, { status: 204 });
+	if (path.endsWith('/declared')) {
+		return new Response(null, { status: 200, headers: { 'content-length': '12' } });
+	}
+	return new Response(JSON.stringify({ ok: true, path }), {
 		status: 200,
 		headers: { 'content-type': 'application/json' }
 	});

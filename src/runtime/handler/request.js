@@ -87,7 +87,7 @@ export function handleRequest(res, req) {
 	// short name (`~`), in the raw spelling and the decoded one - every lane
 	// below decodes before it opens anything.
 	if (WINDOWS && windowsReservedPath(pathname)) {
-		return send400(res);
+		return send400(res, method === 'head');
 	}
 
 	// Build full URL only for SSR - static files never reach here
@@ -149,7 +149,7 @@ export function handleRequest(res, req) {
 			// base, so a `//host` target resolves as a path and not as an
 			// authority.
 			const resolved = new URL(RESOLUTION_BASE + pathname).pathname;
-			if (resolved.startsWith(ADMIN_PREFIX)) return send400(res);
+			if (resolved.startsWith(ADMIN_PREFIX)) return send400(res, METHOD === 'HEAD');
 			// Decoded the STRONGER way, with `decodeURIComponent` rather than the
 			// router's gentler decode, because the two lanes below disagree: the
 			// prerendered lookup decodes this way, while SvelteKit's router
@@ -163,7 +163,7 @@ export function handleRequest(res, req) {
 			// read the same characters and answer for them there; the only
 			// decision made here is the prefix one.
 			if (resolved.includes('%') && decodeURIComponent(resolved).startsWith(ADMIN_PREFIX)) {
-				return send400(res);
+				return send400(res, METHOD === 'HEAD');
 			}
 		} catch { /* not a path this check can rule on */ }
 	}
@@ -197,7 +197,7 @@ export function handleRequest(res, req) {
 	// of two possible meanings.
 	/** @type {Record<string, string>} */
 	const headers = {};
-	if (collectRequestHeaders(req, headers) !== null) return send400(res);
+	if (collectRequestHeaders(req, headers) !== null) return send400(res, METHOD === 'HEAD');
 
 	// Decode remote address eagerly - uWS may reuse the underlying buffer.
 	// `effective` applies the opt-in PROXY-protocol substitution; `direct` is

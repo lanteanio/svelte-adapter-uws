@@ -80,10 +80,10 @@ describeUWS('production transport RED metrics', () => {
 		// A response with no body terminates through endWithoutBody: a static
 		// asset answered to HEAD, a bodyless SSR response, an empty admin
 		// reply. That path was once uninstrumented, which silently removed a
-		// whole class of ordinary traffic from the RED counters. The probe
-		// must be a STATIC asset: SvelteKit renders SSR pages for HEAD with a
-		// body, so an SSR HEAD terminates through the already-counted end()
-		// and cannot prove this patch. The fixture registry aggregates labels
+		// whole class of ordinary traffic from the RED counters. The probe is
+		// a STATIC asset, the lane whose HEAD has always ended through
+		// endWithoutBody; the SSR writer ends a HEAD that way too now, so it
+		// would serve as well. The fixture registry aggregates labels
 		// away, so this is a delta assertion: the before-scrape completes
 		// (+1) and the static HEAD must count too (+1); with endWithoutBody
 		// uninstrumented the delta stays at +1 and this goes red.

@@ -7,7 +7,7 @@ import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
-import { FORBIDDEN_METHODS, send405 } from './runtime/handler/http-helpers.js';
+import { FORBIDDEN_METHODS, send405, endText, endBodyless } from './runtime/handler/http-helpers.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -3622,6 +3622,9 @@ export async function createTestServer(options = {}) {
 			// out of it, and the answer the RFC requires is 405 with Allow, not
 			// the 400 the construction guard below would give.
 			if (FORBIDDEN_METHODS.has(method.toLowerCase())) return send405(res);
+			// HEAD reaches this `any` mount too and takes headers without payload,
+			// as the production admin lane does.
+			const headOnly = method === 'HEAD';
 			// Repeated header lines are merged per header class, mirroring the
 			// production admin route. An ambiguous framing / identity header is
 			// refused below, as soon as the error writer exists.
@@ -3641,7 +3644,7 @@ export async function createTestServer(options = {}) {
 					res.writeHeader('content-type', 'application/json');
 					res.writeHeader('cache-control', 'no-store');
 					res.writeHeader('x-content-type-options', 'nosniff');
-					res.end(status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}');
+					endText(res, status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}', headOnly);
 				});
 			};
 
@@ -3681,8 +3684,12 @@ export async function createTestServer(options = {}) {
 							}
 							if (!hasCTO) res.writeHeader('x-content-type-options', 'nosniff');
 							for (const c of response.headers.getSetCookie()) res.writeHeader('set-cookie', c);
-							if (body && body.byteLength) res.end(body);
-							else res.endWithoutBody(0);
+							if (body && body.byteLength) {
+								if (headOnly) res.endWithoutBody(body.byteLength);
+								else res.end(body);
+							} else {
+								endBodyless(res, response.status, response.headers.get('content-length'), headOnly);
+							}
 						});
 					})
 					.catch(() => failAdmin(500));

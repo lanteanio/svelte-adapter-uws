@@ -434,7 +434,9 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 					res.writeHeader(revalidation[i][0], revalidation[i][1]);
 				}
 				res.writeHeader('date', counters.cachedDateHeader);
-				res.end();
+				// No length: Content-Length on a 304 may only name the 200's
+				// content length (RFC 9110 8.6), and `end()` would write a zero.
+				res.endWithoutBody();
 			});
 			return;
 		}
@@ -547,7 +549,7 @@ function decodePath(pathname) {
 export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '', ifMatch = '', ifUnmodifiedSince = '', ifModifiedSince = '') {
 	const decoded = decodePath(pathname);
 	if (decoded === null) {
-		send400(res);
+		send400(res, headOnly);
 		return true;
 	}
 

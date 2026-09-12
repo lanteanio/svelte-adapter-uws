@@ -47,6 +47,9 @@ export async function init({ platform }) {
 // derivation from the request URL, relative-path resolution) are only
 // observable on a real response's Set-Cookie header.
 export function authenticate({ cookies, headers }) {
+	// A hook may answer with its own Response; this lane returns a bodyless
+	// 204 so the wire the adapter writes for that branch is observable too.
+	if (headers['x-auth-response'] === '204') return new Response(null, { status: 204 });
 	if (headers['x-set-cookie-probe'] === '1') {
 		cookies.set('probe_session', 'probe-value', {
 			path: headers['x-cookie-path'] || '/'

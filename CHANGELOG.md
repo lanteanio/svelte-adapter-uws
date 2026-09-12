@@ -227,6 +227,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The harness now answers the same status, `Allow` header and body as production, through the same helper, and the `admin` handler is not called for those methods; every other method reaches it exactly as before.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a HEAD request carries no payload bytes.** uWS writes whatever `end()` is handed and SvelteKit renders HEAD as the GET, so a HEAD to a page, an endpoint, the authenticate path's 405, a refused request or the admin lane put bytes after the header block, where a keep-alive client parsed them as the start of the next response.
+  - **Affects:** Clients that keep a connection open across a HEAD; the GET to the same target is byte-identical.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Status codes are unchanged. A generated error and an admin body still name their size in `Content-Length`, and a page names the length SvelteKit declares. An endpoint that declared none sends no framing header where it used to name the body it wrote, and a HEAD is answered in identity form: the adapter negotiates no encoding for it and adds no `Content-Encoding` or `Vary` of its own, whatever the client offered, while headers the app set ride along as before. `createTestServer` answers its admin lane the same way.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a 204 carries no Content-Length, and a 304 only the one the app declared.** RFC 9110 forbids the header on a 204 and permits it on a 304 only when it names the 200's content length, so the bodyless responses that ended with a zero (or with `end()`, which writes one) now report none there.
+  - **Affects:** Anyone comparing the header set byte for byte, and strict HTTP/1.1 intermediaries; browsers and `fetch` tolerated the zero.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** uWS emits neither `Content-Length` nor `Transfer-Encoding` when no length is reported, and the exchange still completes, so a request pipelined behind the response is answered as before. `vite dev` already sent none, since Node's HTTP server adds no length to a 204 or 304 of its own.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -473,6 +485,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A HEAD request takes the headers and no payload.** uWS writes whatever
+  `end()` is handed, and a client stops reading a HEAD response at the header
+  terminator (RFC 9112 6.3), so bytes written after it stayed in the
+  connection buffer and were parsed as the start of the next response on a
+  keep-alive connection. `curl -I` closes the connection and never showed it.
+  Two lanes wrote such bytes. The generated errors: a 405 on the authenticate
+  path, a 400 from the request edge, a 500 from the SSR failure path and the
+  admin lane's JSON errors and handler bodies all went through `end(text)`.
+  And SvelteKit itself: its endpoint lane routes HEAD to the GET handler and
+  hands that Response back unchanged, pages render in full, and dropping the
+  body is left to the server, which node:http does for adapter-node and uWS
+  does not. The helpers in `http-helpers.js` take a HEAD flag and finish
+  through `endWithoutBody(text.length)`, so `Content-Length` still names
+  the entity size; the admin writers do the same for a handler body; the SSR
+  writer never reads a HEAD body, reports a declared `Content-Length` and
+  otherwise sends no framing header, cancelling the stream. A 413 takes no
+  flag: it answers a request body, which a HEAD never carries.
+  `createTestServer`'s admin mirror follows.
+  `test/head-and-204-framing-real.test.js` pins it over raw sockets: a
+  second request pipelined behind the HEAD must begin exactly at the header
+  terminator, and for the endpoint a lone HEAD read through EOF must end at
+  it.
+- **A 204 reports no Content-Length; a 304 only a declared one.** Bodyless
+  responses finished through `endWithoutBody(0)` - the implicit authenticate
+  success, the SSR writer (SvelteKit's OPTIONS answer and its ETag 304 among
+  them) and the admin writers - or through `end()`, which writes the same
+  zero: a 204 `Response` an authenticate hook returns, and the static lane's
+  304. RFC 9110 8.6 forbids the header on a 204, and permits it on a 304 only
+  when it names the length of the 200's content, which a zero for a rendered
+  page never does. `endBodyless(res, status, declaredLength, headOnly)` in
+  `http-helpers.js` holds the rule: a 204 reports nothing, a 304 and a HEAD
+  only the length the Response declared (the header may name only the GET's
+  content length, which the Response carries when SvelteKit declared it for a
+  rendered page or an app answering HEAD itself set it), every other bodyless
+  response zero - a declared length with no bytes behind it would leave the
+  client waiting for them, which the SSR writer used to allow. Reported
+  without a length, uWS emits neither `Content-Length` nor
+  `Transfer-Encoding` and still completes the exchange, which the same suite
+  proves by pipelining a request behind each 204 and 304, the built
+  runtime's admin lane 204 included.
+- **The error reference links the extensions repository's errors document
+  where it ships.** `svelte-adapter-uws-extensions` carries it at
+  `docs/errors.md`, the path `svelte-realtime` uses too, and `docs/errors.md`
+  here links that path.
 - **`vite dev` no longer withholds an echo that production delivers.** The dev
   plugin read `options.excludeWs` on `platform.publish`, and through it on
   `batch` and on the per-event fall-back `publishBatched` takes for a disjoint
