@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option; the backoff, `maxReconnectAttempts` and the failure classes are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the close-hook traffic stats say what bytesOut counts.** `bytesOut` was documented as bytes but adds the `length` of each frame, so a non-ASCII text frame counted fewer bytes than it put on the wire; the declaration now states the unit - bytes for binary frames, UTF-16 code units for text ones - and why it is kept.
+  - **Affects:** Apps that read `bytesOut` in a `close` hook, especially for non-ASCII text traffic.
+  - **Action:** None; treat text `bytesOut` as a lower bound on UTF-8 bytes.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only. An exact UTF-8 count measured about 28 ns for a 90-character envelope and 140 ns for 400 on every send, which this per-send stat does not pay; `topicPublishBytesPerSec` uses the same unit.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -118,6 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **`CloseContext.bytesOut` documents its unit.** Binary frames count bytes and
+  text frames count UTF-16 code units, the unit `topicPublishBytesPerSec`
+  already documents. Exact UTF-8 was measured with `Buffer.byteLength` against
+  `length` on real envelope shapes (+28 ns at 90 characters, +140 ns at 400,
+  per send) and declined for a stat every send updates.
 
 - **Each connection attempt is bounded.** `openSocket` arms a 15-second timer
   that closes a socket still `CONNECTING`, so its close event takes the

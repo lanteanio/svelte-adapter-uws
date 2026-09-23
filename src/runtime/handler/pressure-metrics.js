@@ -53,6 +53,9 @@ export function bumpOut(ws, payload) {
 	try { stats = ws.getUserData()[WS_STATS]; } catch { return; }
 	if (!stats) return;
 	stats.messagesOut++;
+	// Bytes for a binary frame, UTF-16 code units for a text one: an exact UTF-8
+	// count would scan every frame on every send. The unit is documented on
+	// CloseContext.bytesOut.
 	stats.bytesOut += payload.length;
 }
 

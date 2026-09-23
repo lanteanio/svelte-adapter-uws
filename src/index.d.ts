@@ -1992,7 +1992,15 @@ export interface CloseContext {
 	messagesOut?: number;
 	/** Total bytes received over the connection. */
 	bytesIn?: number;
-	/** Total bytes sent directly to this connection (same caveat as `messagesOut`). */
+	/**
+	 * Total sent directly to this connection (same caveat as `messagesOut`):
+	 * binary frames in bytes, text frames in UTF-16 code units - the `length`
+	 * JavaScript reports, which equals the UTF-8 byte count for ASCII and
+	 * undercounts non-ASCII text. An exact UTF-8 count costs a scan of every
+	 * frame on every send (about 28 ns for a 90-character envelope, 140 ns for
+	 * 400, measured), which this per-send stat does not pay; the same unit
+	 * `topicPublishBytesPerSec` uses.
+	 */
 	bytesOut?: number;
 }
 
