@@ -625,27 +625,53 @@ describe('background reconcile (terminal drop)', () => {
 	// the server doc advances, the client hears nothing.
 
 	it('converges a terminally-dropped update without any reconnect or later edit', async () => {
-		const s = makeServer();
-		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
-		await flush();
-		expect(ch.synced).toBe(true);
-		expect(s.syncs.length).toBe(1);
+		// The reconcile tick is held by an injected timer and fired by hand, so
+		// "stale until the tick, converged after it" holds however slowly the
+		// machine runs. On the real clock a loaded run let the 40 ms tick fire
+		// inside the flush that is meant to show the replica still stale.
+		const { setRuntimeEnv, resetRuntimeEnv } = await import('../src/client-runtime.js');
+		const RECONCILE_MS = 40;
+		/** @type {Array<() => void>} */
+		const heldTicks = [];
+		setRuntimeEnv({
+			timers: {
+				set: (cb, ms, ...a) => {
+					if (ms !== RECONCILE_MS) return setTimeout(cb, ms, ...a);
+					const handle = { held: true };
+					heldTicks.push(() => cb(...a));
+					return handle;
+				},
+				clear: (h) => { if (!(h && h.held)) clearTimeout(h); }
+			}
+		});
+		try {
+			const s = makeServer();
+			const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: RECONCILE_MS });
+			await flush();
+			expect(ch.synced).toBe(true);
+			expect(s.syncs.length).toBe(1);
 
-		// A peer edit reaches the server; the fan-out frame to THIS client is
-		// dropped (backpressure, poisoned wire state, anything) and the peer
-		// goes idle - no causally-later update will ever flag the gap.
-		s.doc.getText('root').insert(0, 'x');
-		expect(ch.text().toString()).toBe(''); // stale, and pendingStructs is null
-		await flush(5);
-		expect(ch.text().toString()).toBe(''); // the loss detector cannot see it
+			// A peer edit reaches the server; the fan-out frame to THIS client is
+			// dropped (backpressure, poisoned wire state, anything) and the peer
+			// goes idle - no causally-later update will ever flag the gap.
+			s.doc.getText('root').insert(0, 'x');
+			expect(ch.text().toString()).toBe(''); // stale, and pendingStructs is null
+			await flush(5);
+			expect(ch.text().toString()).toBe(''); // the loss detector cannot see it
 
-		// The background reconcile re-runs the state-vector exchange and the
-		// server diff supplies the missing struct. Red without the reconcile:
-		// the replica stays stale forever (only a reconnect would heal it).
-		await flush(250);
-		expect(s.syncs.length).toBeGreaterThan(1);
-		expect(ch.text().toString()).toBe('x');
-		ch.destroy();
+			// The background reconcile re-runs the state-vector exchange and the
+			// server diff supplies the missing struct. Red without the reconcile:
+			// no tick is ever scheduled, and the replica stays stale forever
+			// (only a reconnect would heal it).
+			expect(heldTicks.length, 'a reconcile tick is scheduled on the healthy channel').toBe(1);
+			heldTicks.shift()();
+			await flush(20);
+			expect(s.syncs.length).toBeGreaterThan(1);
+			expect(ch.text().toString()).toBe('x');
+			ch.destroy();
+		} finally {
+			resetRuntimeEnv();
+		}
 	});
 
 	it('stays quiet while in sync: no uploads, no redundant state callbacks', async () => {
