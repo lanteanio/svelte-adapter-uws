@@ -57,8 +57,7 @@ deployments should follow the ordered [ecosystem sequence](./docs/migrations/eco
 ## Public entry points
 
 This catalog is generated from the package export map. Each entry must declare
-its role, execution environment, stability, owned guide route, and deprecation
-state before CI will accept a new public subpath.
+its role, execution environment, stability, owned guide route, and deprecation state before CI will accept a new public subpath.
 
 <!-- public-entry-points:start -->
 | Entry point | Role | Environment | Stability | Guide | Deprecation |
@@ -66,6 +65,7 @@ state before CI will accept a new public subpath.
 | `svelte-adapter-uws` | SvelteKit adapter and build output | Node build | supported | [Quick start](#quick-start-http) | none |
 | `svelte-adapter-uws/upgrade-response` | WebSocket 101 response headers | Node runtime | supported | [Custom 101 headers](#custom-101-response-headers-svelte-adapter-uwsupgrade-response) | none |
 | `svelte-adapter-uws/connection` | Stable connection identity | Node runtime | supported | [Session resume](#session-resume) | none |
+| `svelte-adapter-uws/subscriptions` | Accounted topic membership for plugins | Node runtime | supported | [Plugins](#plugins) | none |
 | `svelte-adapter-uws/client` | Reactive connection and topic stores | Browser | supported | [Client store API](#client-store-api) | none |
 | `svelte-adapter-uws/vite` | Development WebSocket and handler build plugin | Node build/dev | supported | [Development parity](#development-preview--production) | none |
 | `svelte-adapter-uws/testing` | In-process handler integration harness | Node test | supported | [Test harness](#test-harness-for-websocket-handlers) | none |
@@ -3573,7 +3573,7 @@ export async function subscribe(ws, topic, { platform }) {
 
 ## Plugins
 
-Opt-in modules that build on top of the adapter's public API. They don't change any core behavior - if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
+Opt-in modules that build on top of the adapter's public API. They don't change any core behavior - if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points. A plugin of your own that joins or leaves a connection's topics outside the wire protocol should do it through `trackedSubscribe(ws, topic)` / `trackedUnsubscribe(ws, topic)` from `svelte-adapter-uws/subscriptions`, the helpers the bundled plugins use: calling `ws.subscribe` directly, or writing the connection's subscription registry by hand, leaves the worker's subscription accounting behind, which the consistency auditor reports as `subs.total-mismatch` and, after the close releases it, `subs.total-negative`.
 
 ### Authorization model
 

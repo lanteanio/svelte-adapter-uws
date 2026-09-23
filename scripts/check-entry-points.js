@@ -30,6 +30,7 @@ export const ENTRY_POINTS = Object.freeze({
 	'.': p('SvelteKit adapter and build output', 'Node build', '[Quick start](#quick-start-http)', 'supported'),
 	'./upgrade-response': p('WebSocket 101 response headers', 'Node runtime', '[Custom 101 headers](#custom-101-response-headers-svelte-adapter-uwsupgrade-response)', 'supported'),
 	'./connection': p('Stable connection identity', 'Node runtime', '[Session resume](#session-resume)', 'supported'),
+	'./subscriptions': p('Accounted topic membership for plugins', 'Node runtime', '[Plugins](#plugins)', 'supported'),
 	'./client': p('Reactive connection and topic stores', 'Browser', '[Client store API](#client-store-api)', 'supported'),
 	'./vite': p('Development WebSocket and handler build plugin', 'Node build/dev', '[Development parity](#development-preview--production)', 'supported'),
 	'./testing': p('In-process handler integration harness', 'Node test', '[Test harness](#test-harness-for-websocket-handlers)', 'supported'),

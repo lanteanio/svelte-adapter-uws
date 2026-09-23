@@ -33,6 +33,10 @@
 			"types": "./src/connection.d.ts",
 			"default": "./src/connection.js"
 		},
+		"./subscriptions": {
+			"types": "./src/subscriptions.d.ts",
+			"default": "./src/subscriptions.js"
+		},
 		"./client": {
 			"types": "./src/client.d.ts",
 			"default": "./src/client.js"

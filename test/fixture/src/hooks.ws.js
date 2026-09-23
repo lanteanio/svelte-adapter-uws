@@ -1,5 +1,6 @@
 import { threadId, workerData as threadWorkerData } from 'node:worker_threads';
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
+import { trackedSubscribe, trackedUnsubscribe } from 'svelte-adapter-uws/subscriptions';
 
 const cursors = createCursor({
 	throttle: 0,
@@ -122,6 +123,17 @@ export function message(ws, ctx) {
 	}
 	if (msg.type === 'drop-probe') {
 		ws.close();
+		return;
+	}
+	if (msg.type === 'membership-probe') {
+		// Join or leave a topic outside the wire protocol, the accounted way or
+		// by writing the registry directly, so a suite can compare the worker's
+		// subscription counter with what the registries hold.
+		const subs = ws.getUserData()[Symbol.for('adapter-uws.ws.subscriptions')];
+		if (msg.mode === 'tracked') trackedSubscribe(ws, msg.topic);
+		else if (msg.mode === 'tracked-leave') trackedUnsubscribe(ws, msg.topic);
+		else if (msg.mode === 'raw') { ws.subscribe(msg.topic); subs.add(msg.topic); }
+		platform.send(ws, 'probe', 'membership-done', { nonce: msg.nonce });
 		return;
 	}
 	if (msg.type === 'coalesce-probe') {

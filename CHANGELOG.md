@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
+  - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
+  - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive. These are the helpers the bundled plugins already use: native membership, the registry, the per-connection cap, the shared-codec cohort and the accounting move together. They reach the running app's connection state from any module instance.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: closing a socket refuses a code it cannot send and never splits a character in the reason.** On uWS, `ws.end()` sent an unsendable code as an empty close the client read as 1005 and cut a long reason mid-character, so the client failed the connection; one rule now applies everywhere.
   - **Affects:** Apps that close sockets with a computed code or a long or non-ASCII reason, suites passing a code to `platform.__chaos({ scenario: 'worker-flap' })`, and `svelte-adapter-uws/sim` scenarios that close with an explicit code.
   - **Action:** Close with a code from 1000-1003, 1007-1014 or 3000-4999 (4000-4999 is the range for application codes), and give a reason only together with a code.
@@ -78,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option; the backoff, `maxReconnectAttempts` and the failure classes are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
+
+### Added
+
+- **`svelte-adapter-uws/subscriptions` re-exports `trackedSubscribe` and
+  `trackedUnsubscribe`** from `runtime/utils/ws-symbols.js`, with its own
+  declaration file and a row in the public entry-point catalog. Every slot the
+  helpers touch is a registered symbol or a global hook, so a copy loaded by
+  another package charges the same counter as the runtime. `test/subscriptions-entry-real.test.js`
+  drives the built fixture, which imports the entry the way a plugin package
+  does, and compares the runtime's subscription counter with the summed
+  registries after a tracked join and leave, against a hand-written join as the
+  control.
 
 ### Changed
 
