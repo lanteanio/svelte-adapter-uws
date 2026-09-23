@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { judge, selfCheckVerdict, quantile, MIN_R_SQUARED, MAX_ERROR_RATE, MAX_P95_CREEP, RSS_TOLERANCE_BYTES } from '../scripts/leak-lane.js';
-import { detectGrowth } from '../src/runtime/leak-detect.js';
+import { detectGrowth, DEFAULT_MIN_SAMPLES } from '../src/runtime/leak-detect.js';
 import { hasUWS, startRealRuntime, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 
 const MiB = 1048576;
@@ -103,9 +103,16 @@ describe('the leak lane reaches a verdict the way it says it does', () => {
 		expect(verdict.health.join(' ')).toMatch(/no warmed baseline/);
 	});
 
-	it('reports a window too short to fit anything', () => {
+	it('reports a window with fewer samples than the growth fit needs', () => {
+		// The fit answers "not leaking" below its own minimum, so a short series
+		// must be reported as unjudged rather than read as clean. The floor is
+		// the detector's own constant, not a second copy of it.
 		const verdict = judge({ ...HEALTHY, rss: [220 * MiB] });
-		expect(verdict.health.join(' ')).toMatch(/too short a window/);
+		expect(verdict.health.join(' ')).toMatch(/growth fit needs/);
+		const justShort = judge({ ...HEALTHY, rss: Array.from({ length: DEFAULT_MIN_SAMPLES - 1 }, () => 220 * MiB) });
+		expect(justShort.health.join(' ')).toMatch(/growth fit needs/);
+		const enough = judge({ ...HEALTHY, rss: Array.from({ length: DEFAULT_MIN_SAMPLES }, () => 220 * MiB) });
+		expect(enough.health.join(' ')).not.toMatch(/growth fit needs/);
 	});
 
 	it('does not ask a resident set to be monotonic, because one never is', () => {

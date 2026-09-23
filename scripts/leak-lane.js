@@ -55,7 +55,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { detectGrowth } from '../src/runtime/leak-detect.js';
+import { detectGrowth, DEFAULT_MIN_SAMPLES as MIN_SAMPLES } from '../src/runtime/leak-detect.js';
 import { buildFixtureOnce } from '../test/helpers/fixture-build.js';
 
 const require = createRequire(import.meta.url);
@@ -139,7 +139,7 @@ export function judge(m, opts = {}) {
 	const health = [];
 
 	if (!m.settled) health.push('the resident set never settled before the window opened, so nothing measured here is a baseline');
-	if (m.rss.length < 2) health.push(`only ${m.rss.length} resident-set sample(s): too short a window to fit anything`);
+	if (m.rss.length < MIN_SAMPLES) health.push(`only ${m.rss.length} resident-set sample(s): the growth fit needs ${MIN_SAMPLES}, so it could not judge`);
 	if (p95Creep === null) health.push('no warmed baseline latency, so the creep gate could not run');
 
 	if (growth.leaking) {
@@ -379,6 +379,18 @@ async function runScenario(name, { minutes }) {
 			};
 		}
 
+		// The self-check leaks on purpose, so it warms and settles on the plain page
+		// and leaks only inside the measured window: a drive that grows from the
+		// first request never settles, and the lane would report its own working
+		// self-check as unhealthy.
+		const windowDrive = drive;
+		if (name === 'selfcheck') {
+			drive = async (i) => {
+				const res = await get(port, '/', agents[i % agents.length]);
+				return { ms: res.ms, ok: res.ok };
+			};
+		}
+
 		const ratePerSecond = name === 'ws' ? 200 : 50;
 
 		// WARMUP. Fills the working set, JITs the hot paths and gives the creep
@@ -454,7 +466,7 @@ async function runScenario(name, { minutes }) {
 		/** Per-slice achieved rate, so the record states the workload applied rather than the one requested. */
 		const achieved = [];
 		for (let elapsed = 0; elapsed < windowMs; elapsed += sliceMs) {
-			const slice = await driveAtRate({ ms: sliceMs, ratePerSecond, drive, startIndex: nextIndex });
+			const slice = await driveAtRate({ ms: sliceMs, ratePerSecond, drive: windowDrive, startIndex: nextIndex });
 			nextIndex = slice.nextIndex;
 			achieved.push(slice.achievedRatePerSecond);
 			requests += slice.requests;
@@ -498,7 +510,14 @@ async function main() {
 		const at = argv.indexOf(`--${name}`);
 		return at >= 0 && argv[at + 1] ? argv[at + 1] : fallback;
 	};
-	const minutes = Math.max(1, Number(flag('minutes', '3')));
+	const minutesText = flag('minutes', '3');
+	const minutes = Number(minutesText);
+	// Refused before anything is built: a value that is not a number would run
+	// every warmup and settle and then report a window it never measured.
+	if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60) {
+		console.error(`--minutes must be a number from 1 to 60, got "${minutesText}"`);
+		process.exit(2);
+	}
 	const only = flag('scenario', 'all');
 	const outDir = flag('out', DEFAULT_OUT);
 	const scenarios = only === 'all' ? SCENARIOS : [only];
