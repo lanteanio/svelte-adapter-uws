@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only; `ws.close()` behaves as it always did on uWS.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a sendCoalesced value JSON cannot carry no longer takes the worker down.** Queued behind backpressure, such a value was first serialized in the drain callback, where the throw ended the worker; it is now dropped and reported while the rest of the queue goes out, and on an idle socket the call still throws as `send` does.
+  - **Affects:** Apps that pass a BigInt, a cyclic object or a function through `platform.sendCoalesced` to a slow client.
+  - **Action:** None; convert such values before sending, and watch for `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Serializable values are queued, coalesced and sent exactly as before. An older queued entry that fails no longer throws out of a later, unrelated `sendCoalesced` call.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: createTestServer now has sendCoalesced and runs the drain hook.** The test server had neither, so a call to `platform.sendCoalesced` failed there and a `drain` hook never ran; it now queues and drains on real backpressure the way production does, while `vite dev` still sends each value at once.
+  - **Affects:** Suites that exercise `sendCoalesced` or a `drain` hook through `createTestServer`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive for the test server. `vite dev` has no outbound queue model, so it sends each coalesced value immediately and never calls `drain`.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -70,6 +82,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection to be served afterwards; `test/lifecycle-hook-boundary.test.js`
   drives open and close on `createTestServer` and `vite dev` and requires the
   next connection to be served. Both fail with the boundary removed.
+
+- **An unserializable `sendCoalesced` value is contained at the flush.**
+  Serialization is deferred to the flush on purpose, so a key overwritten a
+  thousand times pays one `JSON.stringify`. A value queued behind
+  backpressure was therefore first serialized from the uWS drain callback,
+  and a throw there is an uncaughtException. `flushCoalescedFor`
+  (handler/subscribe-hooks.js) now catches the serializer, and also refuses
+  a result that is not a string (a function or a symbol), drops that entry
+  and keeps draining. When the failing entry is the one the calling
+  `sendCoalesced` just set, the flush is inside that call and the error is
+  rethrown to it; otherwise it is reported as
+  `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`. `test/coalesced-drain-real.test.js`
+  backs a real socket up past `maxBackpressure` with a client that stops
+  reading, queues a good and a BigInt value, and requires the good one
+  delivered, the bad one reported and the connection still serving, on the
+  built runtime and on `createTestServer`; with the containment removed the
+  built runtime's case fails with the escaped throw.
+
+- **`createTestServer` queues coalesced sends and drains them.** Its platform
+  had no `sendCoalesced` and its socket behaviour no `drain`, so a suite using
+  either met a missing method or a hook that never ran. It now keeps the same
+  per-connection pending map as production, flushes it through the outbound
+  chokepoint (so chaos scenarios apply), and on each drain flushes and then
+  runs the app hook inside the lifecycle boundary.
 
 - **The README's retry-stopping example sends the code it names.** It called
   `ws.close(4401, 'Unauthorized')`; uWS's `close()` ignores arguments and

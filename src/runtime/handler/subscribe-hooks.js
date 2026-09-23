@@ -5,6 +5,7 @@ import { bumpOut } from './pressure-metrics.js';
 import { sendControl } from './control-egress.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
 /**
  * True when `ref` is a usable handle for subscribe acks. Numeric refs
@@ -231,9 +232,18 @@ export function sendSubscribeDenied(ws, topic, ref, reason) {
  * Serializes lazily: only the surviving (latest) value per key pays
  * JSON.stringify cost.
  *
+ * A value JSON cannot carry (a BigInt, a cycle, a throwing `toJSON`, a
+ * function) is dropped here and the rest of the queue still goes out. When
+ * the value is the one the caller of `sendCoalesced` just set, the flush is
+ * running inside that call, so the caller gets the TypeError exactly as
+ * `send` would give it. Any other failing entry was set while the socket was
+ * backpressured and is being flushed from the drain callback, where a throw
+ * would take the worker down, so it is reported instead.
+ *
  * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {object} [callerEntry] the entry the calling `sendCoalesced` just set
  */
-export function flushCoalescedFor(ws) {
+export function flushCoalescedFor(ws, callerEntry) {
 	let userData;
 	try { userData = ws.getUserData(); }
 	catch { counters.closedWsAborts++; return; }
@@ -241,11 +251,21 @@ export function flushCoalescedFor(ws) {
 	if (!pending || pending.size === 0) return;
 	assert(pending instanceof Map, 'coalesce.pending-type', null);
 	let aborted = false;
+	let callerError = null;
 	drainCoalesced(pending, (msg) => {
 		if (aborted) return 2;
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
-		const payload = envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}';
+		let body;
+		try { body = JSON.stringify(msg.data ?? null); }
+		catch (err) { body = err; }
+		if (typeof body !== 'string') {
+			const err = body instanceof Error ? body : new TypeError('sendCoalesced data has no JSON form');
+			if (msg === callerEntry) callerError = err;
+			else console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err);
+			return 1;
+		}
+		const payload = envelopePrefix(msg.topic, msg.event) + body + '}';
 		let result;
 		try { result = ws.send(payload, false, false); }
 		catch {
@@ -267,4 +287,5 @@ export function flushCoalescedFor(ws) {
 		return result;
 	});
 	if (aborted) pending.clear();
+	if (callerError !== null) throw callerError;
 }

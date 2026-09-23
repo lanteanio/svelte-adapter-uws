@@ -1305,7 +1305,9 @@ export const platform = {
 	 *
 	 * Serialization is deferred to the actual flush, so a stream that
 	 * overwrites the same key 1000 times before a single drain pays only
-	 * one JSON.stringify, not 1000.
+	 * one JSON.stringify, not 1000. A value JSON cannot carry throws from
+	 * this call when it is flushed at once, as `send` would; one flushed
+	 * later from a drain is dropped and reported instead.
 	 *
 	 * The flush attempts immediately and again on every uWS drain event.
 	 * On BACKPRESSURE or DROPPED from ws.send, pumping stops and resumes
@@ -1331,8 +1333,9 @@ export const platform = {
 			const oldest = pending.keys().next().value;
 			if (oldest !== undefined) pending.delete(oldest);
 		}
-		pending.set(key, { topic, event, data });
-		flushCoalescedFor(ws);
+		const entry = { topic, event, data };
+		pending.set(key, entry);
+		flushCoalescedFor(ws, entry);
 	},
 
 	/**

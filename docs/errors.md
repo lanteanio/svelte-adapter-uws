@@ -4,7 +4,7 @@ Search this page with the exact stable ID, code, event, or beginning of the mess
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
 for traffic, whether anything recovers on its own, and what to do next: 43 entries
 against the 46 distinct diagnostic events emitted from the scanned sources, plus
-38 entries indexing consequential plain console lines that never enter the diagnostic
+39 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
@@ -91,6 +91,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-OPEN-HOOK](#adapter-err-open-hook) | `ws.open-hook.threw` | `[ws] the open hook threw` |
 | [ADAPTER-ERR-DRAIN-HOOK](#adapter-err-drain-hook) | `ws.drain-hook.threw` | `[ws] the drain hook threw` |
 | [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook) | `ws.close-hook.threw` | `[ws] the close hook threw` |
+| [ADAPTER-ERR-COALESCED-UNSERIALIZABLE](#adapter-err-coalesced-unserializable) | `ws.send-coalesced.unserializable` | `[ws] a sendCoalesced value has no JSON form and was dropped` |
 | [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook) | `ws.recover-hook.threw` | `[ws] the recover-on-subscribe hook threw` |
 | [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` |
 | [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument) | `ws.metrics.instrument-threw` | `[ws] a metrics instrument threw; further errors from it are suppressed` |
@@ -188,6 +189,7 @@ the stable ID tag on the line):
 - `[ws] the open hook threw` - [ADAPTER-ERR-OPEN-HOOK](#adapter-err-open-hook)
 - `[ws] the drain hook threw` - [ADAPTER-ERR-DRAIN-HOOK](#adapter-err-drain-hook)
 - `[ws] the close hook threw` - [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook)
+- `[ws] a sendCoalesced value has no JSON form and was dropped` - [ADAPTER-ERR-COALESCED-UNSERIALIZABLE](#adapter-err-coalesced-unserializable)
 - `[ws] the recover-on-subscribe hook threw` - [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook)
 - `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
 - `[ws] a metrics instrument threw; further errors from it are suppressed` - [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument)
@@ -1019,6 +1021,18 @@ searchable log prefix is:
 - **Next action:** Fix the hook. Whatever it was cleaning up after the throw was skipped, so check the state it owns. The error printed with this line is the original throw.
 - **Runtime help:** `docs/errors.md#adapter-err-close-hook`
 - **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
+
+<a id="adapter-err-coalesced-unserializable"></a>
+## `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`
+
+- **Code/event:** `ws.send-coalesced.unserializable`
+- **Message prefix:** `[ws] a sendCoalesced value has no JSON form and was dropped`
+- **Cause:** A value passed to `platform.sendCoalesced` while the connection was backpressured could not be serialized when the queue drained: a BigInt, a cycle, a `toJSON` that throws, or a value such as a function that JSON has no form for.
+- **Consequence:** That one entry is dropped and the rest of the queue for the connection still goes out. The connection stays open. A value that fails while it is flushed at once throws from the `sendCoalesced` call instead and never reaches this line.
+- **Automatic recovery:** None for the entry; the next value set under the same key is sent normally.
+- **Next action:** Send only JSON-serializable data, or convert it (for example a BigInt to a string) before calling sendCoalesced. The error printed with this line is the one the serializer threw.
+- **Runtime help:** `docs/errors.md#adapter-err-coalesced-unserializable`
+- **Runtime sources:** [src/runtime/handler/subscribe-hooks.js](../src/runtime/handler/subscribe-hooks.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-recover-hook"></a>
 ## `ADAPTER-ERR-RECOVER-HOOK`

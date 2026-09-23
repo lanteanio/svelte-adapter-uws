@@ -3324,7 +3324,10 @@ export interface Platform {
 	 *
 	 * The flush attempts immediately and again on every uWS drain event.
 	 * On backpressure or drop from the underlying socket, pumping stops
-	 * and resumes when the connection drains.
+	 * and resumes when the connection drains. A value JSON cannot carry
+	 * throws a TypeError from this call when it flushes at once, as `send`
+	 * does; one queued behind backpressure is dropped when it drains and
+	 * reported as `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`.
 	 *
 	 * @example
 	 * ```js

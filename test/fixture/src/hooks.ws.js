@@ -124,6 +124,26 @@ export function message(ws, ctx) {
 		ws.close();
 		return;
 	}
+	if (msg.type === 'coalesce-probe') {
+		// The client has stopped reading: back the socket up past the 1 MB
+		// maxBackpressure so sendCoalesced holds its values, then queue one JSON
+		// can carry and one it cannot. Both flush from the drain callback.
+		const chunk = new Uint8Array(1024 * 1024);
+		for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
+		platform.sendCoalesced(ws, { key: 'good', topic: 'probe', event: 'coalesced-good', data: { ok: true } });
+		platform.sendCoalesced(ws, { key: 'bad', topic: 'probe', event: 'coalesced-bad', data: { n: 1n } });
+		return;
+	}
+	if (msg.type === 'coalesce-now-probe') {
+		// On an idle socket the value flushes inside the call, so the caller
+		// gets the serializer's error.
+		try {
+			platform.sendCoalesced(ws, { key: 'now', topic: 'probe', event: 'coalesced-now', data: { n: 1n } });
+		} catch (err) {
+			platform.send(ws, 'probe', 'coalesce-threw', { name: err?.name });
+		}
+		return;
+	}
 	if (msg.type === 'shared-publish') {
 		// A shared stateless codec publish, so the cohort lane runs in the
 		// built runtime: the topic splits into a binary and a JSON cohort, and

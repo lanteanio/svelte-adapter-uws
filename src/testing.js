@@ -1,7 +1,7 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders, framingRefusal, isFramingHeader } from './runtime/utils/request-headers.js';
-import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInvalidSeq, processEpoch, topicEpochValue, mintTopicEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, drainCoalesced, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
@@ -16,7 +16,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
-import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
+import { runOpenHook, runDrainHook, runCloseHook } from './runtime/utils/hook-boundary.js';
 import { guardCloseFrames, closeFrameReason } from './runtime/utils/close-frame.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
@@ -703,6 +703,36 @@ export async function createTestServer(options = {}) {
 		if (!stats) return;
 		stats.messagesOut++;
 		stats.bytesOut += payload.length;
+	}
+
+	/**
+	 * Drain one connection's pending sendCoalesced values, as production's
+	 * flushCoalescedFor does: through the outbound chokepoint, stopping on
+	 * backpressure, and with a value JSON cannot carry thrown to the caller
+	 * that set it or, flushed later from a drain, dropped and reported.
+	 * @param {any} ws
+	 * @param {object} [callerEntry]
+	 */
+	function flushCoalescedForT(ws, callerEntry) {
+		let userData;
+		try { userData = ws.getUserData(); }
+		catch { closedWsAbortsT++; return; }
+		const pending = userData[WS_COALESCED];
+		if (!pending || pending.size === 0) return;
+		let callerError = null;
+		drainCoalesced(pending, (msg) => {
+			let body;
+			try { body = JSON.stringify(msg.data ?? null); }
+			catch (err) { body = err; }
+			if (typeof body !== 'string') {
+				const err = body instanceof Error ? body : new TypeError('sendCoalesced data has no JSON form');
+				if (msg === callerEntry) callerError = err;
+				else console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err);
+				return 1;
+			}
+			return sendOutboundT(ws, '{"topic":' + esc(msg.topic) + ',"event":' + esc(msg.event) + ',"data":' + body + '}');
+		});
+		if (callerError !== null) throw callerError;
 	}
 
 	// Chaos / fault-injection harness. Inactive by default - all platform
@@ -1670,6 +1700,25 @@ export async function createTestServer(options = {}) {
 			const result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, payload));
 			if (result === 2) poisonWireStateT(ws, ud, wire.capability);
 			return result;
+		},
+		sendCoalesced(ws, { key, topic, event, data }) {
+			// Production's primitive on real uWS backpressure: one pending value
+			// per key, latest wins, flushed now and again on every drain.
+			let userData;
+			try { userData = ws.getUserData(); }
+			catch { closedWsAbortsT++; return; }
+			let pending = userData[WS_COALESCED];
+			if (!pending) {
+				pending = new Map();
+				userData[WS_COALESCED] = pending;
+			}
+			if (pending.size >= MAX_COALESCED_KEYS_PER_CONNECTION && !pending.has(key)) {
+				const oldest = pending.keys().next().value;
+				if (oldest !== undefined) pending.delete(oldest);
+			}
+			const entry = { topic, event, data };
+			pending.set(key, entry);
+			flushCoalescedForT(ws, entry);
 		},
 		sendTo(filter, topic, event, data, options) {
 			void options; // Platform-shape parity; the test server configures no compressor.
@@ -3492,6 +3541,13 @@ export async function createTestServer(options = {}) {
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
 			await runAdmittedMessageHook(messageAdmission, handler.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] }, rejectApplicationMessageT);
+		},
+
+		drain(ws) {
+			// As production: resume any sendCoalesced traffic held back by
+			// backpressure, then the app drain hook inside its boundary.
+			flushCoalescedForT(ws);
+			if (handler.drain) runDrainHook(handler, ws, { platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close(ws, code, message) {

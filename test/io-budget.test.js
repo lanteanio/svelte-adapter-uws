@@ -1011,7 +1011,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// these digests holds at its previous value. Nothing executes differently
 	// on any frame path, no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	ingress: '0ab476a83920910805a410b91847a9de760e178b0a022be7f0bd2bc1d85e61af',
+	//
+	// Re-pinned for the unserializable sendCoalesced entry. error-registry.js
+	// gained one frozen entry and its id - data only.
+	// Measured: with error-registry.js alone reverted, this digest holds at its
+	// previous value.
+	// No byte is read, allocated or copied on any frame path that was not before,
+	// and no copy primitive entered.
+	ingress: '91ce17b41a7fe6669a258f59a5f1335ffa28283d03a1feb0887eae6e1f4b9145',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1878,7 +1885,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// these digests holds at its previous value. Nothing executes differently
 	// on any frame path, no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	platform: '48b7d45edba04884da458aa52520eaaa3033e2368f178202a76c862ca79f464a',
+	//
+	// Re-pinned for the unserializable sendCoalesced entry. error-registry.js
+	// gained one frozen entry and its id - data only. This graph also reaches
+	// handler/subscribe-hooks.js and handler/platform.js: flushCoalescedFor
+	// wraps the JSON.stringify it already made in a try, checks the result is a
+	// string, reports or rethrows on the cold failure branch, and takes the
+	// caller's entry by identity; sendCoalesced binds the entry object it was
+	// already allocating to a name so it can pass it. Measured: with those two
+	// files reverted only the registry drift remains, and with error-registry.js
+	// reverted only this graph still moves.
+	// No byte is read, allocated or copied on any frame path that was not before,
+	// and no copy primitive entered.
+	platform: 'be5753a192aa2a7b6a525fb0f86689fe9b6cd3eb67c56ae209b0bfc390b7a691',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2208,7 +2227,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// these digests holds at its previous value. Nothing executes differently
 	// on any frame path, no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	'wire-fanout': '66ecae166174bdda81be4af6eeedd323cace4a6a33ed80460faedf119eb4782a',
+	//
+	// Re-pinned for the unserializable sendCoalesced entry. error-registry.js
+	// gained one frozen entry and its id - data only, reached through utils.js;
+	// this graph imports neither handler/subscribe-hooks.js nor handler/platform.js.
+	// No byte is read, allocated or copied on any frame path that was not before,
+	// and no copy primitive entered.
+	'wire-fanout': '2bcb98d5f2ba9f1f409521fb6f96c2de954a6cc44e517e06ae594b763f761f1d',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

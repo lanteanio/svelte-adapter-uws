@@ -2380,7 +2380,7 @@ export function message(ws, { data, platform }) {
 
 ### `platform.sendCoalesced(ws, { key, topic, event, data })`
 
-Send a message to a single connection with **coalesce-by-key** semantics. Each `(connection, key)` pair holds at most one pending message; if a newer call for the same `key` arrives before the previous frame drains to the wire, the older value is replaced in place.
+Send a message to a single connection with **coalesce-by-key** semantics. Each `(connection, key)` pair holds at most one pending message; if a newer call for the same `key` arrives before the previous frame drains to the wire, the older value is replaced in place. Serialization waits for the flush, so a value JSON cannot carry throws from this call when it is sent at once, as `send` would, and is dropped with [`ADAPTER-ERR-COALESCED-UNSERIALIZABLE`](docs/errors.md#adapter-err-coalesced-unserializable) when it was queued behind backpressure. `createTestServer` queues and drains exactly as production does, and runs your `drain` hook; `vite dev` has no outbound queue model, so it sends each value at once and never calls `drain`.
 
 Use this for latest-value streams where intermediate values are noise - price ticks, cursor positions, presence state, typing indicators, scroll position. Under load, this is the difference between the client lagging by a thousand stale frames and the client always seeing the most recent value.
 
