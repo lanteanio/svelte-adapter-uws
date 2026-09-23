@@ -10,9 +10,9 @@
 // it races the balancer.
 //
 // Only the SSR lane is warmed, because only it was measured to pay - a cold
-// static or health route already answers at warm latency. When the realtime
-// surface is configured, one envelope build is warmed too, through its pure
-// encoder (no response object, negligible cost).
+// static or health route already answers at warm latency, and the first
+// envelope build after boot costs about 70 microseconds once (0.3 warm),
+// against the tens of milliseconds of a cold render.
 //
 // The warmup render goes straight through `server.respond`, the same engine
 // entry a real request reaches, with a Request object this module constructs
