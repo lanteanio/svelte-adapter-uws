@@ -1030,7 +1030,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// names the label arrays it already declared. Declaration data only: no
 	// statement runs on any frame path, no byte is read, allocated or copied,
 	// and no copy primitive entered.
-	ingress: '2fd23133213d6ec6c6194d98370119c0b5b0ee37a9353ae9c8164bb98466741e',
+	//
+	// Re-pinned for the envelope data guard. utils/epoch.js gains envelopeData,
+	// which is the JSON.stringify both builders already made plus a typeof
+	// check on its result, and completeEnvelope, completeGameEnvelope and the
+	// send lanes in handler/platform.js call it. Measured before/after on
+	// completeEnvelope: within run noise on every shape. No byte is read,
+	// allocated or copied that was not before, and no copy primitive entered.
+	ingress: 'f2b2cfa26ccba0ba29c53d533b4f1c080502b13f4db3309b4a0b299b3fe8a6af',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1927,7 +1934,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// names the label arrays it already declared. Declaration data only: no
 	// statement runs on any frame path, no byte is read, allocated or copied,
 	// and no copy primitive entered.
-	platform: '953782a9f7f6fff974b586862e3fc990e7ea6c348a43b9cd369f7608e56aed90',
+	//
+	// Re-pinned for the envelope data guard. utils/epoch.js gains envelopeData,
+	// which is the JSON.stringify both builders already made plus a typeof
+	// check on its result, and completeEnvelope, completeGameEnvelope and the
+	// send lanes in handler/platform.js call it. Measured before/after on
+	// completeEnvelope: within run noise on every shape. No byte is read,
+	// allocated or copied that was not before, and no copy primitive entered.
+	platform: 'a028673d71c7ba88ce9a5e3dfacfcb655d59cd60e59d49fc3ac26ce4c445ecd4',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2275,7 +2289,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// names the label arrays it already declared. Declaration data only: no
 	// statement runs on any frame path, no byte is read, allocated or copied,
 	// and no copy primitive entered.
-	'wire-fanout': '4df4ffcf1aa0034722ef00d68a94721b57aa3f7cc6648aaf91542fdbc026027c',
+	//
+	// Re-pinned for the envelope data guard. utils/epoch.js gains envelopeData,
+	// which is the JSON.stringify both builders already made plus a typeof
+	// check on its result, and completeEnvelope, completeGameEnvelope and the
+	// send lanes in handler/platform.js call it. Measured before/after on
+	// completeEnvelope: within run noise on every shape. No byte is read,
+	// allocated or copied that was not before, and no copy primitive entered.
+	'wire-fanout': 'b9928a2c5ac674b0b35eb31a269b726f806d941de0242cbc6b9a8d0a5e58559a',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

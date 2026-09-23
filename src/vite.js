@@ -18,7 +18,7 @@ import {
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority, assertClusterSequenceAuthorityValues } from './runtime/handler/cluster-sequence-policy.js';
-import { assertStampableSeq } from './runtime/utils/epoch.js';
+import { assertStampableSeq, envelopeData } from './runtime/utils/epoch.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
@@ -477,7 +477,7 @@ export default function uws(options = {}) {
 		// Mirror the production `{ jitterMs }` de-herd window stamp (platform.publish):
 		// carry the window so each client rolls its own dispatch delay.
 		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + (jitterMs == null ? '}' : ',"j":' + jitterMs + '}');
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + envelopeData(data) + (jitterMs == null ? '}' : ',"j":' + jitterMs + '}');
 		// Dev-live egress enforcement, one charge point (the wire and batch
 		// mirrors delegate here). Recipients are counted before the first
 		// frame so the refusal is pre-hoc; dev stamps no seq, so building the
@@ -631,7 +631,7 @@ export default function uws(options = {}) {
 			const m = messages[i];
 			events[i] = {
 				topic: m.topic,
-				env: '{"topic":' + esc(m.topic) + ',"event":' + esc(m.event) + ',"data":' + JSON.stringify(m.data ?? null) + '}'
+				env: '{"topic":' + esc(m.topic) + ',"event":' + esc(m.event) + ',"data":' + envelopeData(m.data) + '}'
 			};
 		}
 		// Dev-live egress enforcement for the fast path (the slow path above
@@ -692,7 +692,7 @@ export default function uws(options = {}) {
 		// carries it - a resume flow exercised against dev must deliver the
 		// per-frame seqs the client keys its watermark off.
 		const seq = resolveSendSeq(options != null ? options.seq : undefined);
-		const payload = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null)
+		const payload = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + envelopeData(data)
 			+ (seq === null ? '' : ',"seq":' + seq) + '}';
 		const result = ws.send(payload, false, false) ?? 1;
 		bumpOutV(ws.getUserData(), payload);
@@ -708,7 +708,7 @@ export default function uws(options = {}) {
 	 * @returns {number}
 	 */
 	function sendTo(filter, topic, event, data) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + envelopeData(data) + '}';
 		// Filter pass first, sends after: the dev-live egress decision is
 		// pre-hoc over the whole recipient set, as production.
 		const targets = [];

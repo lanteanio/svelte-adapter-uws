@@ -7,7 +7,7 @@ import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, assertStampableSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, envelopeData, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, assertStampableSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
@@ -1230,7 +1230,7 @@ export const platform = {
 			let result = prior;
 			for (; i < count; i++) {
 				const d = source === null ? entries[i].data : source[i];
-				const json = envelopePrefix(topic, event) + JSON.stringify(d ?? null) + '}';
+				const json = envelopePrefix(topic, event) + envelopeData(d) + '}';
 				try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 				bumpOut(ws, json);
 			}
@@ -1257,7 +1257,7 @@ export const platform = {
 			for (let i = 0; i < count; i++) {
 				const p = wire.encode(event, datas[i], state);
 				if (p == null) {
-					const json = envelopePrefix(topic, event) + JSON.stringify(datas[i] ?? null) + '}';
+					const json = envelopePrefix(topic, event) + envelopeData(datas[i]) + '}';
 					try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 					bumpOut(ws, json);
 					continue;
@@ -1352,7 +1352,7 @@ export const platform = {
 	 * Returns the number of connections the message was sent to.
 	 */
 	sendTo(filter, topic, event, data, options) {
-		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		const envelope = envelopePrefix(topic, event) + envelopeData(data) + '}';
 		// Opt-in compression (default off): sendTo frames target a filtered
 		// recipient set and are often one-off, so the safe default is
 		// uncompressed. Pass { compress: true } to deflate for a large fan-out.

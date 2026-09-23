@@ -529,9 +529,25 @@ export function createHlc() {
  * @returns {string}
  */
 export function completeEnvelope(prefix, data, seq, jitterMs) {
-	const body = prefix + JSON.stringify(data ?? null);
+	const body = prefix + envelopeData(data);
 	const tail = jitterMs == null ? '}' : ',"j":' + jitterMs + '}';
 	return seq == null ? body + tail : body + ',"seq":' + seq + tail;
+}
+
+/**
+ * The `data` field of an envelope as JSON. `JSON.stringify` throws for a BigInt
+ * or a cycle, but for a function or a symbol it returns undefined rather than
+ * a string, which concatenated into a frame would put `"data":undefined` on the
+ * wire - a frame no client can parse. That case throws here instead, to the
+ * caller, like the others.
+ *
+ * @param {unknown} data
+ * @returns {string}
+ */
+export function envelopeData(data) {
+	const json = JSON.stringify(data ?? null);
+	if (typeof json !== 'string') throw new TypeError('message data has no JSON form (a function or a symbol cannot be sent)');
+	return json;
 }
 
 /**
@@ -549,7 +565,7 @@ export function completeEnvelope(prefix, data, seq, jitterMs) {
  * @returns {string}
  */
 export function completeGameEnvelope(prefix, data, seq, id) {
-	const body = prefix + JSON.stringify(data ?? null);
+	const body = prefix + envelopeData(data);
 	const seqTail = seq == null ? '' : ',"seq":' + seq;
 	const idTail = id == null ? '' : ',"id":' + JSON.stringify(id);
 	return body + seqTail + idTail + '}';

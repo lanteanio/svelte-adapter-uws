@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Entries are now imported by the file Rollup wrote, with JSON-quoted specifiers, and in file-name order on every filesystem. An ordinary name imports exactly as before.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: data JSON has no form for is refused instead of sent broken.** A function or a symbol as message data went out as `"data":undefined`, a frame no client can parse; every send and publish lane now throws a TypeError to the caller, as it already did for a BigInt.
+  - **Affects:** Apps that pass a function or a symbol as message data, usually by accident.
+  - **Action:** None; fix the call the TypeError points at.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every value JSON can carry is sent exactly as before; measured on the envelope builder, the added check is within run noise.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -130,6 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Every envelope builder refuses data JSON has no form for.**
+  `envelopeData` (utils/epoch.js) is the `JSON.stringify` the builders already
+  made plus a check that it returned a string; `completeEnvelope`,
+  `completeGameEnvelope`, the production send lanes and the `vite dev`
+  builders call it. Benchmarked before/after on `completeEnvelope` across three
+  shapes: within run noise. `test/envelope-data.test.js` pins the helper, both
+  builders and a `createTestServer` publish.
 
 - **Extra `__` entries are imported by the file Rollup wrote.**
   `writeAndCloseRollupBundle` returns the write result, and the new
