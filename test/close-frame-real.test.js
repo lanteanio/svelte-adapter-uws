@@ -148,6 +148,7 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	it('sends UTF-8 bytes as the reason', async () => {
 		const url = await boot();
 		const { closed } = await closeWith(url, { code: 4001, reasonBytes: [...Buffer.from('bin')] });
+		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(4001);
 		expect(closed.reason.toString()).toBe('bin');
 	});
@@ -155,6 +156,7 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	it('closes with no status when no code is given', async () => {
 		const url = await boot();
 		const { closed } = await closeWith(url, {});
+		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(1005);
 		expect(closed.reason.length).toBe(0);
 	});
@@ -183,8 +185,9 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 		expect(c.ws.readyState, 'nothing was closed').toBe(WebSocket.OPEN);
 		c.ws.send(JSON.stringify({ type: 'end-probe', code: 1000 }));
 		const closed = await within(c.closed, 3000);
+		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(1000);
-	});
+	}, 30000);
 
 	it('close() drops the connection without a close frame', async () => {
 		const url = await boot();

@@ -31,6 +31,10 @@ export interface SimClientFacade {
 	unsubscribe(topic: string): boolean;
 	/** Abort an in-flight upgrade; returns false if not still connecting. */
 	abort(): boolean;
+	/**
+	 * Close from the client side (default 1000). The code and reason follow
+	 * the server's `ws.end()` rule: an unsendable code throws a TypeError.
+	 */
 	close(code?: number, reason?: string): void;
 }
 

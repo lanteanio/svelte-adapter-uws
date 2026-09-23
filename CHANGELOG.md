@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Consumer summary
 
 - **Changed: closing a socket refuses a code it cannot send and never splits a character in the reason.** On uWS, `ws.end()` sent an unsendable code as an empty close the client read as 1005 and cut a long reason mid-character, so the client failed the connection; one rule now applies everywhere.
-  - **Affects:** Apps that close sockets with a computed code or a long or non-ASCII reason, and suites passing a code to `platform.__chaos({ scenario: 'worker-flap' })`.
+  - **Affects:** Apps that close sockets with a computed code or a long or non-ASCII reason, suites passing a code to `platform.__chaos({ scenario: 'worker-flap' })`, and `svelte-adapter-uws/sim` scenarios that close with an explicit code.
   - **Action:** Close with a code from 1000-1003, 1007-1014 or 3000-4999 (4000-4999 is the range for application codes), and give a reason only together with a code.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Every sendable code, and every reason of 123 bytes or fewer, goes out exactly as before. A code outside those ranges, a non-integer or a non-number, a reason without a code, and reason bytes that are not UTF-8 now throw a `TypeError` and leave the connection open - what `vite dev` already did for the code. A longer reason is shortened at a character boundary and a lone surrogate is sent as U+FFFD. Under `vite dev` a long reason no longer throws, a binary reason is sent as its bytes, and `ws.close()` now drops the connection without a close frame as uWS does, so the client reads 1006 rather than 1005.
+  - **Compatibility:** Every sendable code, and every well-formed reason of 123 bytes or fewer, goes out exactly as before. A code outside those ranges, a non-integer or a non-number, a reason without a code, and reason bytes that are not UTF-8 now throw a `TypeError` and leave the connection open; under `vite dev` the `ws` library threw for a bad code too, but only after it had started closing. A longer reason is shortened at a character boundary and a lone surrogate is sent as U+FFFD instead of invalid bytes. The rule is installed on each of the adapter's own sockets, so a uWS server the application runs beside it is untouched. Under `vite dev` a long reason no longer throws, a binary reason is sent as its bytes, and `ws.close()` now drops the connection without a close frame as uWS does, so the client reads 1006 rather than 1005. In the simulator a close with no code now reports 0 to the server and 1005 to the peer, as uWS does, where it reported 1000 to both.
   - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
@@ -56,11 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3000-4999 as an integer number, and the reason as a string or UTF-8 bytes,
   shortened past 123 bytes back to a character boundary; a string of 41
   well-formed units or fewer passes through untouched. `guardCloseFrames`
-  installs it on the uWS socket prototype at the first open, in the
-  production handler and in `createTestServer`, so every `end()` - the
-  application's and the runtime's own - goes through it at no per-connection
-  cost, and a registered-symbol marker stops a second copy of the module from
-  wrapping it twice. The `vite dev` socket wrapper and the simulator's socket
+  installs it at the start of `open`, in the production handler and in
+  `createTestServer`, as a non-enumerable `end` on the socket itself - uWS
+  hands the application that object as its user data - so every `end()`, the
+  application's and the runtime's own, goes through it, and the transport's
+  shared prototype and any other uWS server in the process are left alone. The `vite dev` socket wrapper and the simulator's socket
   double apply the same rule; the dev wrapper's `close()` now terminates, and
   the double reports 0 to the server's close handler and 1005 to the peer for
   a close with no code, as uWS does. The test server's `worker-flap` chaos

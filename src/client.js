@@ -2011,8 +2011,9 @@ function createConnection(options) {
 			const reason = lastCloseReason;
 			if (cls === 'TERMINAL') {
 				// Server has permanently rejected this client  - do not retry.
-				// Use ws.close(4401) or ws.close(1008) on the server when credentials
-				// are invalid or the connection is forbidden, to stop the retry loop.
+				// Use ws.end(4401, reason) or ws.end(1008, reason) on the server when
+				// credentials are invalid or the connection is forbidden, to stop the
+				// retry loop; ws.close() sends no code and reads here as 1006.
 				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event?.code + ')');
 				terminalClosed = true;
 				permaClosedStore.set(true);

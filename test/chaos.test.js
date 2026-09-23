@@ -283,6 +283,19 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 		expect(closed.reason).toBe('maintenance');
 	});
 
+	it('worker-flap refuses a code the wire cannot carry before closing anything', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer();
+
+		const a = await connectAndCollect(server.wsUrl);
+		await new Promise(r => setTimeout(r, 30));
+
+		expect(() => server.platform.__chaos({ scenario: 'worker-flap', code: 1006 })).toThrow(TypeError);
+		await new Promise(r => setTimeout(r, 50));
+		expect(a.ws.readyState, 'no connection was closed by the refused flap').toBe(1);
+		expect(server.platform.connections).toBe(1);
+	});
+
 	it('worker-flap leaves continuous chaos state intact', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();

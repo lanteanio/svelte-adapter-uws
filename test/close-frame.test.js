@@ -143,14 +143,25 @@ describe('guardCloseFrames', () => {
 		expect(calls).toEqual([[1005, 'x']]);
 	});
 
-	it('guards every socket that shares the prototype, and installs once', () => {
+	it('guards only the socket it is given, once, and leaves the prototype alone', () => {
 		const { Socket, calls } = fakeSocketClass();
-		guardCloseFrames(new Socket());
-		const guarded = Socket.prototype.end;
-		guardCloseFrames(new Socket());
-		expect(Socket.prototype.end).toBe(guarded);
-		new Socket().end(4000, 'x');
-		expect(calls).toEqual([[4000, 'x']]);
-		expect(() => new Socket().end(5000)).toThrow(TypeError);
+		const nativeEnd = Socket.prototype.end;
+		const guarded = new Socket();
+		guardCloseFrames(guarded);
+		const installed = guarded.end;
+		guardCloseFrames(guarded);
+		expect(guarded.end, 'a second install changes nothing').toBe(installed);
+		expect(Socket.prototype.end, 'the transport prototype is untouched').toBe(nativeEnd);
+		expect(() => guarded.end(5000)).toThrow(TypeError);
+		// A socket the guard was never given keeps the transport behaviour, so a
+		// server the application runs beside the adapter is not changed by it.
+		const other = new Socket();
+		other.end(1005, 'x');
+		expect(calls).toEqual([[1005, 'x']]);
+		// uWS hands the application this object as its user data, so the
+		// guard stays out of anything that walks its keys.
+		guarded.name = 'app data';
+		expect(Object.keys(guarded)).toEqual(['name']);
+		expect(JSON.stringify(guarded)).toBe('{"name":"app data"}');
 	});
 });

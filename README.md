@@ -2033,7 +2033,7 @@ The `ws` object in `open`, `message`, `close`, and `drain` is a [uWebSockets.js 
 - `ws.subscribe(topic)` - subscribe to a topic for `app.publish()`
 - `ws.unsubscribe(topic)` - unsubscribe from a topic
 - `ws.send(data)` - send a message to this connection
-- `ws.end(code?, reason?)` - close with a close frame the client reads: `code` must be 1000-1003, 1007-1014 or 3000-4999 (anything else throws a `TypeError`), and a reason over 123 UTF-8 bytes is shortened at a character boundary. `ws.close()` drops the connection with no close frame, so the client reads 1006 and reconnects
+- `ws.end(code?, reason?)` - close with a close frame the client reads: `code` must be 1000-1003, 1007-1014 or 3000-4999 (anything else throws a `TypeError`, as does a reason without a code), and a reason over 123 UTF-8 bytes is shortened at a character boundary. `ws.close()` drops the connection with no close frame, so the client reads 1006 and reconnects
 
 ---
 
@@ -6561,7 +6561,7 @@ server.platform.__chaos({
 
 **One-shot trigger** (does NOT change continuous chaos state):
 
-- **`worker-flap`** - closes every currently-live WebSocket connection with a clean close frame. Defaults to `code: 1012` ("server restart") and `reason: 'worker restart'`; both are configurable. The server stays up and accepts new connections; an active continuous scenario (e.g. `drop-outbound`) survives the flap and applies to subsequent frames. Use to verify clients reconnect, present their resume token, and your `resume` hook fills the gap correctly.
+- **`worker-flap`** - closes every currently-live WebSocket connection with a clean close frame. Defaults to `code: 1012` ("server restart") and `reason: 'worker restart'`; both are configurable, under the same rule as `ws.end()`, so a code the wire cannot carry throws before any connection is closed. The server stays up and accepts new connections; an active continuous scenario (e.g. `drop-outbound`) survives the flap and applies to subsequent frames. Use to verify clients reconnect, present their resume token, and your `resume` hook fills the gap correctly.
 
 Pass `null` (or call `__chaos()` with no argument) to clear the active continuous scenario; the harness returns to its zero-overhead fast paths. While a scenario is active, `platform.publish` switches from uWS's C++ TopicTree fan-out to a JS-side fanout so the chaos state can intercept per recipient.
 

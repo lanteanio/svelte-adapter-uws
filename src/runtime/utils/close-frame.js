@@ -14,8 +14,6 @@ import { types } from 'node:util';
 /** RFC 6455 5.5.1: a close payload is a two-byte code and at most 123 bytes of reason. */
 export const MAX_CLOSE_REASON_BYTES = 123;
 
-const GUARDED = Symbol.for('svelte-adapter-uws.close-frame-guard');
-
 /**
  * Whether `code` may go on the wire in a close frame. 1004 is reserved; 1005,
  * 1006 and 1015 are only ever reported locally; 1016-2999 is registry and
@@ -87,32 +85,36 @@ export function closeFrameReason(code, reason) {
 }
 
 /**
- * Route every `end()` on the transport's socket objects through the close
- * rule. uWS builds each socket from one shared prototype, so the rule is
- * installed there, once per prototype, and costs nothing per connection. The
- * marker is a registered symbol so a second copy of this module in the same
- * process (two built servers, a duplicated dependency) sees the first one's
- * install instead of wrapping it again. Only a prototype that defines `end`
- * itself is touched: a socket double built as a plain object would otherwise
- * point this at Object.prototype.
+ * The `end` a guarded socket answers with. The transport's own `end` is the
+ * one on the socket's prototype, which the guard shadows and never changes.
+ * @this {any}
+ * @param {unknown} [code]
+ * @param {unknown} [reason]
+ */
+function guardedEnd(code, reason) {
+	const nativeEnd = Object.getPrototypeOf(this).end;
+	if (code === undefined && reason === undefined) return nativeEnd.call(this);
+	const sent = closeFrameReason(code, reason);
+	if (code === undefined) return nativeEnd.call(this);
+	if (sent === undefined) return nativeEnd.call(this, code);
+	return nativeEnd.call(this, code, sent);
+}
+
+const GUARDED_END = Object.freeze({ value: guardedEnd, writable: true, configurable: true, enumerable: false });
+
+/**
+ * Route every `end()` on one of the adapter's sockets through the close rule,
+ * the application's calls included. Installed on the socket itself, not on
+ * the transport's shared prototype, so a uWS server the application runs
+ * beside the adapter keeps the transport's own behaviour. Non-enumerable,
+ * because uWS hands the application this same object as its user data. A
+ * socket that already has an own `end` - one guarded before, or a test
+ * double that defines its own - is left alone.
  * @param {object} ws
  */
 export function guardCloseFrames(ws) {
+	if (Object.hasOwn(ws, 'end')) return;
 	const proto = Object.getPrototypeOf(ws);
-	if (proto === null || proto[GUARDED] === true || !Object.hasOwn(proto, 'end')) return;
-	const nativeEnd = proto.end;
-	if (typeof nativeEnd !== 'function') return;
-	Object.defineProperty(proto, 'end', {
-		configurable: true,
-		enumerable: true,
-		writable: true,
-		value: function end(code, reason) {
-			if (code === undefined && reason === undefined) return nativeEnd.call(this);
-			const sent = closeFrameReason(code, reason);
-			if (code === undefined) return nativeEnd.call(this);
-			if (sent === undefined) return nativeEnd.call(this, code);
-			return nativeEnd.call(this, code, sent);
-		}
-	});
-	Object.defineProperty(proto, GUARDED, { value: true });
+	if (proto === null || typeof proto.end !== 'function') return;
+	Object.defineProperty(ws, 'end', GUARDED_END);
 }

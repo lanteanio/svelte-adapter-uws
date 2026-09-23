@@ -127,3 +127,41 @@ describe('runSim - custom scenario + handler', () => {
 		expect(r.finalState.topicCounts).toEqual({ allowed: 1 });
 	});
 });
+
+describe('runSim - the socket double closes as uWS does', () => {
+	it('reports a close with no code, a close() and an unsendable code the way uWS does', async () => {
+		/** @type {number[]} */
+		const serverCodes = [];
+		let refused = null;
+		let seen = null;
+		await runSim({
+			clients: 0,
+			handler: { close(ws, ctx) { serverCodes.push(ctx.code); } },
+			scenario: async (api) => {
+				const quiet = api.connect({});
+				await api.advance();
+				quiet.serverWs.end();
+				const dropped = api.connect({});
+				await api.advance();
+				dropped.serverWs.close();
+				const kept = api.connect({});
+				await api.advance();
+				try { kept.serverWs.end(5000, 'x'); } catch (err) { refused = err; }
+				seen = {
+					quiet: quiet.closeInfo,
+					dropped: dropped.closeInfo,
+					kept: kept.closeInfo,
+					serverCodes: [...serverCodes]
+				};
+			}
+		});
+		// uWS reports 0 to the server's own close handler for a close frame with
+		// no code, and the peer reads 1005; close() sends no frame, so both read
+		// 1006. An unsendable code is refused and the connection stays open.
+		expect(seen.quiet).toEqual({ code: 1005, reason: '' });
+		expect(seen.dropped).toEqual({ code: 1006, reason: '' });
+		expect(seen.serverCodes).toEqual([0, 1006]);
+		expect(refused).toBeInstanceOf(TypeError);
+		expect(seen.kept).toBeNull();
+	});
+});
