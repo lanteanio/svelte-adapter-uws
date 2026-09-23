@@ -1037,7 +1037,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// send lanes in handler/platform.js call it. Measured before/after on
 	// completeEnvelope: within run noise on every shape. No byte is read,
 	// allocated or copied that was not before, and no copy primitive entered.
-	ingress: 'f2b2cfa26ccba0ba29c53d533b4f1c080502b13f4db3309b4a0b299b3fe8a6af',
+	//
+	// Re-pinned for the per-platform cohort slots. utils/ws-symbols.js replaces
+	// the process-wide cohort hook with WS_COHORT_JOIN / WS_COHORT_LEAVE, read off
+	// the connection's platform; handler/platform.js defines both slots, and
+	// handler.js loses the import-time install and empties a closed connection's
+	// cohort set once released. Membership routing only; no bytes are read, copied
+	// or written differently.
+	ingress: '20008d9be28f5ec2057f56d46987c81822c5af72c98d2db14367c86f6abe11b6',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1941,7 +1948,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// send lanes in handler/platform.js call it. Measured before/after on
 	// completeEnvelope: within run noise on every shape. No byte is read,
 	// allocated or copied that was not before, and no copy primitive entered.
-	platform: 'a028673d71c7ba88ce9a5e3dfacfcb655d59cd60e59d49fc3ac26ce4c445ecd4',
+	//
+	// Re-pinned for the per-platform cohort slots. utils/ws-symbols.js replaces
+	// the process-wide cohort hook with WS_COHORT_JOIN / WS_COHORT_LEAVE, read off
+	// the connection's platform; handler/platform.js defines both slots, and
+	// handler.js loses the import-time install and empties a closed connection's
+	// cohort set once released. Membership routing only; no bytes are read, copied
+	// or written differently.
+	platform: '1689423d535b76e52afac53ebe5edae2fb48ff453ce94606fabdd167141ce143',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2296,7 +2310,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// send lanes in handler/platform.js call it. Measured before/after on
 	// completeEnvelope: within run noise on every shape. No byte is read,
 	// allocated or copied that was not before, and no copy primitive entered.
-	'wire-fanout': 'b9928a2c5ac674b0b35eb31a269b726f806d941de0242cbc6b9a8d0a5e58559a',
+	//
+	// Re-pinned for the per-platform cohort slots. utils/ws-symbols.js replaces
+	// the process-wide cohort hook with WS_COHORT_JOIN / WS_COHORT_LEAVE, read off
+	// the connection's platform; handler/platform.js defines both slots, and
+	// handler.js loses the import-time install and empties a closed connection's
+	// cohort set once released. Membership routing only; no bytes are read, copied
+	// or written differently.
+	'wire-fanout': '16bfd7fd12313640e5edfce727b1492f287224bf57fd392d1048b5b66331179c',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

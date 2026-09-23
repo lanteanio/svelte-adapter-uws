@@ -55,6 +55,58 @@ describeUWS('accounted membership through svelte-adapter-uws/subscriptions', () 
 		}
 	});
 
+	it('enters the worker\'s shared cohort on a topic that is already shared', async () => {
+		// The helpers reach the cohort through the connection's platform, not
+		// through anything the runtime installs in the plugin's module copy, so
+		// this is the case that fails if the slot and the lookup ever disagree.
+		const { WebSocket } = await import('ws');
+		const ws = new WebSocket(server.wsUrl);
+		const frames = { wireIds: [], binary: [], probes: [], envelopes: [] };
+		ws.on('message', (data, isBinary) => {
+			if (isBinary) { frames.binary.push(new Uint8Array(data)); return; }
+			try {
+				const obj = JSON.parse(data.toString());
+				if (obj?.type === 'wire-id') frames.wireIds.push(obj);
+				else if (obj?.topic === 'probe') frames.probes.push(obj);
+				else if (obj?.topic !== undefined && obj?.event !== undefined) frames.envelopes.push(obj);
+			} catch { /* not JSON */ }
+		});
+		await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+		const send = (msg) => ws.send(JSON.stringify(msg));
+		const until = async (pred, what) => {
+			const deadline = Date.now() + 3000;
+			while (!pred()) {
+				if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+				await new Promise((r) => setTimeout(r, 20));
+			}
+		};
+		try {
+			const topic = '__probe:shared-tracked';
+			send({ type: 'hello', caps: ['fixture.shared:1'] });
+			// Shared before anyone holds it: this connection is capable, so the
+			// publish takes the cohort split and registers the topic.
+			send({ type: 'shared-publish', topic, n: 1 });
+			send({ type: 'membership-probe', mode: 'tracked', topic, nonce: 10 });
+			await until(() => frames.probes.some((p) => p.event === 'membership-done' && p.data?.nonce === 10), 'the tracked join');
+			await until(() => frames.wireIds.length >= 1, 'the shared id announce');
+			send({ type: 'shared-publish', topic, n: 2 });
+			await until(() => frames.binary.length >= 1, 'the shared frame');
+			expect(frames.wireIds).toHaveLength(1);
+			expect(frames.wireIds[0].topic).toBe(topic);
+
+			// And the tracked leave takes it out again. The probe answered after
+			// the publish is the fence: the publish's frames leave first.
+			send({ type: 'membership-probe', mode: 'tracked-leave', topic, nonce: 11 });
+			send({ type: 'shared-publish', topic, n: 3 });
+			send({ type: 'membership-probe', mode: 'noop', topic, nonce: 12 });
+			await until(() => frames.probes.some((p) => p.event === 'membership-done' && p.data?.nonce === 12), 'the fence');
+			expect(frames.binary, 'no frame after the tracked leave').toHaveLength(1);
+			expect(frames.envelopes.filter((e) => e.topic === topic), 'and no envelope either').toHaveLength(0);
+		} finally {
+			ws.terminate();
+		}
+	});
+
 	it('shows the drift a hand-written registry entry causes', async () => {
 		// The control that gives the case above its meaning: the same join done
 		// by hand moves the registry and not the counter.

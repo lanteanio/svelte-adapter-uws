@@ -451,53 +451,35 @@ export function tombstonePendingSubscribe(ud, topic) {
 // session per connection), mirroring the native daemon's per-socket grant.
 export const WS_PUBLISH_GRANT = Symbol.for('adapter-uws.ws.publish-grant');
 
-// Shared-fan-out cohort hooks. trackedSubscribe/Unsubscribe live in utils (the
-// low-level membership primitive), but a subscribe to an already-shared topic must
-// also join the matching cohort (and an unsubscribe must leave it + release the
-// wire-id ref), or a plugin that establishes membership server-side silently misses
-// every cohort-split publish. To avoid a utils -> handler import cycle, the handler
-// installs the join/leave behavior here at boot via setCohortHooks; when unset (no
-// shared codec in play, or the in-process test mirror which drives cohorts through
-// its own per-server paths) the tracked* helpers behave exactly as before.
-// Held under a `Symbol.for` key on globalThis rather than module bindings, for
-// the reason spelled out for the derived-prefix registry below: the bundler
-// gives a plugin package and the runtime SEPARATE instances of this module, so
-// the handler installs into one pair of bindings while the copy a plugin's
-// trackedSubscribe reads stays permanently null - and Rollup, seeing a `let`
-// that is never assigned in that copy, tree-shakes the call away entirely. A
-// slot on globalThis is one slot however many copies of the module exist.
-const COHORT_HOOKS = Symbol.for('adapter-uws.cohort-hooks');
-// Logical-subscription accounting has the same duplicated-bundle constraint as
-// cohort hooks: plugins and the runtime can hold separate copies of this
-// module, while every copy mutates the same connection Set. One global hook
-// lets every add/remove charge the production worker's single counter.
+/**
+ * Platform slots carrying the surface's shared-fan-out cohort join and leave,
+ * for {@link trackedSubscribe} / {@link trackedUnsubscribe}. A tracked
+ * subscribe to an already-shared topic must join the matching cohort, and a
+ * tracked unsubscribe must leave it and release the wire-id reference, or a
+ * plugin that establishes membership server-side misses every cohort-split
+ * publish. The cohort registry is surface state, so this module reaches it the
+ * way it reaches {@link WS_REVOKED_UNSUBSCRIBE}: each surface assigns both on
+ * its BASE platform object, and the per-connection clone in `ud[WS_PLATFORM]`
+ * reaches them through the prototype chain. Per platform rather than per
+ * process, because one process can host several servers - the test surface
+ * does, and so does any process that imports more than one built runtime - and
+ * a process-wide slot joins server A's sockets to server B's cohorts. Keyed by
+ * `Symbol.for`, so the separate copy of this module a plugin bundle carries
+ * reads the same slot.
+ *
+ * Signature: `(ws, ud, topic)`, run after the registry update, with the
+ * caller's already-captured userData. A surface with no shared fan-out assigns
+ * neither, and the tracked helpers then change membership only.
+ */
+export const WS_COHORT_JOIN = Symbol.for('adapter-uws.platform.cohort-join');
+export const WS_COHORT_LEAVE = Symbol.for('adapter-uws.platform.cohort-leave');
+
+// Logical-subscription accounting has a duplicated-bundle constraint: the
+// bundler gives a plugin package and the runtime SEPARATE instances of this
+// module, while every copy mutates the same connection Set. One slot on
+// globalThis is one slot however many copies exist, so every add/remove
+// charges the production worker's single counter.
 const SUBSCRIPTION_ACCOUNTING_HOOK = Symbol.for('adapter-uws.subscription-accounting-hook');
-
-/**
- * @returns {{ join: ((ws: any, ud: any, topic: string) => void) | null, leave: ((ws: any, ud: any, topic: string) => void) | null }}
- */
-function cohortHooks() {
-	let hooks = /** @type {any} */ (globalThis)[COHORT_HOOKS];
-	if (!hooks) {
-		hooks = { join: null, leave: null };
-		// Defined, not assigned: an accessor on the key would swallow the
-		// publication and every caller would install into a discarded object.
-		defineSlot(globalThis, COHORT_HOOKS, hooks);
-	}
-	return hooks;
-}
-
-/**
- * Install the shared-fan-out cohort join/leave behavior for trackedSubscribe /
- * trackedUnsubscribe. Idempotent (last install wins); pass nulls to clear.
- * @param {((ws: any, ud: any, topic: string) => void) | null} onJoin
- * @param {((ws: any, ud: any, topic: string) => void) | null} onLeave
- */
-export function setCohortHooks(onJoin, onLeave) {
-	const hooks = cohortHooks();
-	hooks.join = onJoin || null;
-	hooks.leave = onLeave || null;
-}
 
 /**
  * Install the worker-local logical-subscription delta sink. The production
@@ -689,8 +671,7 @@ export function trackedSubscribe(ws, topic) {
 	try {
 		if (subs instanceof Set) addLogicalSubscription(subs, topic);
 		// Join the shared fan-out cohort if the topic is already shared.
-		const _join = cohortHooks().join;
-		if (_join) _join(ws, ud, topic);
+		ud[WS_PLATFORM]?.[WS_COHORT_JOIN]?.(ws, ud, topic);
 	} catch { /* socket died between the calls; close cleanup owns the registry */ }
 	return true;
 }
@@ -727,8 +708,7 @@ export function trackedUnsubscribe(ws, topic) {
 		if (ud[WS_PUBLISH_GRANT] === topic) ud[WS_PUBLISH_GRANT] = undefined;
 		// Leave the shared fan-out cohort (drop both cohort subs + release the wire-id
 		// ref) if the topic is shared, so the socket stops receiving cohort publishes.
-		const _leave = cohortHooks().leave;
-		if (_leave) _leave(ws, ud, topic);
+		ud[WS_PLATFORM]?.[WS_COHORT_LEAVE]?.(ws, ud, topic);
 	} catch { /* socket died; close cleanup owns the registry */ }
 	return ok;
 }
@@ -751,7 +731,7 @@ export function trackedUnsubscribe(ws, topic) {
  * register and hold no reference to a tracker instance, so repeated plugin
  * construction (every test that builds one) cannot accumulate stale closures.
  * The plugins cannot be imported from here - they import the runtime - so each
- * registers its own prefix, the same way the cohort hooks are installed.
+ * registers its own prefix.
  *
  * Held on `globalThis` under a `Symbol.for` key rather than in a module-level
  * binding, because the bundler can and does give the plugin package and the

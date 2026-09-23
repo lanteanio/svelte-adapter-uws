@@ -228,22 +228,17 @@ describeUWS('the test server announces one wire id per cohort membership', () =>
 		server = null;
 	});
 
-	// The harness installs no cohort hooks on the membership primitive, so a
-	// plugin's trackedSubscribe cannot re-join a cohort there. Neither can a
-	// client: all three lanes that could re-join a topic the connection
-	// already holds answer the held topic first, each mirroring
+	// A client cannot re-join a topic its connection already holds: all three
+	// lanes that could answer the held topic first, each mirroring
 	// runtime/handler.js - `platform.subscribe` returns on `subs.has(topic)`,
 	// the single recover lane re-checks after its resume await and acks, and
-	// the batch landing reads its own per-iteration `held` before joining.
-	//
-	// So neither direction of the one-cohort move is reachable in
-	// `createTestServer`, and NOTHING here pins the harness copy of that code:
-	// the cases above drive the BUILT runtime's cohort module, not
-	// `joinCohortT`. It is a mirror kept faithful by reading, which is the gap
-	// the cohort-hook card describes. What a client CAN see the harness prove
-	// is what this case is for: one announce per membership, and a fresh id for
-	// the cohort that forms after the last member left - which happens only if
-	// the reference count really reached zero.
+	// the batch landing reads its own per-iteration `held` before joining. A
+	// plugin's trackedSubscribe can: it reaches the harness's cohort join through
+	// the platform slot, so the held-topic guard in `joinCohortT` is what keeps
+	// this re-join to one announce. What the client sees here is that guard:
+	// one announce per membership, and a fresh id for the cohort that forms
+	// after the last member left - which happens only if the reference count
+	// really reached zero.
 	it('announces once per membership and draws a fresh id after the last member leaves', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
@@ -264,7 +259,7 @@ describeUWS('the test server announces one wire id per cohort membership', () =>
 		const firstId = a.frames.wireIds[0].id;
 
 		// A plugin-style tracked join of the held topic is idempotent on the
-		// registry and, with no cohort hook installed, touches no cohort.
+		// registry and reaches the cohort join, which must not announce again.
 		a.send({ type: 'tracked-join', topic: TOPIC });
 		const joined = await until(() => a.frames.probes.find((p) => p.event === 'tracked-joined'), 'the tracked-join answer');
 		expect(joined.data.ok).toBe(true);

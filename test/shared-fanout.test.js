@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { parseBinaryFrame } from '../src/runtime/wire.js';
 import { SHARED_WIRE_ID_BASE } from '../src/runtime/handler/shared-wire-id.js';
-import { setCohortHooks, trackedSubscribe, trackedUnsubscribe, WS_CAPS, WS_SHARED_COHORTS, WS_SUBSCRIPTIONS } from '../src/runtime/utils.js';
+import { trackedSubscribe, trackedUnsubscribe, WS_CAPS, WS_COHORT_JOIN, WS_COHORT_LEAVE, WS_PLATFORM, WS_SHARED_COHORTS, WS_SUBSCRIPTIONS } from '../src/runtime/utils.js';
 
 let uWS;
 try {
@@ -259,31 +259,193 @@ describeUWS('shared binary fan-out via cohort topics', () => {
 	});
 });
 
-describe('cohort hooks make the trackedSubscribe membership primitive shared-aware', () => {
-	afterEach(() => setCohortHooks(null, null));
-
-	it('trackedSubscribe / trackedUnsubscribe invoke the installed hooks after updating WS_SUBSCRIPTIONS', () => {
+describe('the connection\'s platform makes the trackedSubscribe membership primitive shared-aware', () => {
+	it('trackedSubscribe / trackedUnsubscribe run the platform\'s cohort slots after updating WS_SUBSCRIPTIONS', () => {
 		const joins = [];
 		const leaves = [];
-		setCohortHooks(
-			(ws, ud, topic) => joins.push({ topic, inSubs: ud[WS_SUBSCRIPTIONS].has(topic) }),
-			(ws, ud, topic) => leaves.push({ topic, inSubs: ud[WS_SUBSCRIPTIONS].has(topic) })
-		);
-		const ud = { [WS_SUBSCRIPTIONS]: new Set() };
+		// The per-connection platform is a clone of the surface's base platform,
+		// so the slots are inherited, not own - the lookup must walk the chain.
+		const base = {
+			[WS_COHORT_JOIN]: (ws, ud, topic) => joins.push({ topic, inSubs: ud[WS_SUBSCRIPTIONS].has(topic) }),
+			[WS_COHORT_LEAVE]: (ws, ud, topic) => leaves.push({ topic, inSubs: ud[WS_SUBSCRIPTIONS].has(topic) })
+		};
+		const ud = { [WS_SUBSCRIPTIONS]: new Set(), [WS_PLATFORM]: Object.create(base) };
 		const ws = { subscribe() {}, unsubscribe() {}, getUserData() { return ud; } };
 		trackedSubscribe(ws, 'room');
 		trackedUnsubscribe(ws, 'room');
-		// The join hook runs AFTER subs.add (so joinSharedCohort sees the membership),
-		// the leave hook AFTER subs.delete - matching the production install.
+		// The join runs AFTER subs.add (so joinSharedCohort sees the membership),
+		// the leave AFTER subs.delete - as both surfaces install them.
 		expect(joins).toEqual([{ topic: 'room', inSubs: true }]);
 		expect(leaves).toEqual([{ topic: 'room', inSubs: false }]);
 	});
 
-	it('is a no-op with no hooks installed (default membership behavior preserved)', () => {
-		setCohortHooks(null, null);
-		const ud = { [WS_SUBSCRIPTIONS]: new Set() };
-		const ws = { subscribe() {}, unsubscribe() {}, getUserData() { return ud; } };
-		expect(() => { trackedSubscribe(ws, 'x'); trackedUnsubscribe(ws, 'x'); }).not.toThrow();
-		expect(ud[WS_SUBSCRIPTIONS].has('x')).toBe(false);
+	it('changes membership only on a platform without the slots, or with no platform', () => {
+		for (const platform of [{}, undefined]) {
+			const ud = { [WS_SUBSCRIPTIONS]: new Set(), [WS_PLATFORM]: platform };
+			const ws = { subscribe() {}, unsubscribe() {}, getUserData() { return ud; } };
+			expect(trackedSubscribe(ws, 'x')).toBe(true);
+			expect(ud[WS_SUBSCRIPTIONS].has('x')).toBe(true);
+			expect(trackedUnsubscribe(ws, 'x')).toBe(true);
+			expect(ud[WS_SUBSCRIPTIONS].has('x')).toBe(false);
+		}
+	});
+});
+
+describeUWS('a tracked join on createTestServer joins that server\'s cohort', () => {
+	// The helper sockets live on the server; a plugin reaches them through its
+	// own hook, so the case subscribes from inside the server's message hook.
+	// Every operation is answered once it has run, so a case waits for the
+	// answer instead of sleeping: a frame the operation sends leaves before its
+	// answer on the same connection, so a count read after the answer is final.
+	const pluginServer = () => createTestServer({
+		handler: {
+			message(ws, { data, platform }) {
+				const msg = JSON.parse(Buffer.from(data).toString());
+				if (msg.type === 'plugin-join') trackedSubscribe(ws, msg.topic);
+				if (msg.type === 'plugin-leave') trackedUnsubscribe(ws, msg.topic);
+				platform.send(ws, 'probe', 'done', { nonce: msg.nonce });
+			}
+		}
+	});
+
+	/** A capable client that holds no wire subscription to TOPIC. */
+	async function bareClient(url) {
+		const { WebSocket } = await import('ws');
+		const ws = new WebSocket(url);
+		const frames = { wireIds: [], json: [], binary: [], done: [] };
+		ws.on('message', (data, isBinary) => {
+			if (isBinary) { frames.binary.push(new Uint8Array(data)); return; }
+			try {
+				const obj = JSON.parse(data.toString());
+				if (obj?.type === 'wire-id') frames.wireIds.push(obj);
+				else if (obj?.topic === 'probe') frames.done.push(obj.data.nonce);
+				else if (obj?.topic !== undefined && obj?.event !== undefined) frames.json.push(obj);
+			} catch { /* not JSON */ }
+		});
+		await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+		ws.send(JSON.stringify({ type: 'hello', caps: [CAP] }));
+		clients.push(ws);
+		let nonce = 0;
+		/** Run a plugin operation on the server and wait until it has. */
+		const op = async (type, topic = TOPIC) => {
+			const n = ++nonce;
+			ws.send(JSON.stringify({ type, topic, nonce: n }));
+			await until(() => frames.done.includes(n));
+		};
+		return { ws, frames, op };
+	}
+
+	/** Wait until every connection on the server has its hello's capability. */
+	async function capable(srv) {
+		await until(() => srv.wsConnections.size > 0 && [...srv.wsConnections].every((x) => x.getUserData()[WS_CAPS]?.has(CAP)));
+	}
+
+	afterEach(async () => {
+		for (const ws of clients) { try { ws.close(); } catch { /* already closed */ } }
+		clients = [];
+		await server?.close();
+		server = null;
+		await serverB?.close();
+		serverB = null;
+	});
+
+	it('announces the shared id once and delivers one binary frame per publish, and a second tracked join adds nothing', async () => {
+		clients = [];
+		server = await pluginServer();
+		// The topic becomes shared on its first shared publish, which takes the
+		// cohort split only once a capable client is connected. It is made
+		// shared before anyone holds it, so the tracked join below is the one
+		// that must enter it.
+		const c = await bareClient(server.wsUrl);
+		await capable(server);
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 0 }, sharedCodec());
+		await c.op('plugin-join');
+		expect(c.frames.wireIds).toHaveLength(1);
+		expect(c.frames.wireIds[0].id).toBeGreaterThanOrEqual(SHARED_WIRE_ID_BASE);
+
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec());
+		await c.op('noop');
+		expect(c.frames.binary).toHaveLength(1);
+
+		await c.op('plugin-join');
+		expect(c.frames.wireIds, 'the second join of the held topic announces nothing').toHaveLength(1);
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 2 }, sharedCodec());
+		await c.op('noop');
+		expect(c.frames.binary, 'one frame per publish').toHaveLength(2);
+		expect(c.frames.json, 'and never the envelope beside it').toHaveLength(0);
+		expect(parseBinaryFrame(c.frames.binary[1]).topicId).toBe(c.frames.wireIds[0].id);
+
+		// The tracked leave takes it out of both cohorts.
+		await c.op('plugin-leave');
+		server.platform.publishWire(TOPIC, 'snapshot', { tick: 3 }, sharedCodec());
+		await c.op('noop');
+		expect(c.frames.binary).toHaveLength(2);
+		expect(c.frames.json).toHaveLength(0);
+	});
+
+	it('does not join a cohort of another server in the same process', async () => {
+		clients = [];
+		server = await pluginServer();
+		serverB = await pluginServer();
+		// Shared on B only. A's tracked join must consult A's registry, where the
+		// topic is not shared, and stay a plain subscriber.
+		const a = await bareClient(server.wsUrl);
+		const b = await bareClient(serverB.wsUrl);
+		await capable(server);
+		await capable(serverB);
+		serverB.platform.publishWire(TOPIC, 'snapshot', { tick: 0 }, sharedCodec());
+		// B's own member proves the topic is shared there: its tracked join is
+		// announced, so a cohort exists for A's join to stray into.
+		await b.op('plugin-join');
+		expect(b.frames.wireIds).toHaveLength(1);
+		await a.op('plugin-join');
+		expect(a.frames.wireIds, 'no announce from a cohort it never entered').toHaveLength(0);
+		const ud = [...server.wsConnections][0].getUserData();
+		expect(ud[WS_SUBSCRIPTIONS].has(TOPIC), 'the join itself ran').toBe(true);
+		expect(ud[WS_SHARED_COHORTS]?.has(TOPIC) ?? false).toBe(false);
+	});
+});
+
+// The simulator's socket still answers getUserData after close, which a real
+// uWS socket does not, so a tracked leave that runs after the close - from a
+// continuation of an async close hook - reaches the cohort leave there. The
+// close already released the connection's reference; a second release would
+// reclaim the id while another member still holds it, and every later shared
+// publish would build no frame for that member.
+describeUWS('a tracked leave after close in the simulator', () => {
+	it('releases nothing the close already released', async () => {
+		const { runSim } = await import('../src/sim.js');
+		let lateLeave = null;
+		let bBinary = -1;
+		await runSim({
+			handler: {
+				message(ws, { data }) {
+					const msg = JSON.parse(Buffer.from(data).toString());
+					if (msg.type === 'plugin-join') trackedSubscribe(ws, msg.topic);
+				},
+				close(ws) { lateLeave = () => trackedUnsubscribe(ws, TOPIC); }
+			},
+			async scenario(api) {
+				const a = api.connect();
+				const b = api.connect();
+				await api.advance(100);
+				for (const c of [a, b]) {
+					c.send({ type: 'hello', caps: [CAP] });
+					c.send({ type: 'plugin-join', topic: TOPIC });
+				}
+				await api.advance(100);
+				// The first shared publish moves both members into the binary cohort.
+				api.server.platform.publishWire(TOPIC, 'snapshot', { tick: 1 }, sharedCodec());
+				await api.advance(100);
+				a.close();
+				await api.advance(100);
+				expect(lateLeave, 'the close hook ran').toBeTypeOf('function');
+				lateLeave();
+				api.server.platform.publishWire(TOPIC, 'snapshot', { tick: 2 }, sharedCodec());
+				await api.advance(100);
+				bBinary = b.frames().filter((f) => f.isBinary).length;
+			}
+		});
+		expect(bBinary, 'the remaining member gets both shared frames').toBe(2);
 	});
 });

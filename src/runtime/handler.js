@@ -57,7 +57,6 @@ import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
 import { signalRelayGaps } from './handler/lifecycle.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
-import { setCohortHooks } from './utils.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { hasMultipleWorkers } from './handler/cluster-sequence-policy.js';
@@ -128,17 +127,6 @@ function traceUpgradeRejection(req, headers, reason) {
 		}
 	}, () => undefined);
 }
-
-// Make the low-level membership primitive (trackedSubscribe / trackedUnsubscribe,
-// used by plugins to establish server-side membership) cohort-aware: a tracked
-// subscribe to an already-shared topic joins its cohort + announces the server-wide
-// id; a tracked unsubscribe leaves the cohort + releases the wire-id ref. Without
-// this, a plugin that server-side-subscribes a socket to a shared topic AFTER it was
-// promoted would be in no cohort and miss every cohort-split publish.
-setCohortHooks(
-	(ws, ud, topic) => { if (sharedTopics.has(topic)) joinSharedCohort(ws, ud, topic, sharedTopics.get(topic)); },
-	(ws, ud, topic) => { if (sharedTopics.has(topic)) leaveSharedCohort(ws, ud, topic); }
-);
 
 // Every logical membership mutation (wire, platform, or tracked plugin lane)
 // routes through add/removeLogicalSubscription. Keep the counter non-negative
@@ -3310,8 +3298,10 @@ if (WS_ENABLED) {
 				// Release each shared-topic wire-id reference this connection held so
 				// the server-wide id table reclaims a topic on its last cohort leave.
 				// uWS drops the cohort subscriptions themselves natively on close.
+				// Emptied once released, so nothing that still holds the userData can
+				// release a reference twice.
 				const sharedCohorts = userData[WS_SHARED_COHORTS];
-				if (sharedCohorts) { for (const t of sharedCohorts) releaseSharedWireId(t); }
+				if (sharedCohorts) { for (const t of sharedCohorts) releaseSharedWireId(t); sharedCohorts.clear(); }
 				// Free the per-connection send-gate slot (only present when the
 				// connection opted into internal flow control).
 				if (userData[WS_LEASE]) userData[WS_LEASE] = undefined;

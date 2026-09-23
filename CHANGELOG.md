@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every value JSON can carry is sent exactly as before; measured on the envelope builder, the added check is within run noise.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a plugin's tracked join of an already shared topic gets binary frames under createTestServer.** The test server never connected `trackedSubscribe` to its shared fan-out, so a capable socket a plugin subscribed to an already shared topic received no frame from its publishes; it now joins the binary cohort, as in production.
+  - **Affects:** Plugin and extension suites that call `trackedSubscribe` or `trackedUnsubscribe` from `svelte-adapter-uws/subscriptions` under `createTestServer` or `svelte-adapter-uws/sim`, on topics published with a `shared: true` codec.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Production behaviour for a single server is unchanged. A capable socket joined this way receives one wire-id announce and then the binary frame, a second join of a topic it holds announces nothing, and a tracked leave, including the one a revoked subscribe runs, takes it out of the cohort. A socket that joined before the topic's first shared publish was already moved into the cohort by that publish. Each server now keeps its own join and leave, so a process that runs several servers no longer joins one server's sockets to another's cohort.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -136,6 +142,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Tracked membership joins the shared cohort of the connection's own server.**
+  `trackedSubscribe` and `trackedUnsubscribe` read the cohort join and leave
+  from `Symbol.for` slots each surface sets on its base platform, where they
+  used to call a process-wide hook the production handler installed at
+  import. `createTestServer` sets its own, and the close path empties the
+  connection's cohort set once it has released it, so a late leave in the
+  simulator cannot release a reference twice. `test/shared-fanout.test.js`
+  pins the join, a second join, the leave, two servers in one process and the
+  simulator's late leave; `test/subscriptions-entry-real.test.js` pins the
+  production join and leave through the public entry.
 
 - **Every envelope builder refuses data JSON has no form for.**
   `envelopeData` (utils/epoch.js) is the `JSON.stringify` the builders already
