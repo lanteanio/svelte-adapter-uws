@@ -36,6 +36,12 @@
 //   while blind to the one thing it plants. A lane that has quietly lost the
 //   ability to detect one then says so, instead of reporting a pass.
 //
+//   THE RESIDENT SET IS NOT THE ONLY READING. It carries allocator pages that
+//   nothing holds and hides a leak whose pages get reused, so two more gates
+//   read what it cannot: heap plus external after forced collections settle,
+//   at both ends of the run, and the live WebSocket count after a cooldown in
+//   which every client has closed. See judge().
+//
 // EXIT CODES. 0 clean; 1 a scenario's verdict failed (a leak, an error rate, a
 // latency creep, or a self-check that did not detect its own planted leak);
 // 2 the lane could not reach a verdict it trusts (the server never became
@@ -57,6 +63,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { detectGrowth, DEFAULT_MIN_SAMPLES as MIN_SAMPLES } from '../src/runtime/leak-detect.js';
 import { buildFixtureOnce } from '../test/helpers/fixture-build.js';
+import { FIXTURE_VARIANTS } from '../test/fixture/variants.js';
 
 const require = createRequire(import.meta.url);
 const fixtureDir = fileURLToPath(new URL('../test/fixture', import.meta.url));
@@ -81,10 +88,24 @@ export const MAX_P95_CREEP = 0.5;
 export const RSS_TOLERANCE_BYTES = 16 * 1024 * 1024;
 /** Bytes per sample below which a slope is not worth escalating. */
 export const RSS_MIN_SLOPE_BYTES = 256 * 1024;
+/**
+ * How much settled retention may grow across the run, as a share of the
+ * baseline AND in bytes: both must be exceeded. The ratio is what makes a
+ * retained megabyte count against a small settled heap; the byte floor is what
+ * stops a bounded structure filling once from reading as a leak.
+ */
+export const MAX_RETAINED_GROWTH = 0.3;
+export const RETAINED_TOLERANCE_BYTES = 2 * 1024 * 1024;
 /** Load applied before anything is measured, so the working set is filled first. */
 export const WARMUP_MS = 60000;
 /** Worked but unsampled after the forced collection, before the settle probe begins. */
 export const RESETTLE_MS = 20000;
+/** Idle time after the window before the final reading, so every client has finished closing. */
+export const COOLDOWN_MS = 3000;
+/** Forced collections a settled reading may take before it is reported unsettled. */
+export const SETTLED_PROBE_ROUNDS = 8;
+/** Two consecutive settled readings agreeing within this share are one reading. */
+export const SETTLED_PROBE_TOLERANCE = 0.02;
 
 /**
  * @param {number[]} values
@@ -97,20 +118,47 @@ export function quantile(values, p) {
 }
 
 /**
+ * What the retention gate compares: heap PLUS external. A Buffer lives outside
+ * the JS heap, and buffers are what a server retains.
+ *
+ * @param {{ heapUsed: number, external?: number }} p
+ */
+export const retainedBytes = (p) => p.heapUsed + (p.external || 0);
+
+/**
  * Turn one scenario's measurements into a verdict.
  *
- * Three independent gates, each reported whether or not it fired, because "no
- * leak" is only meaningful next to what else was true at the time: a window
- * that lost 4% of its requests has not proved the memory is flat, it has proved
- * the server stopped answering.
+ * Every gate is reported whether or not it fired, because "no leak" is only
+ * meaningful next to what else was true at the time: a window that lost 4% of
+ * its requests has not proved the memory is flat, it has proved the server
+ * stopped answering.
  *
- * @param {{ rss: number[], errors: number, requests: number, baselineP95: number, windowP95: number, settled: boolean }} m
- * @param {{ minRSquared?: number, maxErrorRate?: number, maxP95Creep?: number, tolerance?: number, minSlope?: number }} [opts]
+ * Two gates read what the resident set cannot show. RETAINED compares heap
+ * plus external after forced collections at both ends of the run: what
+ * survives a settled collection is held by something, while the resident set
+ * also carries allocator pages nothing holds. CONNECTIONS reads the live
+ * WebSocket count after the cooldown, when every client the scenario opened
+ * has closed: one still registered is one the close path did not release,
+ * which memory hides when the allocator reuses its pages.
+ *
+ * @param {{
+ *   rss: number[],
+ *   errors: number,
+ *   requests: number,
+ *   baselineP95: number,
+ *   windowP95: number,
+ *   settled: boolean,
+ *   retained?: { baseline: number, final: number, settled: boolean },
+ *   connectionsAfter?: number
+ * }} m
+ * @param {{ minRSquared?: number, maxErrorRate?: number, maxP95Creep?: number, tolerance?: number, minSlope?: number, maxRetainedGrowth?: number, retainedTolerance?: number }} [opts]
  */
 export function judge(m, opts = {}) {
 	const minRSquared = opts.minRSquared ?? MIN_R_SQUARED;
 	const maxErrorRate = opts.maxErrorRate ?? MAX_ERROR_RATE;
 	const maxP95Creep = opts.maxP95Creep ?? MAX_P95_CREEP;
+	const maxRetainedGrowth = opts.maxRetainedGrowth ?? MAX_RETAINED_GROWTH;
+	const retainedTolerance = opts.retainedTolerance ?? RETAINED_TOLERANCE_BYTES;
 
 	const growth = detectGrowth(m.rss, {
 		warmup: 0,
@@ -133,6 +181,17 @@ export function judge(m, opts = {}) {
 	// missing baseline is a health problem rather than a passing creep gate.
 	const p95Creep = m.baselineP95 > 0 ? (m.windowP95 - m.baselineP95) / m.baselineP95 : null;
 
+	/** @type {{ baseline: number, final: number, delta: number, ratio: number, leaking: boolean } | null} */
+	let retained = null;
+	if (m.retained) {
+		const delta = m.retained.final - m.retained.baseline;
+		const ratio = m.retained.baseline > 0 ? delta / m.retained.baseline : 0;
+		retained = {
+			baseline: m.retained.baseline, final: m.retained.final, delta, ratio,
+			leaking: ratio > maxRetainedGrowth && delta > retainedTolerance
+		};
+	}
+
 	/** @type {string[]} */
 	const failures = [];
 	/** @type {string[]} */
@@ -141,6 +200,15 @@ export function judge(m, opts = {}) {
 	if (!m.settled) health.push('the resident set never settled before the window opened, so nothing measured here is a baseline');
 	if (m.rss.length < MIN_SAMPLES) health.push(`only ${m.rss.length} resident-set sample(s): the growth fit needs ${MIN_SAMPLES}, so it could not judge`);
 	if (p95Creep === null) health.push('no warmed baseline latency, so the creep gate could not run');
+	// A settle loop that ran out of rounds returned whichever reading it stopped
+	// on, so the comparison was made against a number that does not mean "still
+	// retained".
+	if (m.retained && !m.retained.settled) health.push('retention never settled at one end of the run, so the retained comparison is noise');
+	// A count the probe could not read is not zero: reporting it as a pass is a
+	// gate that cannot fail.
+	if ('connectionsAfter' in m && !(Number.isInteger(m.connectionsAfter) && m.connectionsAfter >= 0)) {
+		health.push('the probe could not read the live connection count, so the connections gate did not run');
+	}
 
 	if (growth.leaking) {
 		failures.push(
@@ -148,6 +216,16 @@ export function judge(m, opts = {}) {
 			`(slope ${(growth.slope / 1024).toFixed(0)} KiB/sample, r-squared ${growth.rSquared.toFixed(2)}, ` +
 			`monotonic ${(growth.monotonicFraction * 100).toFixed(0)}%)`
 		);
+	}
+	if (retained && retained.leaking) {
+		failures.push(
+			`retained (heap+external) grew ${(retained.ratio * 100).toFixed(1)}% across the run ` +
+			`(${(retained.baseline / 1048576).toFixed(1)} MiB settled to ${(retained.final / 1048576).toFixed(1)} MiB), ` +
+			`over the ${(maxRetainedGrowth * 100).toFixed(0)}% and ${(retainedTolerance / 1048576).toFixed(0)} MiB ceilings`
+		);
+	}
+	if (Number.isInteger(m.connectionsAfter) && m.connectionsAfter > 0) {
+		failures.push(`${m.connectionsAfter} WebSocket connection(s) still registered after cooldown; every client had closed`);
 	}
 	if (errorRate > maxErrorRate) {
 		failures.push(`${(errorRate * 100).toFixed(2)}% of ${m.requests} requests failed, over the ${(maxErrorRate * 100).toFixed(2)}% ceiling`);
@@ -159,7 +237,7 @@ export function judge(m, opts = {}) {
 		);
 	}
 
-	return { growth, errorRate, p95Creep, failures, health, failing: failures.length > 0 };
+	return { growth, ...(retained ? { retained } : {}), errorRate, p95Creep, failures, health, failing: failures.length > 0 };
 }
 
 /**
@@ -170,6 +248,10 @@ export function judge(m, opts = {}) {
  * deliberately leaking server can also shed requests or creep its p95, and a
  * self-check that accepted any failing verdict would pass while the growth
  * gate itself was blind - the exact quiet death the scenario exists to catch.
+ *
+ * The retention gate does not count either, although the planted buffers trip
+ * it: a self-check it satisfied would certify a lane whose growth gate, the one
+ * every runtime in the family shares, had gone blind.
  *
  * @param {{ growth?: { leaking?: boolean }, failing?: boolean, failures?: string[] }} record
  * @returns {{ pass: boolean, reason: string }}
@@ -271,7 +353,88 @@ function get(port, pathname, agent) {
 async function probe(port, op, agent) {
 	const res = await get(port, `/__leak?op=${op}`, agent);
 	if (!res.ok) throw new Error(`leak probe "${op}" answered ${res.body || 'nothing'} - is LEAK_PROBE armed in the child?`);
-	return JSON.parse(res.body);
+	const body = JSON.parse(res.body);
+	if (op === 'gc' && body.collected !== true) {
+		throw new Error(`the server could not force a collection (${body.reason || 'no reason given'}); nothing measured here would be settled`);
+	}
+	return body;
+}
+
+/**
+ * A heap reading that has stopped moving, for the retention gate.
+ *
+ * One forced collection is not enough: the first reading after a churn still
+ * carries what the next collection frees, so single readings of a healthy run
+ * swing far wider than any ceiling could sit inside. Readings are taken until
+ * two consecutive ones agree, and they are compared on heap plus external -
+ * the quantity the verdict reads - because external moves while the heap holds
+ * still.
+ *
+ * @param {number} port @param {http.Agent} agent
+ */
+async function settledProbe(port, agent) {
+	await probe(port, 'gc', agent);
+	let last = await probe(port, 'mem', agent);
+	for (let round = 2; round <= SETTLED_PROBE_ROUNDS; round++) {
+		await sleep(200);
+		await probe(port, 'gc', agent);
+		const next = await probe(port, 'mem', agent);
+		const agreed = Math.abs(retainedBytes(next) - retainedBytes(last)) <= retainedBytes(last) * SETTLED_PROBE_TOLERANCE;
+		last = next;
+		if (agreed) return { ...last, rounds: round, unsettled: false };
+	}
+	return { ...last, rounds: SETTLED_PROBE_ROUNDS, unsettled: true };
+}
+
+/**
+ * Topics the churn scenario subscribes to, a small fixed set: a unique topic
+ * per connection grows the bounded per-topic maps toward their cap, which is
+ * designed behaviour and reads exactly like a leak until the cap is reached.
+ */
+const CHURN_TOPICS = Array.from({ length: 32 }, (_, i) => `leak-churn-${i}`);
+
+/**
+ * Handshakes per second the churn scenario drives: four fifths of what the
+ * fixture's per-address upgrade limit admits. Every lane client connects from
+ * one loopback address, so the limit is a global cap here, and a rate above it
+ * measures the limiter's 429s rather than the close path. Read from the build's
+ * own options, so the two cannot drift apart.
+ */
+const CHURN_RATE_PER_SECOND = (() => {
+	const { upgradeRateLimit = 10, upgradeRateLimitWindow = 10 } = FIXTURE_VARIANTS.default.websocket;
+	return upgradeRateLimit === 0 ? 50 : Math.max(1, Math.floor((0.8 * upgradeRateLimit) / upgradeRateLimitWindow));
+})();
+
+/**
+ * Connect, subscribe, wait for the answer, close. Per-connection state -
+ * subscriptions, wire ids, cohort refs, seq counters - is what a close path
+ * strands when it is wrong, and none of it is reachable from HTTP.
+ *
+ * @param {number} port @param {number} i
+ * @returns {Promise<{ ms: number, ok: boolean }>}
+ */
+function churnOnce(port, i) {
+	const { WebSocket } = require('ws');
+	const started = performance.now();
+	return new Promise((resolve) => {
+		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+		let done = false;
+		const finish = (ok) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			try { ws.close(); } catch { /* already closing */ }
+			resolve({ ms: performance.now() - started, ok });
+		};
+		const timer = setTimeout(() => finish(false), 5000);
+		ws.on('error', () => finish(false));
+		ws.on('open', () => ws.send(JSON.stringify({ type: 'subscribe', topic: CHURN_TOPICS[i % CHURN_TOPICS.length], ref: 1 })));
+		ws.on('message', (data) => {
+			let msg = null;
+			try { msg = JSON.parse(data.toString()); } catch { /* not a control frame */ }
+			if (msg && (msg.type === 'subscribed' || msg.type === 'subscribe-denied')) finish(msg.type === 'subscribed');
+		});
+	});
 }
 
 /**
@@ -289,19 +452,20 @@ async function driveAtRate({ ms, ratePerSecond, drive, startIndex = 0 }) {
 	// One request per `setTimeout(1000 / rate)` is the obvious spelling and it
 	// cannot hold a rate: the platform timer's granularity is the floor on every
 	// gap, so a 20 ms interval became roughly 30 ms here and the lane delivered
-	// two thirds of the rate it printed. Ticking every 25 ms and issuing the
-	// whole tick's worth is granularity-proof, and computing each tick's due
-	// time from the START rather than from the last one keeps the error from
-	// accumulating across a window measured in minutes.
+	// two thirds of the rate it printed. Ticking every 25 ms is granularity-
+	// proof, and each tick issues however many requests are due by its end,
+	// counted from the START: a fixed count per tick rounds the rate to a
+	// multiple of forty a second, and a count kept from the last tick lets the
+	// error accumulate across a window measured in minutes.
 	const tickMs = 25;
-	const perTick = Math.max(1, Math.round((ratePerSecond * tickMs) / 1000));
 	const began = performance.now();
 	const ticks = Math.max(1, Math.round(ms / tickMs));
 	/** @type {Promise<{ ms: number, ok: boolean }>[]} */
 	const inFlight = [];
 	let issued = startIndex;
 	for (let tick = 0; tick < ticks; tick++) {
-		for (let i = 0; i < perTick; i++) inFlight.push(drive(issued++));
+		const dueCount = Math.floor(((tick + 1) * tickMs * ratePerSecond) / 1000);
+		while (inFlight.length < dueCount) inFlight.push(drive(issued++));
 		const due = began + (tick + 1) * tickMs;
 		const wait = due - performance.now();
 		if (wait > 0) await sleep(wait);
@@ -319,7 +483,7 @@ async function driveAtRate({ ms, ratePerSecond, drive, startIndex = 0 }) {
 	};
 }
 
-export const SCENARIOS = ['http', 'ws', 'selfcheck'];
+export const SCENARIOS = ['http', 'ws', 'churn', 'selfcheck'];
 
 /**
  * @param {string} name
@@ -364,6 +528,12 @@ async function runScenario(name, { minutes }) {
 					return { ms: performance.now() - started, ok: false };
 				}
 			};
+		} else if (name === 'churn') {
+			// The other half of the WebSocket plane: connections that come and go
+			// instead of topics on held ones. It is what gives the connections
+			// gate something to read - after the cooldown every one of these has
+			// closed, so any still registered is one the close path kept.
+			drive = (i) => churnOnce(port, i);
 		} else if (name === 'selfcheck') {
 			// A real leak, armed through the probe: each call retains a buffer
 			// inside the SERVER. If the verdict below comes back clean, the lane
@@ -391,7 +561,7 @@ async function runScenario(name, { minutes }) {
 			};
 		}
 
-		const ratePerSecond = name === 'ws' ? 200 : 50;
+		const ratePerSecond = name === 'ws' ? 200 : name === 'churn' ? CHURN_RATE_PER_SECOND : 50;
 
 		// WARMUP. Fills the working set, JITs the hot paths and gives the creep
 		// gate a baseline taken under the same load as the window.
@@ -425,8 +595,12 @@ async function runScenario(name, { minutes }) {
 		// means a run of rounds inside a band, not one round that failed to
 		// fall - see the run length below, which is calibrated against this
 		// server's own plateaus.
-		await probe(port, 'gc', probeAgent);
-		nextIndex = (await driveAtRate({ ms: RESETTLE_MS, ratePerSecond, drive, startIndex: nextIndex })).nextIndex;
+		//
+		// The collection is also the retention gate's baseline: forced until two
+		// readings agree. No cooldown before it, unlike the final reading - the
+		// cooldown exists for the connections gate, which reads only the final.
+		const baseline = await settledProbe(port, probeAgent);
+		nextIndex =(await driveAtRate({ ms: RESETTLE_MS, ratePerSecond, drive, startIndex: nextIndex })).nextIndex;
 		let settled = false;
 		let previous = null;
 		let stableRounds = 0;
@@ -475,10 +649,23 @@ async function runScenario(name, { minutes }) {
 			rss.push((await probe(port, 'mem', probeAgent)).rss);
 		}
 
+		// FINAL. Every client this scenario opened is closed, and the cooldown
+		// gives each close time to finish, which is what makes the connection
+		// count mean "still registered".
+		for (const ws of sockets) ws.close();
+		await sleep(COOLDOWN_MS);
+		const final = await settledProbe(port, probeAgent);
+
 		const verdict = judge({
 			rss, errors, requests, baselineP95,
 			windowP95: quantile(latencies, 0.95),
-			settled
+			settled,
+			retained: {
+				baseline: retainedBytes(baseline),
+				final: retainedBytes(final),
+				settled: !baseline.unsettled && !final.unsettled
+			},
+			connectionsAfter: final.connections
 		});
 
 		// The warmup is held to the SAME error rate as the window, not to zero.
@@ -493,6 +680,8 @@ async function runScenario(name, { minutes }) {
 			requests, errors, baselineP95, windowP95: quantile(latencies, 0.95),
 			rss, settled, settleReadings, warmRequests: warm.requests, warmErrors: warm.errors,
 			achievedRatePerSecond: achieved.length > 0 ? achieved.reduce((a, b) => a + b, 0) / achieved.length : 0,
+			settledRounds: { baseline: baseline.rounds, final: final.rounds },
+			connectionsAfter: final.connections,
 			...verdict
 		};
 	} finally {
@@ -549,6 +738,10 @@ async function main() {
 			`p95 ${record.baselineP95.toFixed(1)}ms warmed -> ${record.windowP95.toFixed(1)}ms`);
 		console.log(`[leak-lane] ${name}: rss MiB over the window: ${rssMiB}`);
 		console.log(`[leak-lane] ${name}: fit r-squared ${record.growth.rSquared.toFixed(2)}, verdict ${record.growth.reason}`);
+		console.log(`[leak-lane] ${name}: retained (heap+external) ${(record.retained.baseline / 1048576).toFixed(1)} MiB -> ` +
+			`${(record.retained.final / 1048576).toFixed(1)} MiB (${(record.retained.ratio * 100).toFixed(1)}%, settled over ` +
+			`${record.settledRounds.baseline}/${record.settledRounds.final} collections), ` +
+			`connections after cooldown ${record.connectionsAfter}`);
 		if (record.settleReadings) {
 			console.log(`[leak-lane] ${name}: settle MiB before the window opened: ` +
 				record.settleReadings.map((b) => (b / 1048576).toFixed(0)).join(' ') +

@@ -12,9 +12,12 @@
 // which is why the fit quality is a vote.
 
 import { describe, it, expect } from 'vitest';
-import { judge, selfCheckVerdict, quantile, MIN_R_SQUARED, MAX_ERROR_RATE, MAX_P95_CREEP, RSS_TOLERANCE_BYTES } from '../scripts/leak-lane.js';
+import {
+	judge, selfCheckVerdict, quantile, retainedBytes,
+	MIN_R_SQUARED, MAX_ERROR_RATE, MAX_P95_CREEP, RSS_TOLERANCE_BYTES, MAX_RETAINED_GROWTH, RETAINED_TOLERANCE_BYTES
+} from '../scripts/leak-lane.js';
 import { detectGrowth, DEFAULT_MIN_SAMPLES } from '../src/runtime/leak-detect.js';
-import { hasUWS, startRealRuntime, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
+import { hasUWS, startRealRuntime, connectRealClient, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 
 const MiB = 1048576;
 
@@ -135,6 +138,69 @@ describe('the leak lane reaches a verdict the way it says it does', () => {
 	});
 });
 
+// The two gates that read what the resident set cannot. Each is asserted from
+// both sides of its line, and a record measured without them judges exactly as
+// it did before they existed.
+describe('the retention gate compares settled heap plus external', () => {
+	const settledRun = (baseline, final) => ({ ...HEALTHY, retained: { baseline, final, settled: true } });
+
+	it('counts external, because a Buffer lives outside the heap', () => {
+		expect(retainedBytes({ heapUsed: 10, external: 5 })).toBe(15);
+		expect(retainedBytes({ heapUsed: 10 })).toBe(10);
+	});
+
+	it('fails growth past the ratio when it is also past the byte floor', () => {
+		const base = 40 * MiB;
+		const under = judge(settledRun(base, base * (1 + MAX_RETAINED_GROWTH) - 1));
+		const over = judge(settledRun(base, base * (1 + MAX_RETAINED_GROWTH) + 1));
+		expect(under.failing).toBe(false);
+		expect(under.retained.leaking).toBe(false);
+		expect(over.failing).toBe(true);
+		expect(over.retained.leaking).toBe(true);
+		expect(over.failures[0]).toMatch(/retained \(heap\+external\) grew/);
+	});
+
+	it('does not fail a bounded structure filling once on a small baseline', () => {
+		// Past the ratio, under the byte floor: a cache reaching its cap, not a
+		// per-request leak. The floor is what lets the ratio stay tight.
+		const small = judge(settledRun(3 * MiB, 3 * MiB + RETAINED_TOLERANCE_BYTES - 1));
+		expect(small.retained.ratio, 'the premise: the ratio alone would fail this').toBeGreaterThan(MAX_RETAINED_GROWTH);
+		expect(small.retained.leaking).toBe(false);
+		const large = judge(settledRun(3 * MiB, 3 * MiB + RETAINED_TOLERANCE_BYTES + 1));
+		expect(large.retained.leaking).toBe(true);
+	});
+
+	it('reports retention that never settled as a health problem', () => {
+		const verdict = judge({ ...HEALTHY, retained: { baseline: 40 * MiB, final: 41 * MiB, settled: false } });
+		expect(verdict.failing).toBe(false);
+		expect(verdict.health.join(' ')).toMatch(/retention never settled/);
+	});
+
+	it('leaves a record measured without it exactly as it was', () => {
+		const verdict = judge(HEALTHY);
+		expect('retained' in verdict).toBe(false);
+		expect(verdict.health).toEqual([]);
+	});
+});
+
+describe('the connections gate reads the live count after the cooldown', () => {
+	it('passes at zero and fails on any connection still registered', () => {
+		expect(judge({ ...HEALTHY, connectionsAfter: 0 }).failing).toBe(false);
+		const leaked = judge({ ...HEALTHY, connectionsAfter: 3 });
+		expect(leaked.failing).toBe(true);
+		expect(leaked.failures[0]).toMatch(/3 WebSocket connection\(s\) still registered/);
+	});
+
+	it('reports a count the probe could not read instead of passing on it', () => {
+		for (const unread of [-1, undefined, null, 1.5]) {
+			const verdict = judge({ ...HEALTHY, connectionsAfter: unread });
+			expect(verdict.failing, `connectionsAfter ${unread}`).toBe(false);
+			expect(verdict.health.join(' '), `connectionsAfter ${unread}`).toMatch(/could not read the live connection count/);
+		}
+		expect(judge(HEALTHY).health, 'no reading asked for, nothing reported').toEqual([]);
+	});
+});
+
 // The self-check accepts only the gate it tests. The planted defect is memory
 // growth, so a failing verdict is not detection: a deliberately leaking server
 // can also shed requests or creep its p95, and a self-check that accepted any
@@ -175,6 +241,15 @@ describe('the self-check counts only the growth gate as detection', () => {
 		expect(record.failing).toBe(false);
 		expect(selfCheckVerdict(record).pass).toBe(false);
 	});
+
+	it('is not satisfied by the retention gate, which the planted buffers also trip', () => {
+		const record = judge({ ...HEALTHY, retained: { baseline: 40 * MiB, final: 400 * MiB, settled: true } });
+		expect(record.retained.leaking, 'the premise: retention saw the planted leak').toBe(true);
+		expect(record.growth.leaking).toBe(false);
+		const check = selfCheckVerdict(record);
+		expect(check.pass).toBe(false);
+		expect(check.reason).toMatch(/went undetected/);
+	});
 });
 
 // The probe the lane reads the server through reports memory on demand and
@@ -195,6 +270,25 @@ describeUWS('the leak probe answers nothing unless it was armed', () => {
 				expect(res.status, `/__leak?op=${op} answered ${res.status}`).toBe(404);
 			}
 		} finally {
+			await server.stop();
+		}
+	}, REAL_BOOT_BUDGET_MS);
+
+	it('reports the live WebSocket count once armed, and it falls to zero when the client closes', async () => {
+		// The connections gate reads this field; a probe that answered a constant
+		// would pass every run. The route reads the variable per request, so it
+		// is armed here for this case alone.
+		const server = await startRealRuntime({ variant: 'default' });
+		process.env.LEAK_PROBE = '1';
+		try {
+			const count = async () => (await (await fetch(`${server.httpUrl}/__leak?op=mem`)).json()).connections;
+			expect(await count()).toBe(0);
+			const client = await connectRealClient(server.wsUrl);
+			expect(await count()).toBe(1);
+			client.ws.close();
+			await expect.poll(count, { timeout: 5000 }).toBe(0);
+		} finally {
+			delete process.env.LEAK_PROBE;
 			await server.stop();
 		}
 	}, REAL_BOOT_BUDGET_MS);

@@ -28,7 +28,7 @@ function json(status, body) {
 	});
 }
 
-export function GET({ url }) {
+export function GET({ url, platform }) {
 	if (process.env.LEAK_PROBE !== '1') return new Response('Not Found', { status: 404 });
 
 	const op = url.searchParams.get('op');
@@ -40,7 +40,11 @@ export function GET({ url }) {
 			heapUsed: usage.heapUsed,
 			heapTotal: usage.heapTotal,
 			external: usage.external,
-			retained: retained.length
+			retained: retained.length,
+			// The live WebSocket count: a close path that fails to release
+			// leaves connections registered while memory looks flat. -1 when
+			// there is no platform to ask, which the lane reports as unread.
+			connections: platform?.connections ?? -1
 		});
 	}
 
