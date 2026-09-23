@@ -1224,8 +1224,10 @@ export const platform = {
 		// two subscribers can be handed different bytes for the same entry.
 		// Deciding it here is what keeps the JSON-only send allocating nothing,
 		// which is what it allocated before the one-read rule landed.
-		const sendJsonFrom = (i, source) => {
-			let result = 1;
+		// `prior` is the status of the send this continues from, so a call whose
+		// last frame was dropped, with nothing left to send, still reports it.
+		const sendJsonFrom = (i, source, prior = 1) => {
+			let result = prior;
 			for (; i < count; i++) {
 				const d = source === null ? entries[i].data : source[i];
 				const json = envelopePrefix(topic, event) + JSON.stringify(d ?? null) + '}';
@@ -1270,7 +1272,7 @@ export const platform = {
 				bumpOut(ws, frame);
 				if (result === 2) {
 					poisonWireState(ws, ud, wire.capability);
-					return sendJsonFrom(i + 1, datas);
+					return sendJsonFrom(i + 1, datas, 2);
 				}
 			}
 			return result;

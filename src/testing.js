@@ -1660,8 +1660,8 @@ export async function createTestServer(options = {}) {
 			// protects what has already been BUILT, and a JSON-only send to one
 			// socket builds nothing a later entry's toJSON could rewrite.
 			const count = entries.length;
-			const sendJsonFromT = (i, source) => {
-				let result = 1;
+			const sendJsonFromT = (i, source, prior = 1) => {
+				let result = prior;
 				for (; i < count; i++) {
 					result = sendOutboundT(ws, envelope(topic, event, source === null ? entries[i].data : source[i]));
 				}
@@ -1688,7 +1688,7 @@ export async function createTestServer(options = {}) {
 					const id = ensureWireIdT(ws, ud, topic);
 					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i, datas); }
 					result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, p));
-					if (result === 2) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i + 1, datas); }
+					if (result === 2) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i + 1, datas, 2); }
 				}
 				return result;
 			}

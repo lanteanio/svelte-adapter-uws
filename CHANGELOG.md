@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Types only. `introspect().assertions` keeps its plain-object type.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: sendWireBatch reports a dropped last frame.** When the codec declined the batch and the frame for the final entry was dropped, the call returned 1, as if everything had gone out; it now returns 2, on the production runtime and under `createTestServer`.
+  - **Affects:** Plugins and apps that read the return value of `platform.sendWireBatch` to decide whether to resend.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Only that one outcome changes. A dropped frame followed by entries that fall back to JSON still reports the status of the last send.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -76,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **`sendWireBatch` returns the status of its last send in every branch.** The
+  JSON fallback started its result at 1, so when the dropped binary frame was
+  the final entry there was nothing left to send and the 1 was returned. The
+  fallback now takes the status it continues from. `test/send-wire-batch-shed.test.js`
+  drives both surfaces with a scripted socket and fails on each without it.
 
 - **Every production platform member is declared on `Platform`.**
   `platform.assertions` was the one missing. `test/platform-type-surface.test.js`

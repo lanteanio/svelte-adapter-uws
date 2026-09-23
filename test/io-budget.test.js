@@ -1909,7 +1909,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// .trimEnd() on the message string normalizeDiagnosticMessage has already
 	// cut to 512 characters. Diagnostic text only: no frame byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: 'ac5bef9dea4ce72854aa71f5a6d50b7b7b7685e075e9068b14a8f5806d4785d9',
+	//
+	// Re-pinned for the sendWireBatch shed status. In handler/platform.js the
+	// JSON fallback inside sendWireBatch takes the status it continues from as
+	// a default parameter, and the dropped-frame branch passes 2. One parameter
+	// and one literal: no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: 'bbc8b2fce3f9f09c8388360266c18e8260d01b71c089e1eee733807272a1ad22',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
