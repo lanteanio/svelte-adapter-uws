@@ -457,8 +457,9 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 	}
 
 	if (range === null) {
-		// Syntactically valid but the start position is beyond the end of the
-		// representation this request selected, so that is the length to quote.
+		// Syntactically valid but unsatisfiable against the representation this
+		// request selected - a start past its end, or a zero-length suffix
+		// (`bytes=-0`) - so that representation's length is the one to quote.
 		res.cork(() => {
 			res.writeStatus('416 Range Not Satisfiable');
 			res.writeHeader('content-range', `bytes */${body.byteLength}`);
