@@ -1180,7 +1180,8 @@ if (WS_ENABLED) {
 			// Self-healing / bounded collections only, so a rising trend really is a
 			// leak: wsConnections shrinks as clients disconnect, topicPublishStats is
 			// cleared every pressure tick, and lastPublishWarnAt / decodeCache /
-			// envelopePrefixCache are LRU-evicted while staticCache plateaus at the
+			// envelopePrefixCache evict their oldest insertion when full (FIFO: a hit
+			// does not refresh an entry) while staticCache plateaus at the
 			// finite asset set. The per-topic registries topicSeqs and sharedTopics
 			// grow with topic cardinality BY DESIGN, so probing them here would
 			// self-fire a false leak: topicSeqs is held to its configured ceiling by
@@ -1363,7 +1364,7 @@ if (WS_ENABLED) {
 		const t = now();
 		upgradeRateLimiter.sweep(t);
 		authRateLimiter.sweep(t);
-		// 2. Trim module-level LRU caches if they are full. When a cache is at
+		// 2. Trim module-level FIFO caches if they are full. When a cache is at
 		//    capacity it evicts one entry per insertion, but traffic patterns can
 		//    shift and leave the cache full of stale entries. Clearing the oldest
 		//    half every 60 s lets hot entries reclaim the freed slots.
