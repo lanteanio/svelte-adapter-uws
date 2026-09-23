@@ -206,6 +206,18 @@ work should import that entry itself. Each is imported by the file name Rollup
 wrote for it, which differs from the entry name when the name holds a
 character Rollup will not put in a file name.
 
+## HTTP pipelining
+
+uWS answers pipelined HTTP/1.1 requests only while each response is written
+before the next request on the connection is parsed. If a request is still
+waiting on its answer - any route that awaits, such as an endpoint doing I/O -
+when the next one is parsed, uWS closes the connection and neither request gets
+a byte. The rule sits in the transport's parser, ahead of any JavaScript, so the
+adapter cannot queue around it; RFC 9112 9.3.2 has a client retry requests a
+closed connection left unanswered, and browsers do not pipeline. node:http, and
+so `vite dev`, queues pipelined requests instead. `test/http-pipelining-real.test.js`
+pins both halves on the built runtime.
+
 ## Accepted decisions
 
 The decision index is [`docs/decisions/README.md`](./decisions/README.md):
