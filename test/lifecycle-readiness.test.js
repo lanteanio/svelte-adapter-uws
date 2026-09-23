@@ -471,6 +471,12 @@ describeUWS('graceful shutdown of the built server', () => {
 			"		appendFileSync(marker, 'closed:' + reason);",
 			"	});",
 			"}",
+			"if (process.env.PROBE_CLEANUP === 'order') {",
+			"	process.on('sveltekit:shutdown', async () => {",
+			"		console.log('[probe-cleanup] teardown starts');",
+			"		await new Promise((r) => setTimeout(r, 50));",
+			"	});",
+			"}",
 			"if (process.env.PROBE_CLEANUP === 'hang') {",
 			"	process.on('sveltekit:shutdown', () => new Promise(() => {}));",
 			"}",
@@ -587,6 +593,32 @@ describeUWS('graceful shutdown of the built server', () => {
 		// writes gone and nothing in the log.
 		expect(existsSync(marker), 'the async cleanup listener never finished before exit').toBe(true);
 		expect(readFileSync(marker, 'utf8')).toBe('closed:SIGTERM');
+	}, 60000);
+
+	it('runs the sveltekit:shutdown listeners only after an in-flight request has been answered', async () => {
+		// The listener is where an app closes its database pool, so it must not
+		// start while a request that uses the pool is still running. The route
+		// and the listener both print to the child's output, which orders them
+		// without comparing two clocks.
+		const entry = writeWrapper('entry-order.mjs');
+		const { proc, port, output } = await startServer(entry, { PROBE_CLEANUP: 'order' });
+
+		const held = httpGet(port, '/slow-hold?ms=1500');
+		const t0 = Date.now();
+		while (!output.text.includes('[slow-hold] holding') && Date.now() - t0 < 10000) await sleep(50);
+		expect(output.text, 'the slow-hold request never reached the server').toContain('[slow-hold] holding');
+
+		requestShutdown(proc);
+		const answer = await held;
+		expect(answer.status, 'the in-flight request is answered, not dropped').toBe(200);
+		expect(await whenExited(proc, 20000)).toBe(0);
+
+		const answered = output.text.indexOf('[slow-hold] answering');
+		const teardown = output.text.indexOf('[probe-cleanup] teardown starts');
+		expect(answered, 'the held request never finished').toBeGreaterThan(-1);
+		expect(teardown, 'the cleanup listener never ran').toBeGreaterThan(-1);
+		expect(answered, 'the cleanup listener started while the request was still in flight').toBeLessThan(teardown);
+		expect(output.text).toContain('Shutdown complete');
 	}, 60000);
 
 	it('contains a sveltekit:shutdown listener whose promise rejects: the others still run and the exit stays clean', async () => {
