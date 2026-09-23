@@ -43,3 +43,86 @@ export async function runMessageHook(hook, ws, context) {
 		await invokeMessageHook(hook, ws, context, span);
 	});
 }
+
+function reportOpenHook(err) {
+	console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.OPEN_HOOK), err);
+}
+
+function reportDrainHook(err) {
+	console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DRAIN_HOOK), err);
+}
+
+function reportCloseHook(err) {
+	console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLOSE_HOOK), err);
+}
+
+function lifecycleHookFailed(ws, report, closeReason, err) {
+	report(err);
+	if (closeReason === null) return;
+	try {
+		ws.end(1011, closeReason);
+	} catch {
+		// Already closed, by the hook itself or by the client.
+	}
+}
+
+// The hosts call `open`, `drain` and `close` from a transport callback and
+// never await the result. A synchronous throw out of a uWS callback is an
+// uncaughtException and a rejection is an unhandled rejection; either one
+// ends the worker and every connection on it. A bug in one connection's hook
+// must cost that connection only, so the throw and the rejection both land
+// here. The hook is still called as a method of the object that holds it and
+// still not awaited: an async `open` has never held back the connection's
+// first message, and this does not start to. The `then` read and attach sit
+// inside the same try as the call, because a returned value whose `then`
+// throws would otherwise leave through the seam the catch is here to close.
+// An export that is present but not a function is still called, so its
+// TypeError is reported for every connection rather than skipped in silence.
+function runLifecycleHook(handlers, name, ws, context, report, closeReason) {
+	if (handlers?.[name] == null) return;
+	try {
+		const result = handlers[name](ws, context);
+		if (result != null && typeof result.then === 'function') {
+			result.then(ignoreFulfilled, (err) => lifecycleHookFailed(ws, report, closeReason, err));
+		}
+	} catch (err) {
+		lifecycleHookFailed(ws, report, closeReason, err);
+	}
+}
+
+function ignoreFulfilled() {}
+
+/**
+ * Invoke the app `open` hook inside the exception boundary. A throw or
+ * rejection closes that connection with 1011; the `close` hook then runs for
+ * it as for any other close.
+ * @param {any} handlers - the object holding the app hooks
+ * @param {any} ws
+ * @param {any} context
+ */
+export function runOpenHook(handlers, ws, context) {
+	runLifecycleHook(handlers, 'open', ws, context, reportOpenHook, 'Open handler error');
+}
+
+/**
+ * Invoke the app `drain` hook inside the exception boundary. A throw or
+ * rejection closes that connection with 1011.
+ * @param {any} handlers - the object holding the app hooks
+ * @param {any} ws
+ * @param {any} context
+ */
+export function runDrainHook(handlers, ws, context) {
+	runLifecycleHook(handlers, 'drain', ws, context, reportDrainHook, 'Drain handler error');
+}
+
+/**
+ * Invoke the app `close` hook inside the exception boundary. A throw or
+ * rejection is logged and nothing else: the connection is already gone, and
+ * the host's own teardown after the hook must still run.
+ * @param {any} handlers - the object holding the app hooks
+ * @param {any} ws
+ * @param {any} context
+ */
+export function runCloseHook(handlers, ws, context) {
+	runLifecycleHook(handlers, 'close', ws, context, reportCloseHook, null);
+}

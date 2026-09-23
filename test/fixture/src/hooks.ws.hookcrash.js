@@ -13,6 +13,53 @@ export function authenticate({ headers }) {
 	return { userId: 'hookcrash-user' };
 }
 
+/**
+ * Lifecycle lanes, for ADAPTER-ERR-OPEN-HOOK, -DRAIN-HOOK and -CLOSE-HOOK.
+ *
+ * A connection opts in with an `X-Request-ID` of `lifecycle-<lane>-<drill
+ * token>`, which reaches every hook as `platform.requestId`. Selecting through
+ * the request id rather than an `upgrade` export keeps this build on the
+ * no-upgrade-hook path the other suites booting it rely on.
+ * @param {any} platform
+ */
+function lifecycleLane(platform) {
+	const token = process.env.HOOK_CRASH_DRILL_TOKEN;
+	const id = platform?.requestId;
+	if (!token || typeof id !== 'string') return null;
+	const suffix = '-' + token;
+	if (!id.startsWith('lifecycle-') || !id.endsWith(suffix)) return null;
+	return id.slice('lifecycle-'.length, id.length - suffix.length);
+}
+
+export function open(ws, { platform }) {
+	const lane = lifecycleLane(platform);
+	if (lane === 'open-throws') throw new Error('__OPEN_HOOK_CRASH__');
+	if (lane === 'open-rejects') return Promise.reject(new Error('__OPEN_HOOK_REJECT__'));
+	// Send until uWS holds bytes the socket would not take. The client pauses
+	// its socket for this lane, so that happens within a chunk or two, and uWS
+	// fires drain once the client reads again. A loopback socket that is being
+	// read accepts a single 8 MB write whole, which is why the size alone does
+	// not do it.
+	if (lane === 'drain-throws') {
+		const chunk = new Uint8Array(1024 * 1024);
+		for (let i = 0; i < 64 && ws.getBufferedAmount() === 0; i++) ws.send(chunk, true);
+	}
+	return undefined;
+}
+
+export function drain(ws, { platform }) {
+	if (lifecycleLane(platform) === 'drain-throws') throw new Error('__DRAIN_HOOK_CRASH__');
+}
+
+export function close(ws, { platform }) {
+	const lane = lifecycleLane(platform);
+	// Heard by the suite, which loads the built server into the test process.
+	if (lane !== null) process.emit('hookcrash:lifecycle-close', lane);
+	if (lane === 'close-throws') throw new Error('__CLOSE_HOOK_CRASH__');
+	if (lane === 'close-rejects') return Promise.reject(new Error('__CLOSE_HOOK_REJECT__'));
+	return undefined;
+}
+
 export function resume(ws, { lastSeenSeqs, platform }) {
 	// The gap-fill request names its topics; one keyed on the drill token
 	// selects the throw, so an ordinary resume through this build replays.

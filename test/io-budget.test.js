@@ -1001,7 +1001,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the added tail runs there and nothing acts on it, and the added walk
 	// statement runs only for a header sent twice. No byte path in these modules
 	// moved, and no copy primitive entered the body.
-	ingress: '21fd8ba679e2de487911b4a62e15492acec68f52e623ad3e877004f83569b5b7',
+	//
+	// Re-pinned for the lifecycle hook entries. The whole drift in this graph is
+	// error-registry.js: three added ids (OPEN_HOOK, DRAIN_HOOK, CLOSE_HOOK) and
+	// three frozen registry entries beside them - string and null literals,
+	// data only. utils/hook-boundary.js, which gained the boundary functions,
+	// is not in these graphs: only handler.js, testing.js, vite.js and
+	// message-admission.js import it. Measured: with error-registry.js alone reverted, every one of
+	// these digests holds at its previous value. Nothing executes differently
+	// on any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	ingress: '0ab476a83920910805a410b91847a9de760e178b0a022be7f0bd2bc1d85e61af',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1858,7 +1868,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the added tail runs there and nothing acts on it, and the added walk
 	// statement runs only for a header sent twice. No byte path in these modules
 	// moved, and no copy primitive entered the body.
-	platform: '2daad64e03d63627f460cb237cc184519ebc9ca07f3c87e9cbc7f9a59500ecd4',
+	//
+	// Re-pinned for the lifecycle hook entries. The whole drift in this graph is
+	// error-registry.js: three added ids (OPEN_HOOK, DRAIN_HOOK, CLOSE_HOOK) and
+	// three frozen registry entries beside them - string and null literals,
+	// data only. utils/hook-boundary.js, which gained the boundary functions,
+	// is not in these graphs: only handler.js, testing.js, vite.js and
+	// message-admission.js import it. Measured: with error-registry.js alone reverted, every one of
+	// these digests holds at its previous value. Nothing executes differently
+	// on any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: '48b7d45edba04884da458aa52520eaaa3033e2368f178202a76c862ca79f464a',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2178,7 +2198,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the added tail runs there and nothing acts on it, and the added walk
 	// statement runs only for a header sent twice. No byte path in these modules
 	// moved, and no copy primitive entered the body.
-	'wire-fanout': '221c8c56b8eb63e5f8f6e0a8bcf1295bceb0de08b36fd1712a2a9d3ca22ea995',
+	//
+	// Re-pinned for the lifecycle hook entries. The whole drift in this graph is
+	// error-registry.js: three added ids (OPEN_HOOK, DRAIN_HOOK, CLOSE_HOOK) and
+	// three frozen registry entries beside them - string and null literals,
+	// data only. utils/hook-boundary.js, which gained the boundary functions,
+	// is not in these graphs: only handler.js, testing.js, vite.js and
+	// message-admission.js import it. Measured: with error-registry.js alone reverted, every one of
+	// these digests holds at its previous value. Nothing executes differently
+	// on any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	'wire-fanout': '66ecae166174bdda81be4af6eeedd323cace4a6a33ed80460faedf119eb4782a',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

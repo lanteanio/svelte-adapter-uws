@@ -5,6 +5,40 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.96] - 2026-09-23
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
+  - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
+  - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** A hook that does not fail is called as before, on the same object, and still not awaited; a returned thenable now gets a rejection handler attached. An app with its own process-level handler used to keep the connection open after a failing `open` or `drain` hook and see the error there; the connection is now closed with 1011 and the error goes to the console line. A hook export that is present but not a function is reported on each connection instead of throwing out of the callback. The close reasons are `Open handler error` and `Drain handler error`, beside the existing `Message handler error`, and the lines print as `ADAPTER-ERR-OPEN-HOOK`, `ADAPTER-ERR-DRAIN-HOOK` and `ADAPTER-ERR-CLOSE-HOOK`. Under `vite dev` a failing close hook no longer skips the dev server's own cleanup for that connection.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
+
+### Fixed
+
+- **A failing `open`, `drain` or `close` hook costs one connection, not the
+  worker.** The hosts call these hooks from a transport callback and never
+  await them. A synchronous throw out of a uWS callback is an
+  uncaughtException - the runtime's handler exits the worker, and in
+  single-process mode Node exits the process - and a rejection is an
+  unhandled rejection. `runOpenHook`, `runDrainHook` and `runCloseHook`
+  (utils/hook-boundary.js) catch both wherever the surface calls the hook:
+  open and drain close their connection with 1011, while close only logs,
+  because its connection is already gone and the host's teardown after it
+  must still run. The `then` read sits inside the same try as the call, so a
+  returned value whose `then` getter throws is contained too. Under
+  `vite dev` a throwing close hook also skipped removing the connection from
+  the dev server's live maps. `test/error-registry-hook-crash.test.js` drives
+  each lane against the built runtime and requires a bystander and a new
+  connection to be served afterwards; `test/lifecycle-hook-boundary.test.js`
+  drives open and close on `createTestServer` and `vite dev` and requires the
+  next connection to be served. Both fail with the boundary removed.
+
 ## [0.6.0-next.95] - 2026-09-22
 
 <!-- consumer-release-summary:start -->

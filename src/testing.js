@@ -16,6 +16,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
+import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
@@ -2898,7 +2899,7 @@ export async function createTestServer(options = {}) {
 			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
 			sendControlT(ws, welcome);
 			wsConnections.add(ws);
-			handler.open?.(ws, { platform: userData[WS_PLATFORM] });
+			if (handler.open) runOpenHook(handler, ws, { platform: userData[WS_PLATFORM] });
 			for (const resolve of connectionWaiters) resolve(undefined);
 			connectionWaiters = [];
 		},
@@ -3520,18 +3521,19 @@ export async function createTestServer(options = {}) {
 					bytesOut: stats.bytesOut
 				}
 				: { code, message, platform: closePlatform, subscriptions: subs };
-			// Mirror production handler.js: run the close hook inside try/finally
-			// so the per-connection cleanup (cap counts, wire-codec state, the
-			// connection set) always runs even if the user's close hook throws -
-			// otherwise a leaked cap count would wedge a codec's JSON fast path on
-			// and a stateful codec's per-connection state would never be freed.
+			// Mirror production handler.js: the per-connection cleanup (cap
+			// counts, wire-codec state, the connection set) sits in a finally,
+			// so it runs whatever happens above it - otherwise a leaked cap count
+			// would wedge a codec's JSON fast path on and a stateful codec's
+			// per-connection state would never be freed. The close hook's own
+			// throw is caught by its boundary before it gets here.
 			try {
 				// Mirror production: the app close hook stays silent for a
 				// connection refused at open (a failed attribution) - its open
 				// hook never ran, and a counter paired across open/close must
 				// not go negative. The session id's absence marks exactly
 				// those connections; the finally cleanup still runs.
-				if (ud[WS_SESSION_ID] !== undefined) handler.close?.(ws, ctx);
+				if (ud[WS_SESSION_ID] !== undefined) runCloseHook(handler, ws, ctx);
 			} finally {
 				if (ud[WS_CONNECTION_PERMIT]) {
 					ud[WS_CONNECTION_PERMIT] = undefined;

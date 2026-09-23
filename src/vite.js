@@ -7,6 +7,7 @@ import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelp
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
+import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
@@ -2712,7 +2713,7 @@ export default function uws(options = {}) {
 				sendControlV(ws, welcome);
 
 				// Call user open handler
-				userHandlers.open?.(wrapped, { platform: userData[WS_PLATFORM] });
+				if (userHandlers.open) runOpenHook(userHandlers, wrapped, { platform: userData[WS_PLATFORM] });
 
 				ws.on('message', async (raw, isBinary) => {
 					// Convert to ArrayBuffer (matching uWS interface)
@@ -3345,7 +3346,7 @@ export default function uws(options = {}) {
 							bytesOut: stats.bytesOut
 						}
 						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
-					userHandlers.close?.(wrapped, ctx);
+					runCloseHook(userHandlers, wrapped, ctx);
 					if (ud[WS_LEASE]) ud[WS_LEASE] = undefined;
 					connections.delete(ws);
 					subscriptions.delete(ws);

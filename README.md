@@ -40,7 +40,7 @@ deployments should follow the ordered [ecosystem sequence](./docs/migrations/eco
 [claim register](./docs/claim-register.md) |
 [protocol conformance](./docs/protocol-conformance.md) |
 [protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
-[current release](./docs/releases/0.6.0-next.95.md) |
+[current release](./docs/releases/0.6.0-next.96.md) |
 [release history](./CHANGELOG.md)
 
 **Documentation ownership (`docs-ownership-v1`):**
@@ -197,21 +197,21 @@ state before CI will accept a new public subpath.
 The three ecosystem packages move together. Bump them as a group:
 
 <!-- compatibility:start -->
-> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.95` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
+> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.96` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
 
 | Channel | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Install tag | Runtime |
 |---|---|---|---|---|---|
 | legacy | `0.4.x` | `0.4.x` | `0.4.x` | n/a | n/a |
 | stable | `0.5.8` | `0.5.x` | `0.5.x` | `@latest` | Node `>=22.0.0`; uWS `v20.67.0` |
-| prerelease | `0.6.0-next.95` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
+| prerelease | `0.6.0-next.96` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
 
 Choose one complete adapter/native-addon tuple; do not mix rows:
 
 ```bash
 # stable 0.5.8 (@latest)
 npm install svelte-adapter-uws@latest github:uNetworking/uWebSockets.js#v20.67.0
-# prerelease 0.6.0-next.95 (staged; run only after coordinated publication)
-npm install svelte-adapter-uws@0.6.0-next.95 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
+# prerelease 0.6.0-next.96 (staged; run only after coordinated publication)
+npm install svelte-adapter-uws@0.6.0-next.96 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 # @next is moving and may still resolve an earlier published candidate.
 ```
 <!-- compatibility:end -->
@@ -279,7 +279,7 @@ If you plan to use WebSockets during development, also install `ws`:
 npm install -D ws
 ```
 
-The prerelease candidate `0.6.0-next.95` adds an installed preflight
+The prerelease candidate `0.6.0-next.96` adds an installed preflight
 binary; stable `0.5.8` does not contain this command and relies on its
 automatic postinstall native-load check. On the prerelease candidate, run the
 preflight before editing configuration or spending a build on the app. It
@@ -2025,7 +2025,7 @@ The `upgrade` function receives an `UpgradeContext`:
 }
 ```
 
-The `subscribe` function receives `(ws, topic)` and can return `false` to deny a client's subscription request. Omit it to allow all subscriptions.
+The `subscribe` function receives `(ws, topic)` and can return `false` to deny a client's subscription request. Omit it to allow all subscriptions. An `open`, `message` or `drain` hook that throws, or returns a promise that rejects, costs only its own connection: it is closed with code 1011 and the original error is printed as `ADAPTER-ERR-OPEN-HOOK`, `-MESSAGE-HOOK` or `-DRAIN-HOOK` ([error reference](docs/errors.md)). A failing `close` hook is only logged (`ADAPTER-ERR-CLOSE-HOOK`), and the adapter's own cleanup for the connection still runs. Every other connection on the worker keeps being served. `createTestServer` and `vite dev` contain a failing `open`, `message` or `close` hook the same way.
 
 The `ws` object in `open`, `message`, `close`, and `drain` is a [uWebSockets.js WebSocket](https://github.com/uNetworking/uWebSockets.js). Key methods:
 

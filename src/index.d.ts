@@ -2355,7 +2355,11 @@ export interface WebSocketHandler<UserData = unknown> {
 	 */
 	egressTenantOf?: (topic: string) => string | null | undefined;
 
-	/** Called when a WebSocket connection is established. */
+	/**
+	 * Called when a WebSocket connection is established. A throw, or a
+	 * returned promise that rejects, closes this connection with 1011 and is
+	 * logged as `ADAPTER-ERR-OPEN-HOOK`; other connections are unaffected.
+	 */
 	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
 
 	/**
@@ -2364,6 +2368,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * **Note:** subscribe/unsubscribe messages from the client store are
 	 * handled automatically before this is called. You only need this for
 	 * custom application-level messages.
+	 *
+	 * A throw, or a returned promise that rejects, closes this connection with
+	 * 1011 and is logged as `ADAPTER-ERR-MESSAGE-HOOK`.
 	 */
 	message?: (ws: WebSocket<UserData>, ctx: MessageContext) => void;
 
@@ -2483,8 +2490,11 @@ export interface WebSocketHandler<UserData = unknown> {
 	unsubscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => void | Promise<void>;
 
 	/**
-	 * Called when backpressure has drained (buffered data was sent).
-	 * Use this for flow control when sending large or frequent messages.
+	 * Called when the connection's send buffer drains (buffered data was
+	 * written; check `ws.getBufferedAmount()` for what is left). Use this for
+	 * flow control when sending large or frequent messages. A
+	 * throw, or a returned promise that rejects, closes this connection with
+	 * 1011 and is logged as `ADAPTER-ERR-DRAIN-HOOK`.
 	 */
 	drain?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
 
@@ -2540,7 +2550,11 @@ export interface WebSocketHandler<UserData = unknown> {
 	resume?: (ws: WebSocket<UserData>, ctx: ResumeContext) =>
 		void | Record<string, number> | number | Promise<void | Record<string, number> | number>;
 
-	/** Called when the connection closes. */
+	/**
+	 * Called when the connection closes. A throw, or a returned promise that
+	 * rejects, is logged as `ADAPTER-ERR-CLOSE-HOOK`; the adapter's own cleanup
+	 * for the connection still runs.
+	 */
 	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;
 }
 

@@ -49,6 +49,7 @@ import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CAC
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
 import { runUnsubscribeHook } from './utils/unsubscribe-hook.js';
+import { runOpenHook, runDrainHook, runCloseHook } from './utils/hook-boundary.js';
 import { sendControl } from './handler/control-egress.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
@@ -2338,7 +2339,7 @@ if (WS_ENABLED) {
 			sendControl(ws, '{"type":"welcome","sessionId":"' + sessionId + '"}');
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
-			wsModule.open?.(ws, { platform: userData[WS_PLATFORM] });
+			if (wsModule.open) runOpenHook(wsModule, ws, { platform: userData[WS_PLATFORM] });
 		},
 
 		message: async (ws, message, isBinary) => {
@@ -3218,7 +3219,7 @@ if (WS_ENABLED) {
 			// Resume any sendCoalesced traffic held back by backpressure
 			// before delegating to the user's drain hook.
 			flushCoalescedFor(ws);
-			wsModule.drain?.(ws, { platform: ws.getUserData()[WS_PLATFORM] });
+			if (wsModule.drain) runDrainHook(wsModule, ws, { platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close: (ws, code, message) => {
@@ -3272,7 +3273,7 @@ if (WS_ENABLED) {
 				// is stamped immediately after the refusal point, so its
 				// absence marks exactly the connections whose open hook never
 				// ran. Everything in the finally still runs for them.
-				if (userData[WS_SESSION_ID] !== undefined) wsModule.close?.(ws, ctx);
+				if (userData[WS_SESSION_ID] !== undefined) runCloseHook(wsModule, ws, ctx);
 			} finally {
 				// Leave the live set FIRST, before any other release. Everything
 				// below is teardown that reads userData and touches no connection

@@ -17,7 +17,7 @@ import { ADAPTER_ERROR_IDS, ADAPTER_ERROR_REGISTRY, adapterConsoleLine } from '.
 import { certExpiryAlert, createCertWatcher, readCertIdentity, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
 import { createResourceGrowthAuditor, structuralResourceProbes } from '../src/runtime/leak-probes.js';
 import { GAP_CONFIRM_MS, recordOriginStream, takeConfirmedGaps } from '../src/runtime/handler/state.js';
-import { runMessageHook } from '../src/runtime/utils/hook-boundary.js';
+import { runMessageHook, runOpenHook, runDrainHook, runCloseHook } from '../src/runtime/utils/hook-boundary.js';
 import { formatOperationalDiagnostic, viteHandlerFailureDiagnostic } from '../src/runtime/utils/operational-diagnostic.js';
 import { verifyNativeInstall } from '../scripts/check-native-install.js';
 import { containMetricInstrument, mirrorRegistry, readMetricMirror, resetMetricMirror } from '../src/runtime/utils/metrics.js';
@@ -649,6 +649,98 @@ describe('ADAPTER-ERR-MESSAGE-HOOK', () => {
 		expect(errSpy).not.toHaveBeenCalled();
 	});
 });
+
+// The lifecycle entries share one boundary and differ in what it does to the
+// connection: open and drain close it 1011 with their own reason, close
+// cannot (the connection is already gone). The hosts call these from a
+// transport callback and never await them, so the load-bearing claim is that
+// neither a throw nor a rejection leaves the call: the real-transport half of
+// that is test/error-registry-hook-crash.test.js.
+for (const { id, name, run, prefix, reason } of [
+	{ id: ADAPTER_ERROR_IDS.OPEN_HOOK, name: 'open', run: runOpenHook, prefix: '[ws] the open hook threw', reason: 'Open handler error' },
+	{ id: ADAPTER_ERROR_IDS.DRAIN_HOOK, name: 'drain', run: runDrainHook, prefix: '[ws] the drain hook threw', reason: 'Drain handler error' },
+	{ id: ADAPTER_ERROR_IDS.CLOSE_HOOK, name: 'close', run: runCloseHook, prefix: '[ws] the close hook threw', reason: null }
+]) {
+	/** The app's hook object, holding `hook` under this entry's name. */
+	const handlersWith = (hook) => ({ [name]: hook });
+
+	describe(id, () => {
+		it('a synchronous throw stays inside the call and prints the original throw', () => {
+			const errSpy = stub('error');
+			const boom = new Error('hook exploded');
+			const ws = { end: vi.fn() };
+			expect(() => run(handlersWith(() => { throw boom; }), ws, {})).not.toThrow();
+			if (reason === null) expect(ws.end).not.toHaveBeenCalled();
+			else expect(ws.end).toHaveBeenCalledWith(1011, reason);
+			expect(errSpy).toHaveBeenCalledTimes(1);
+			expect(errSpy.mock.calls[0][0]).toBe(adapterConsoleLine(id));
+			expect(errSpy.mock.calls[0][0].startsWith(prefix)).toBe(true);
+			expect(errSpy.mock.calls[0][1]).toBe(boom);
+		});
+
+		it('a rejection lands in the same boundary', async () => {
+			const errSpy = stub('error');
+			const boom = new Error('hook rejected');
+			const ws = { end: vi.fn() };
+			run(handlersWith(async () => { throw boom; }), ws, {});
+			await new Promise((r) => setTimeout(r, 0));
+			if (reason === null) expect(ws.end).not.toHaveBeenCalled();
+			else expect(ws.end).toHaveBeenCalledWith(1011, reason);
+			expect(errSpy.mock.calls[0][1]).toBe(boom);
+		});
+
+		it('a returned value whose then getter throws stays inside the call', () => {
+			const errSpy = stub('error');
+			const boom = new Error('then getter');
+			const ws = { end: vi.fn() };
+			const hostile = { get then() { throw boom; } };
+			expect(() => run(handlersWith(() => hostile), ws, {})).not.toThrow();
+			expect(errSpy.mock.calls[0][1]).toBe(boom);
+		});
+
+		if (reason !== null) {
+			it('a connection already gone does not turn the failure into a throw', () => {
+				const errSpy = stub('error');
+				const ws = { end: vi.fn(() => { throw new Error('Invalid access of closed uWS.WebSocket'); }) };
+				expect(() => run(handlersWith(() => { throw new Error('late'); }), ws, {})).not.toThrow();
+				expect(ws.end).toHaveBeenCalledTimes(1);
+				expect(errSpy).toHaveBeenCalledTimes(1);
+			});
+		}
+
+		it('reports an export that is present but not a function instead of skipping it', () => {
+			const errSpy = stub('error');
+			const ws = { end: vi.fn() };
+			expect(() => run(handlersWith('not a function'), ws, {})).not.toThrow();
+			expect(errSpy).toHaveBeenCalledTimes(1);
+			expect(errSpy.mock.calls[0][1]).toBeInstanceOf(TypeError);
+			if (reason === null) expect(ws.end).not.toHaveBeenCalled();
+			else expect(ws.end).toHaveBeenCalledWith(1011, reason);
+		});
+
+		it('calls the hook as a method of the object that holds it, with the host arguments', () => {
+			const handlers = {
+				seen: null,
+				[name](ws, ctx) { this.seen = { self: this, ws, ctx }; }
+			};
+			const ws = { end: vi.fn() };
+			const ctx = { platform: {} };
+			run(handlers, ws, ctx);
+			expect(handlers.seen).toEqual({ self: handlers, ws, ctx });
+		});
+
+		it('a hook that completes leaves the connection open and the console silent', async () => {
+			const errSpy = stub('error');
+			const ws = { end: vi.fn() };
+			run(handlersWith(() => undefined), ws, {});
+			run(handlersWith(async () => {}), ws, {});
+			run({}, ws, {});
+			await new Promise((r) => setTimeout(r, 0));
+			expect(ws.end).not.toHaveBeenCalled();
+			expect(errSpy).not.toHaveBeenCalled();
+		});
+	});
+}
 
 describe('ADAPTER-ERR-VITE-LOAD', () => {
 	// The entry is emitted composed: the diagnostic must carry the registry's

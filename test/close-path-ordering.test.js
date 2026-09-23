@@ -34,7 +34,7 @@ const handler = readFileSync(path.join(ROOT, 'src/runtime/handler.js'), 'utf8');
  * app close hook to the end of that block.
  */
 function closeFinally() {
-	const hookCall = handler.indexOf("if (userData[WS_SESSION_ID] !== undefined) wsModule.close?.(ws, ctx);");
+	const hookCall = handler.indexOf("if (userData[WS_SESSION_ID] !== undefined) runCloseHook(wsModule, ws, ctx);");
 	expect(hookCall, 'the app close-hook call moved; this slice is anchored on it').toBeGreaterThan(-1);
 	const start = handler.indexOf('} finally {', hookCall);
 	expect(start, 'no finally follows the close hook').toBeGreaterThan(hookCall);

@@ -156,9 +156,10 @@ export const FIXTURE_VARIANTS = {
 
 	// Fault-injection hooks for the hook-failure entries: an authenticate
 	// that throws on an env-gated header, a resume that throws when the
-	// gap-fill names a token-keyed topic, and a message lane handing sendTo
-	// an async filter. Its own output directory keeps the fault lanes out
-	// of every ordinary fixture build.
+	// gap-fill names a token-keyed topic, a message lane handing sendTo an
+	// async filter, and open / drain / close hooks that fail for a connection
+	// whose request id names a lifecycle lane. Its own output directory keeps
+	// the fault lanes out of every ordinary fixture build.
 	hookcrash: {
 		out: 'build-hook-crash',
 		handler: './src/hooks.ws.hookcrash.js',

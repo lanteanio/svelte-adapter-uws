@@ -4,7 +4,7 @@ Search this page with the exact stable ID, code, event, or beginning of the mess
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
 for traffic, whether anything recovers on its own, and what to do next: 43 entries
 against the 46 distinct diagnostic events emitted from the scanned sources, plus
-35 entries indexing consequential plain console lines that never enter the diagnostic
+38 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
@@ -88,6 +88,9 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW](#adapter-err-ws-shutdown-hook-threw) | `ws.shutdown-hook.threw` | `[ws] the WebSocket shutdown hook threw` |
 | [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled) | `ws.shutdown-hook.unsettled` | `[ws] the WebSocket shutdown hook has not settled after ` |
 | [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook) | `ws.message-hook.threw` | `[ws] the message hook threw` |
+| [ADAPTER-ERR-OPEN-HOOK](#adapter-err-open-hook) | `ws.open-hook.threw` | `[ws] the open hook threw` |
+| [ADAPTER-ERR-DRAIN-HOOK](#adapter-err-drain-hook) | `ws.drain-hook.threw` | `[ws] the drain hook threw` |
+| [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook) | `ws.close-hook.threw` | `[ws] the close hook threw` |
 | [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook) | `ws.recover-hook.threw` | `[ws] the recover-on-subscribe hook threw` |
 | [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` |
 | [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument) | `ws.metrics.instrument-threw` | `[ws] a metrics instrument threw; further errors from it are suppressed` |
@@ -182,6 +185,9 @@ the stable ID tag on the line):
 - `[ws] the WebSocket shutdown hook threw` - [ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW](#adapter-err-ws-shutdown-hook-threw)
 - `[ws] the WebSocket shutdown hook has not settled after ` - [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled)
 - `[ws] the message hook threw` - [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook)
+- `[ws] the open hook threw` - [ADAPTER-ERR-OPEN-HOOK](#adapter-err-open-hook)
+- `[ws] the drain hook threw` - [ADAPTER-ERR-DRAIN-HOOK](#adapter-err-drain-hook)
+- `[ws] the close hook threw` - [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook)
 - `[ws] the recover-on-subscribe hook threw` - [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook)
 - `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
 - `[ws] a metrics instrument threw; further errors from it are suppressed` - [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument)
@@ -976,6 +982,42 @@ searchable log prefix is:
 - **Automatic recovery:** None for the frame. The client sees a close, and reconnection is the client library's own resume path.
 - **Next action:** Fix the hook, or catch inside it and answer the client deliberately. The error printed with this line is the original throw.
 - **Runtime help:** `docs/errors.md#adapter-err-message-hook`
+- **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
+
+<a id="adapter-err-open-hook"></a>
+## `ADAPTER-ERR-OPEN-HOOK`
+
+- **Code/event:** `ws.open-hook.threw`
+- **Message prefix:** `[ws] the open hook threw`
+- **Cause:** The application `open` hook threw, or the promise it returned rejected.
+- **Consequence:** That connection is closed with code 1011 and the reason `Open handler error`, and the `close` hook runs for it as for any other close. The cause stays server-side and is not sent to the client. Other connections are unaffected.
+- **Automatic recovery:** None for the connection. The client sees a close, and reconnecting runs `open` again.
+- **Next action:** Fix the hook, or catch inside it and close the connection deliberately with `ws.end(code, reason)`. The error printed with this line is the original throw.
+- **Runtime help:** `docs/errors.md#adapter-err-open-hook`
+- **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
+
+<a id="adapter-err-drain-hook"></a>
+## `ADAPTER-ERR-DRAIN-HOOK`
+
+- **Code/event:** `ws.drain-hook.threw`
+- **Message prefix:** `[ws] the drain hook threw`
+- **Cause:** The application `drain` hook threw, or the promise it returned rejected, when uWS reported the connection's send buffer draining.
+- **Consequence:** That connection is closed with code 1011 and the reason `Drain handler error`. The cause stays server-side and is not sent to the client. Other connections are unaffected.
+- **Automatic recovery:** None for the connection. The client sees a close and reconnects.
+- **Next action:** Fix the hook, or catch inside it. The error printed with this line is the original throw.
+- **Runtime help:** `docs/errors.md#adapter-err-drain-hook`
+- **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
+
+<a id="adapter-err-close-hook"></a>
+## `ADAPTER-ERR-CLOSE-HOOK`
+
+- **Code/event:** `ws.close-hook.threw`
+- **Message prefix:** `[ws] the close hook threw`
+- **Cause:** The application `close` hook threw, or the promise it returned rejected.
+- **Consequence:** Only the log line. The connection was already closed, and the runtime's own teardown for it (subscriptions, counters, the live connection set) still runs.
+- **Automatic recovery:** Not needed; nothing is left half-closed.
+- **Next action:** Fix the hook. Whatever it was cleaning up after the throw was skipped, so check the state it owns. The error printed with this line is the original throw.
+- **Runtime help:** `docs/errors.md#adapter-err-close-hook`
 - **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
 
 <a id="adapter-err-recover-hook"></a>
