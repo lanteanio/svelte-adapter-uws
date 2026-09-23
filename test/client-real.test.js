@@ -3737,6 +3737,43 @@ describe('client.js (real module)', () => {
 			}
 		});
 
+		it('treats a rate-limited preflight as throttling, retried no sooner than Retry-After', async () => {
+			// Clients behind one address share the per-IP preflight budget, so a
+			// 429 is not a verdict on this user; closing for good on it would lock
+			// every one of them out until a reload.
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = vi.fn(async () => ({
+				ok: false, status: 429, statusText: 'Too Many Requests',
+				headers: { get: (name) => (name.toLowerCase() === 'retry-after' ? '2' : null) }
+			}));
+			vi.useFakeTimers();
+			try {
+				const conn = clientModule.connect({ auth: true, reconnectInterval: 10, maxReconnectInterval: 20 });
+				const seen = [];
+				const unsubFailure = conn.failure.subscribe((v) => seen.push(v));
+				let closedForGood = false;
+				const unsubPerma = conn._permaClosed.subscribe((v) => { closedForGood = v; });
+				await vi.advanceTimersByTimeAsync(0);
+				expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+				expect(seen[seen.length - 1]).toEqual({
+					kind: 'auth-preflight', class: 'THROTTLE', status: 429,
+					diagnosticReason: 'Too Many Requests', reason: 'Too Many Requests'
+				});
+				expect(closedForGood).toBe(false);
+
+				await vi.advanceTimersByTimeAsync(1900);
+				expect(globalThis.fetch, 'not before the server asked').toHaveBeenCalledTimes(1);
+				await vi.advanceTimersByTimeAsync(300);
+				expect(globalThis.fetch, 'retried after Retry-After').toHaveBeenCalledTimes(2);
+				unsubFailure();
+				unsubPerma();
+				conn.close();
+			} finally {
+				vi.useRealTimers();
+				globalThis.fetch = originalFetch;
+			}
+		});
+
 		it.each([
 			{
 				name: 'server failure',

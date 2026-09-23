@@ -322,7 +322,7 @@ type FailureDiagnosticText = {
  */
 export type Failure =
 	| ({ kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'DRAIN'; code: number } & FailureDiagnosticText)
-	| ({ kind: 'auth-preflight'; class: 'AUTH'; status: number } & FailureDiagnosticText);
+	| ({ kind: 'auth-preflight'; class: 'AUTH' | 'THROTTLE'; status: number } & FailureDiagnosticText);
 
 /**
  * Cause of the most recent non-open status transition. `null` while

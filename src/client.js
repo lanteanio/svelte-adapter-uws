@@ -774,6 +774,22 @@ const TERMINAL_CLOSE_CODES = new Set([
 
 // Close codes indicating server-side throttling. Reconnect is still attempted
 // but we jump ahead in the backoff curve to avoid hammering a rate-limited server.
+/**
+ * A `Retry-After` value as milliseconds: delta-seconds or an HTTP date, capped
+ * at five minutes so one bad header cannot park a client; 0 when absent or
+ * unreadable.
+ * @param {string | null | undefined} value
+ * @returns {number}
+ */
+function retryAfterMs(value) {
+	if (typeof value !== 'string') return 0;
+	const text = value.trim();
+	if (text === '') return 0;
+	const seconds = /^\d+$/.test(text) ? Number(text) : (Date.parse(text) - now()) / 1000;
+	if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+	return Math.min(seconds, 300) * 1000;
+}
+
 const THROTTLE_CLOSE_CODES = new Set([
 	4429, // Rate limited (custom)
 ]);
@@ -1484,6 +1500,16 @@ function createConnection(options) {
 				});
 				if (debug) console.log('[ws] auth preflight status=%d', resp.status);
 				if (resp.ok) return { outcome: 'ok', status: resp.status, reason: '' };
+				if (resp.status === 429) {
+					// Rate-limited, not refused: many clients behind one address can
+					// hit the per-IP budget together, and none of them is unauthorized.
+					return {
+						outcome: 'throttled',
+						status: 429,
+						reason: resp.statusText || 'too many requests',
+						retryAfterMs: retryAfterMs(resp.headers?.get?.('retry-after'))
+					};
+				}
 				if (resp.status >= 400 && resp.status < 500) {
 					return { outcome: 'unauthorized', status: resp.status, reason: resp.statusText || 'unauthorized' };
 				}
@@ -1520,6 +1546,21 @@ function createConnection(options) {
 					statusStore.set('failed');
 					terminalClosed = true;
 					permaClosedStore.set(true);
+					return;
+				}
+				if (result.outcome === 'throttled') {
+					// Back off as for a throttling close, and no sooner than the
+					// server asked.
+					if (debug) console.warn('[ws] auth preflight rate-limited (429), backing off');
+					failureStore.set({
+						kind: 'auth-preflight',
+						class: 'THROTTLE',
+						status: result.status,
+						...failureDiagnosticText(result.reason)
+					});
+					statusStore.set('disconnected');
+					attempt = Math.max(attempt, 5);
+					scheduleReconnect(undefined, result.retryAfterMs);
 					return;
 				}
 				if (result.outcome === 'transient') {
@@ -2056,7 +2097,11 @@ function createConnection(options) {
 		};
 	}
 
-	function scheduleReconnect(overrideDelayMs) {
+	/**
+	 * @param {number} [overrideDelayMs] a pre-rolled delay that does not advance the backoff
+	 * @param {number} [floorMs] the least delay the server asked for (Retry-After)
+	 */
+	function scheduleReconnect(overrideDelayMs, floorMs) {
 		if (reconnectTimer) return;
 		if (attempt >= maxReconnectAttempts) {
 			failureStore.set({
@@ -2077,7 +2122,7 @@ function createConnection(options) {
 			// migrating to a fresh node, not backing off a failure.
 			delay = overrideDelayMs;
 		} else {
-			delay = nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt);
+			delay = Math.max(nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt), floorMs || 0);
 			attempt++;
 		}
 		reconnectTimer = setTimer(() => {

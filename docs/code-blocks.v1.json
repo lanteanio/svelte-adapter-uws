@@ -1317,7 +1317,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "5ad92eb8ff7e9b37295be2fb0906d3b2d694adc6dde2620231f4e5226afcb189",
+			"fingerprint": "c69fe30169256b94b68b54213abaace0266548d4c1da7cc643d44860a9d49e52",
 			"occurrence": 1,
 			"language": "ts",
 			"line": 3358,

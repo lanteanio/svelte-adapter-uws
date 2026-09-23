@@ -1440,8 +1440,12 @@ if (WS_ENABLED) {
 			// legitimate clients' whole authentication budget.
 			if (authRateLimiter.exceeded(clientIp, now())) {
 				mUpgradeRejected?.inc({ reason: 'auth_rate_limit' });
+				// About one limiter window, jittered so the clients behind one
+				// address do not all come back in the same second.
+				const retryAfter = jitterRetryAfter(wsOptions.authPathRateLimitWindow ?? 10, 0.5);
 				res.cork(() => {
 					res.writeStatus('429 Too Many Requests');
+					res.writeHeader('retry-after', String(retryAfter));
 					res.writeHeader('content-type', 'text/plain');
 					res.end('Too many authentication requests');
 				});

@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a rate-limited auth preflight no longer closes the client for good.** The bundled client read every 4xx from the preflight as a verdict on the user, so a 429 - which clients behind one address earn together - marked them all permanently closed until a reload; a 429 now backs off like a throttling close, no sooner than its new Retry-After.
+  - **Affects:** Apps using `connect({ auth: true })` whose users share an address (offices, schools, carrier NAT), and anything reading `failure` for the preflight.
+  - **Action:** None. A UI keyed on `$failure.class === 'AUTH'` for a 429 now sees `'THROTTLE'` with `kind: 'auth-preflight'`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every other 4xx is still terminal and 5xx still retries. The server's preflight 429 now carries `Retry-After` of about one `authPathRateLimitWindow`, jittered; the client caps any `Retry-After` it honours at five minutes.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -88,6 +94,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **A 429 from the auth preflight is throttling, not refusal.** The client's
+  preflight classified `status >= 400 && < 500` as unauthorized and set the
+  permanently-closed flag. A 429 now takes its own `throttled` outcome: the
+  failure store reads `class: 'THROTTLE'`, the backoff jumps ahead as for a
+  4429 close, and `scheduleReconnect` takes the parsed `Retry-After` (seconds
+  or an HTTP date, capped at five minutes) as a floor under the backoff delay.
+  The production preflight's 429 now writes that header. `test/client-real.test.js`
+  pins the client with fake timers, and `test/auth-throttle-real.test.js` drives
+  the built runtime past the budget and reads the header.
 
 - **The control-egress figures name the shape that amplifies most.** Measured
   on the built runtime: 1,344 shortest-legal topics in 8,121 bytes draw 1,344
