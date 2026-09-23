@@ -71,6 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every other 4xx is still terminal and 5xx still retries. The server's preflight 429 now carries `Retry-After` of about one `authPathRateLimitWindow`, jittered; the client caps any `Retry-After` it honours at five minutes.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a connection attempt the network never answers is abandoned and retried.** A WebSocket handshake or an auth preflight that got no response at all - no open, no error, no close - left the client in 'connecting' indefinitely; each attempt is now bounded at 15 seconds and then handed to the ordinary backoff.
+  - **Affects:** Clients on networks that silently drop traffic (captive portals, broken proxies, mobile handovers).
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option; the backoff, `maxReconnectAttempts` and the failure classes are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -94,6 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Each connection attempt is bounded.** `openSocket` arms a 15-second timer
+  that closes a socket still `CONNECTING`, so its close event takes the
+  existing reconnect path, and the auth preflight's `fetch` carries an
+  `AbortSignal` on the same bound, so an abandoned preflight is a transient
+  failure like a network error. Both timers are cleared when the attempt
+  settles. `test/client-real.test.js` holds a handshake and a preflight open
+  under fake timers and requires the retry after the bound, and fails with the
+  bound removed.
 
 - **A 429 from the auth preflight is throttling, not refusal.** The client's
   preflight classified `status >= 400 && < 500` as unauthorized and set the

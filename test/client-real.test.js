@@ -17,9 +17,9 @@ class MockWebSocket {
 
 		MockWebSocket._last = this;
 
-		// Auto-open after microtask
+		// Auto-open after microtask, unless a case holds the handshake open.
 		queueMicrotask(() => {
-			if (this.readyState === MockWebSocket.CONNECTING) {
+			if (this.readyState === MockWebSocket.CONNECTING && !MockWebSocket._holdHandshake) {
 				this.readyState = MockWebSocket.OPEN;
 				this.onopen?.();
 			}
@@ -3767,6 +3767,57 @@ describe('client.js (real module)', () => {
 				expect(globalThis.fetch, 'retried after Retry-After').toHaveBeenCalledTimes(2);
 				unsubFailure();
 				unsubPerma();
+				conn.close();
+			} finally {
+				vi.useRealTimers();
+				globalThis.fetch = originalFetch;
+			}
+		});
+
+		it('abandons a handshake the network never answers and tries again', async () => {
+			// No open, no error, no close ever arrives for this socket; without a
+			// bound the client would sit in 'connecting' for good.
+			vi.useFakeTimers();
+			MockWebSocket._holdHandshake = true;
+			try {
+				const conn = clientModule.connect({ reconnectInterval: 10, maxReconnectInterval: 20 });
+				await vi.advanceTimersByTimeAsync(0);
+				const stuck = MockWebSocket._last;
+				expect(stuck.readyState).toBe(MockWebSocket.CONNECTING);
+
+				await vi.advanceTimersByTimeAsync(14_900);
+				expect(stuck.readyState, 'still waiting inside the bound').toBe(MockWebSocket.CONNECTING);
+				expect(MockWebSocket._last).toBe(stuck);
+
+				MockWebSocket._holdHandshake = false;
+				await vi.advanceTimersByTimeAsync(300);
+				expect(stuck.readyState, 'the stuck attempt was abandoned').toBe(MockWebSocket.CLOSED);
+				expect(MockWebSocket._last, 'a fresh attempt was made').not.toBe(stuck);
+				expect(MockWebSocket._last.readyState).toBe(MockWebSocket.OPEN);
+				conn.close();
+			} finally {
+				MockWebSocket._holdHandshake = false;
+				vi.useRealTimers();
+			}
+		});
+
+		it('abandons an auth preflight that never answers and retries it', async () => {
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = vi.fn((_url, init) => new Promise((_resolve, reject) => {
+				init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+			}));
+			vi.useFakeTimers();
+			try {
+				const conn = clientModule.connect({ auth: true, reconnectInterval: 10, maxReconnectInterval: 20 });
+				const seen = [];
+				const unsub = conn.failure.subscribe((v) => seen.push(v));
+				await vi.advanceTimersByTimeAsync(0);
+				expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+				await vi.advanceTimersByTimeAsync(15_100);
+				expect(seen[seen.length - 1]).toMatchObject({ kind: 'auth-preflight', class: 'AUTH', status: 0 });
+				await vi.advanceTimersByTimeAsync(100);
+				expect(globalThis.fetch, 'the preflight is retried').toHaveBeenCalledTimes(2);
+				unsub();
 				conn.close();
 			} finally {
 				vi.useRealTimers();

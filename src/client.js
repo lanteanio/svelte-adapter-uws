@@ -790,6 +790,14 @@ function retryAfterMs(value) {
 	return Math.min(seconds, 300) * 1000;
 }
 
+/**
+ * How long one connection attempt may take - the auth preflight, or the
+ * WebSocket handshake - before it is abandoned and handed to the ordinary
+ * retry path. A network that swallows the attempt sends no event at all, so
+ * without this the client would sit in 'connecting' indefinitely.
+ */
+const ATTEMPT_TIMEOUT_MS = 15_000;
+
 const THROTTLE_CLOSE_CODES = new Set([
 	4429, // Rate limited (custom)
 ]);
@@ -1493,11 +1501,21 @@ function createConnection(options) {
 
 		authInFlight = (async () => {
 			try {
-				const resp = await fetch(target, {
-					method: 'POST',
-					credentials: 'include',
-					headers: { 'x-requested-with': 'svelte-adapter-uws' }
-				});
+				// Bounded like the handshake: an abandoned preflight rejects, and
+				// the catch below treats it as a transient failure to retry.
+				const abort = typeof AbortController === 'function' ? new AbortController() : null;
+				const abortTimer = abort ? setTimer(() => abort.abort(), ATTEMPT_TIMEOUT_MS) : null;
+				let resp;
+				try {
+					resp = await fetch(target, {
+						method: 'POST',
+						credentials: 'include',
+						headers: { 'x-requested-with': 'svelte-adapter-uws' },
+						signal: abort?.signal
+					});
+				} finally {
+					if (abortTimer !== null) clearTimer(abortTimer);
+				}
 				if (debug) console.log('[ws] auth preflight status=%d', resp.status);
 				if (resp.ok) return { outcome: 'ok', status: resp.status, reason: '' };
 				if (resp.status === 429) {
@@ -1599,6 +1617,14 @@ function createConnection(options) {
 		// no resume, sends queued forever). Each handler acts only while its
 		// socket is still the current one.
 		const sock = ws;
+		// A handshake the network never answers leaves the socket CONNECTING with
+		// no event to act on. Closing it fails the attempt, and its close event
+		// takes the ordinary reconnect path.
+		const attemptTimer = setTimer(() => {
+			if (ws === sock && sock.readyState === WebSocket.CONNECTING) {
+				try { sock.close(); } catch { /* already failing */ }
+			}
+		}, ATTEMPT_TIMEOUT_MS);
 		// Read inbound binary frames as ArrayBuffer (default is Blob, which is
 		// async to read). Cannot regress the realtime upload layer: that layer
 		// only EMITS binary (0x01/0x02) and receives upload results as JSON on
@@ -1617,6 +1643,7 @@ function createConnection(options) {
 		resetIngress();
 
 		ws.onopen = () => {
+			clearTimer(attemptTimer);
 			if (ws !== sock) return;
 			attempt = 0;
 			// A fresh connection supersedes any pending drain advisory from the old
@@ -2019,6 +2046,7 @@ function createConnection(options) {
 		};
 
 		ws.onclose = (event) => {
+			clearTimer(attemptTimer);
 			// Dropped BEFORE the identity guard below: a forced close can race a
 			// reconnect, and a superseded socket's late onclose returns early. If
 			// the retry outlived that return it would fire against the NEW socket
