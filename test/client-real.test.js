@@ -1787,6 +1787,33 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('clears the managed mark with the last ref, so a later plain on() subscribes itself', async () => {
+			// No inverse of setTopicManaged is needed: releasing the last ref is
+			// what clears it. A store attached afterwards without the mark is an
+			// ordinary client subscription and must put its own frame on the wire.
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			clientModule.setTopicManaged('managed:again-1');
+			const managed = clientModule.on('managed:again-1').subscribe(() => {});
+			await flush();
+			managed();
+			await flush();
+			ws._sent.length = 0;
+
+			const plain = clientModule.on('managed:again-1').subscribe(() => {});
+			await flush();
+			const subscribed = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.some((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch') &&
+					(m.topic === 'managed:again-1' || (Array.isArray(m.topics) && m.topics.includes('managed:again-1'))));
+			expect(subscribed, 'the later plain store sent its own subscribe').toBe(true);
+
+			plain();
+			conn.close();
+		});
+
 		it('the public force-unsubscribe emits the wire frame for a managed topic too', async () => {
 			// force-unsubscribe (ignores the ref count) routes through the same release
 			// path as ref release, so a managed topic still emits the frame.
