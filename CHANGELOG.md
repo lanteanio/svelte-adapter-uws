@@ -89,6 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. An exact UTF-8 count measured about 28 ns for a 90-character envelope and 140 ns for 400 on every send, which this per-send stat does not pay; `topicPublishBytesPerSec` uses the same unit.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a server entry with an apostrophe, `#` or `%` in its name loads.** The build imported each `__` entry a Vite plugin writes by a path built from its entry name, so an apostrophe broke the generated index and a `#` or `%` - which Rollup rewrites in file names - pointed at a file that did not exist.
+  - **Affects:** Vite plugins that emit `__`-prefixed server entries with such characters in the name.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Entries are now imported by the file Rollup wrote, with JSON-quoted specifiers, and in file-name order on every filesystem. An ordinary name imports exactly as before.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -124,6 +130,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Extra `__` entries are imported by the file Rollup wrote.**
+  `writeAndCloseRollupBundle` returns the write result, and the new
+  `extraEntryImports` maps each entry to its output chunk by its source module,
+  so a name Rollup sanitised still resolves; specifiers are JSON-quoted. The
+  directory listing is sorted, so entries load in the same order on NTFS and
+  ext4, and `docs/architecture.md` states the entry contract.
+  `test/extra-entry-imports.test.js` runs a real Rollup build of `__a#b`,
+  `__it's` and `__plain` and imports the generated index.
 
 - **`CloseContext.bytesOut` documents its unit.** Binary frames count bytes and
   text frames count UTF-16 code units, the unit `topicPublishBytesPerSec`

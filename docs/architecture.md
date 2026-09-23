@@ -193,6 +193,19 @@ digests, and registry identities belong to the release workflow and
 rollback, restore dependants before dependencies unless the whole tuple is
 replaced atomically.
 
+## Extra server entries
+
+A Vite plugin can put code in front of the handler by writing a file into the
+SvelteKit server output whose name starts with `__` and ends in `.js` (the
+realtime layer's generated registry is one). The adapter bundles each such file
+as its own entry and imports all of them at the top of the built `index.js`,
+in file-name order, before the handler loads, so the order is the same on
+every filesystem. They are static ES module imports: one whose top level
+awaits does not hold back the next, so an entry that needs another's finished
+work should import that entry itself. Each is imported by the file name Rollup
+wrote for it, which differs from the entry name when the name holds a
+character Rollup will not put in a file name.
+
 ## Accepted decisions
 
 The decision index is [`docs/decisions/README.md`](./decisions/README.md):

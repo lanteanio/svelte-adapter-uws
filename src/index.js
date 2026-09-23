@@ -19,7 +19,7 @@ import {
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
-import { writeAndCloseRollupBundle } from './build-rollup-lifecycle.js';
+import { writeAndCloseRollupBundle, extraEntryImports } from './build-rollup-lifecycle.js';
 import { compileAccessibleWaitingRoomTemplate } from './runtime/utils/waiting-room-template.js';
 import { normalizeMessageAdmission } from './runtime/utils/message-admission.js';
 
@@ -1069,7 +1069,9 @@ export default function (opts = {}) {
 			const knownEntries = new Set(Object.values(input).map(f => path.basename(f)));
 			/** @type {string[]} */
 			const extraEntries = [];
-			for (const file of readdirSync(tmp)) {
+			// Sorted, so the entries load in the same order on every filesystem: the
+			// directory listing order is the filesystem's, and NTFS and ext4 disagree.
+			for (const file of readdirSync(tmp).sort()) {
 				if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
 					const name = file.replace(/\.js$/, '');
 					input[name] = `${tmp}/${file}`;
@@ -1098,7 +1100,7 @@ export default function (opts = {}) {
 				]
 			});
 
-			await writeAndCloseRollupBundle(bundle, {
+			const written = await writeAndCloseRollupBundle(bundle, {
 				dir: `${out}/server`,
 				format: 'esm',
 				sourcemap: true,
@@ -1335,9 +1337,7 @@ export default function (opts = {}) {
 
 			// Import discovered __-prefixed entries so they execute at startup
 			if (extraEntries.length > 0) {
-				const entryImports = extraEntries
-					.map(name => `import './server/${name}.js';`)
-					.join('\n');
+				const entryImports = extraEntryImports(written, tmp, extraEntries);
 				const indexPath = `${out}/index.js`;
 				const indexContent = readFileSync(indexPath, 'utf8');
 				writeFileSync(indexPath, entryImports + '\n' + indexContent);
