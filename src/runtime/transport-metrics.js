@@ -30,6 +30,21 @@ const WS_MESSAGE_OUTCOMES = Object.freeze(['ok', 'error']);
 const WS_CONNECTION_OUTCOMES = Object.freeze(['clean', 'abnormal']);
 const PUBLISH_OUTCOMES = Object.freeze(['delivered', 'no_subscribers']);
 
+/**
+ * Every label value these instruments can emit, by signal and label. The label
+ * objects below are built only from these arrays, so this is what the
+ * observability manifest's label domains have to admit.
+ */
+export const TRANSPORT_LABEL_VALUES = Object.freeze({
+	http_requests_total: Object.freeze({ method: HTTP_METHODS, outcome: HTTP_OUTCOMES }),
+	http_request_duration_seconds: Object.freeze({ method: HTTP_METHODS, outcome: HTTP_OUTCOMES }),
+	upgrade_duration_seconds: Object.freeze({ outcome: UPGRADE_OUTCOMES }),
+	ws_messages_total: Object.freeze({ kind: WS_KINDS, outcome: WS_MESSAGE_OUTCOMES }),
+	ws_message_duration_seconds: Object.freeze({ kind: WS_KINDS, outcome: WS_MESSAGE_OUTCOMES }),
+	ws_connection_duration_seconds: Object.freeze({ outcome: WS_CONNECTION_OUTCOMES }),
+	ws_publish_outcomes_total: Object.freeze({ outcome: PUBLISH_OUTCOMES })
+});
+
 /** @param {readonly string[]} left @param {readonly string[]} right */
 function labelMatrix(left, right) {
 	/** @type {Record<string, Record<string, Readonly<Record<string, string>>>>} */

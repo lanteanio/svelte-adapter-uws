@@ -1024,7 +1024,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// .trimEnd() on the message string normalizeDiagnosticMessage has already
 	// cut to 512 characters. Diagnostic text only: no frame byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: '0a79d6e7264e7fecaf654300aceaeb584a1b8e6f6ba527ec4faa198d1f8c6048',
+	//
+	// Re-pinned for the transport label table. transport-metrics.js, reached
+	// through the observability manifest, exports one frozen object that
+	// names the label arrays it already declared. Declaration data only: no
+	// statement runs on any frame path, no byte is read, allocated or copied,
+	// and no copy primitive entered.
+	ingress: '2fd23133213d6ec6c6194d98370119c0b5b0ee37a9353ae9c8164bb98466741e',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1915,7 +1921,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// a default parameter, and the dropped-frame branch passes 2. One parameter
 	// and one literal: no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	platform: 'bbc8b2fce3f9f09c8388360266c18e8260d01b71c089e1eee733807272a1ad22',
+	//
+	// Re-pinned for the transport label table. transport-metrics.js, reached
+	// through the observability manifest, exports one frozen object that
+	// names the label arrays it already declared. Declaration data only: no
+	// statement runs on any frame path, no byte is read, allocated or copied,
+	// and no copy primitive entered.
+	platform: '953782a9f7f6fff974b586862e3fc990e7ea6c348a43b9cd369f7608e56aed90',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2257,7 +2269,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// .trimEnd() on the message string normalizeDiagnosticMessage has already
 	// cut to 512 characters. Diagnostic text only: no frame byte is read,
 	// allocated or copied, and no copy primitive entered.
-	'wire-fanout': '37fd5f4160f3dc7bf7c982ee44e31c49e13b56798a980936854f1489d3fcbb3b',
+	//
+	// Re-pinned for the transport label table. transport-metrics.js, reached
+	// through the observability manifest, exports one frozen object that
+	// names the label arrays it already declared. Declaration data only: no
+	// statement runs on any frame path, no byte is read, allocated or copied,
+	// and no copy primitive entered.
+	'wire-fanout': '4df4ffcf1aa0034722ef00d68a94721b57aa3f7cc6648aaf91542fdbc026027c',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
