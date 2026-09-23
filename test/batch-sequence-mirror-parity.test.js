@@ -154,8 +154,8 @@ function assertRefusesNumericSeq(platform, label) {
 		`${label}: a bigint options seq must be refused`
 	).toThrow(BATCH_SEQUENCE_ERROR);
 
-	// One entry is the shape the bounced arity rule allowed. It must refuse too,
-	// or the contract depends on the runtime length of an array again.
+	// A single-entry batch is refused an options seq exactly as a multi-entry
+	// one is, so the contract never depends on the length of the array.
 	expect(
 		() => platform.publishWireBatch('mirror-room', 'update', [{ data: { n: 1 } }], WIRE, { seq: 14, relay: false }),
 		`${label}: a single-entry batch must refuse it as well`
