@@ -17,6 +17,7 @@ import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encod
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
+import { guardCloseFrames, closeFrameReason } from './runtime/utils/close-frame.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
@@ -2396,6 +2397,10 @@ export async function createTestServer(options = {}) {
 			if (cfg && cfg.scenario === 'worker-flap') {
 				const code = typeof cfg.code === 'number' ? cfg.code : 1012;
 				const reason = typeof cfg.reason === 'string' ? cfg.reason : 'worker restart';
+				// Checked once, here, so a code the wire cannot carry is the
+				// caller's TypeError rather than a throw swallowed per socket
+				// below, which would leave every connection open.
+				closeFrameReason(code, reason);
 				// Snapshot first - end() removes the entry from
 				// wsConnections via the close handler, which would mutate
 				// the Set we are iterating. We use ws.end(code, reason)
@@ -2849,6 +2854,9 @@ export async function createTestServer(options = {}) {
 		},
 
 		open(ws) {
+			// The same close rule as production, installed before anything can
+			// close this socket.
+			guardCloseFrames(ws);
 			const userData = ws.getUserData();
 			// Same reason as the production handler: claim the slots as own
 			// properties before anything writes one, so an accessor on the

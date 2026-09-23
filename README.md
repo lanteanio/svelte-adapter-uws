@@ -2033,7 +2033,7 @@ The `ws` object in `open`, `message`, `close`, and `drain` is a [uWebSockets.js 
 - `ws.subscribe(topic)` - subscribe to a topic for `app.publish()`
 - `ws.unsubscribe(topic)` - unsubscribe from a topic
 - `ws.send(data)` - send a message to this connection
-- `ws.close()` - close the connection
+- `ws.end(code?, reason?)` - close with a close frame the client reads: `code` must be 1000-1003, 1007-1014 or 3000-4999 (anything else throws a `TypeError`), and a reason over 123 UTF-8 bytes is shortened at a character boundary. `ws.close()` drops the connection with no close frame, so the client reads 1006 and reconnects
 
 ---
 
@@ -6155,7 +6155,7 @@ Then check the browser's Network tab -> WS tab. You'll see the upgrade request a
 export async function open(ws, { platform }) {
   const userData = ws.getUserData();
   if (!userData.userId) {
-    ws.close(4401, "Unauthorized"); // client will not retry
+    ws.end(4401, "Unauthorized"); // client will not retry
     return;
   }
 }

@@ -8,6 +8,7 @@ import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFram
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
+import { closeFrameReason } from './runtime/utils/close-frame.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
@@ -400,8 +401,15 @@ export default function uws(options = {}) {
 				rawWs.send(typeof message === 'string' ? message : Buffer.from(message));
 				return 1;
 			},
-			close() { rawWs.close(); },
-			end(code, message) { rawWs.close(code, message?.toString()); },
+			// As on uWS: close() drops the connection with no close frame, so the
+			// peer reads 1006, and end() sends one under the shared close rule.
+			close() { rawWs.terminate(); },
+			end(code, message) {
+				const reason = closeFrameReason(code, message);
+				if (code === undefined) rawWs.close();
+				else if (reason === undefined) rawWs.close(code);
+				else rawWs.close(code, typeof reason === 'string' ? reason : Buffer.from(reason.buffer, reason.byteOffset, reason.byteLength));
+			},
 			subscribe(topic) { topics.add(topic); return true; },
 			unsubscribe(topic) { topics.delete(topic); return true; },
 			publish(topic, message, isBinary = false, _compress = false) {

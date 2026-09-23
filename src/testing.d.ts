@@ -209,7 +209,9 @@ export interface TestServerOptions {
  *   with the configured `code` (default `1012`) and `reason` (default
  *   `'worker restart'`). The server stays alive and accepts new
  *   connections. Use to verify clients reconnect and resume correctly
- *   after a worker process restart in cluster mode.
+ *   after a worker process restart in cluster mode. `code` and `reason`
+ *   follow the `ws.end()` rule: a code that cannot be sent throws a
+ *   TypeError before any connection is closed.
  *
  * Pass `null` (or call with no argument) to clear the active continuous
  * scenario; the harness returns to its zero-overhead fast paths.

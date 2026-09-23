@@ -108,6 +108,22 @@ export function message(ws, ctx) {
 	if (msg.type === 'echo') {
 		platform.send(ws, 'test-topic', 'echo', msg.payload);
 	}
+	if (msg.type === 'end-probe') {
+		// ws.end() with the client's own code and reason, so a suite can read
+		// what the close rule sends. A refusal is reported back on the socket
+		// it left open.
+		const reason = Array.isArray(msg.reasonBytes) ? new Uint8Array(msg.reasonBytes) : msg.reason;
+		try {
+			ws.end(msg.code, reason);
+		} catch (err) {
+			platform.send(ws, 'probe', 'end-refused', { name: err?.name, message: err?.message });
+		}
+		return;
+	}
+	if (msg.type === 'drop-probe') {
+		ws.close();
+		return;
+	}
 	if (msg.type === 'shared-publish') {
 		// A shared stateless codec publish, so the cohort lane runs in the
 		// built runtime: the topic splits into a binary and a JSON cohort, and

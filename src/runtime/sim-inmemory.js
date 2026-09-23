@@ -7,6 +7,8 @@
 // uses to bridge string <-> ArrayBuffer are the wire's own encoding, nothing
 // time- or randomness-dependent.
 
+import { closeFrameReason } from './utils/close-frame.js';
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -116,15 +118,27 @@ export function createInMemoryApp(opts) {
 			},
 			getRemoteAddressAsText() { return enc.encode(String((userData && userData.remoteAddress) || '127.0.0.1')).buffer; },
 			cork(fn) { return fn(); },
-			end(code = 1000, reason = '') {
+			end(code, reason) {
+				// The close rule the real transport is guarded with, checked before
+				// the closed test as it is there, so a simulated app cannot close in
+				// a way production refuses.
+				const sent = closeFrameReason(code, reason);
 				if (closed) return;
-				closed = true;
-				connections.delete(ws);
-				behavior.close?.(ws, code, enc.encode(String(reason)).buffer);
-				clientSide.onServerClose(code, String(reason));
+				const text = sent === undefined ? '' : typeof sent === 'string' ? sent : dec.decode(sent);
+				// What uWS reports for a close frame it sent: the server's own close
+				// handler reads 0 when no code was given, and the peer reads 1005.
+				finishClose(code ?? 0, code ?? 1005, text);
 			},
-			close() { ws.end(1006, ''); }
+			// uWS close(): no close frame, so both sides read 1006.
+			close() { if (!closed) finishClose(1006, 1006, ''); }
 		};
+		/** @param {number} serverCode @param {number} peerCode @param {string} text */
+		function finishClose(serverCode, peerCode, text) {
+			closed = true;
+			connections.delete(ws);
+			behavior.close?.(ws, serverCode, enc.encode(text).buffer);
+			clientSide.onServerClose(peerCode, text);
+		}
 		return ws;
 	}
 

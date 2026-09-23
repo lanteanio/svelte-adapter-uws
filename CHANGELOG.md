@@ -10,14 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Changed: closing a socket refuses a code it cannot send and never splits a character in the reason.** On uWS, `ws.end()` sent an unsendable code as an empty close the client read as 1005 and cut a long reason mid-character, so the client failed the connection; one rule now applies everywhere.
+  - **Affects:** Apps that close sockets with a computed code or a long or non-ASCII reason, and suites passing a code to `platform.__chaos({ scenario: 'worker-flap' })`.
+  - **Action:** Close with a code from 1000-1003, 1007-1014 or 3000-4999 (4000-4999 is the range for application codes), and give a reason only together with a code.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every sendable code, and every reason of 123 bytes or fewer, goes out exactly as before. A code outside those ranges, a non-integer or a non-number, a reason without a code, and reason bytes that are not UTF-8 now throw a `TypeError` and leave the connection open - what `vite dev` already did for the code. A longer reason is shortened at a character boundary and a lone surrogate is sent as U+FFFD. Under `vite dev` a long reason no longer throws, a binary reason is sent as its bytes, and `ws.close()` now drops the connection without a close frame as uWS does, so the client reads 1006 rather than 1005.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
   - **Requires:** No new dependency or option.
   - **Compatibility:** A hook that does not fail is called as before, on the same object, and still not awaited; a returned thenable now gets a rejection handler attached. An app with its own process-level handler used to keep the connection open after a failing `open` or `drain` hook and see the error there; the connection is now closed with 1011 and the error goes to the console line. A hook export that is present but not a function is reported on each connection instead of throwing out of the callback. The close reasons are `Open handler error` and `Drain handler error`, beside the existing `Message handler error`, and the lines print as `ADAPTER-ERR-OPEN-HOOK`, `ADAPTER-ERR-DRAIN-HOOK` and `ADAPTER-ERR-CLOSE-HOOK`. Under `vite dev` a failing close hook no longer skips the dev server's own cleanup for that connection.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the documented way to stop a client retrying now sends its close code.** The README closed an unauthenticated socket with `ws.close(4401, 'Unauthorized')`, but `close()` takes no arguments and sends no close frame, so the client read 1006 and kept reconnecting; the example now uses `ws.end(4401, 'Unauthorized')`.
+  - **Affects:** Apps that copied the example to end a client's retry loop.
+  - **Action:** Replace `ws.close(code, reason)` with `ws.end(code, reason)` wherever the client is meant to read the code.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only; `ws.close()` behaves as it always did on uWS.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
+
+### Changed
+
+- **`ws.end()` follows one close rule on every surface.** `closeFrameReason`
+  (utils/close-frame.js) takes the code only from 1000-1003, 1007-1014 and
+  3000-4999 as an integer number, and the reason as a string or UTF-8 bytes,
+  shortened past 123 bytes back to a character boundary; a string of 41
+  well-formed units or fewer passes through untouched. `guardCloseFrames`
+  installs it on the uWS socket prototype at the first open, in the
+  production handler and in `createTestServer`, so every `end()` - the
+  application's and the runtime's own - goes through it at no per-connection
+  cost, and a registered-symbol marker stops a second copy of the module from
+  wrapping it twice. The `vite dev` socket wrapper and the simulator's socket
+  double apply the same rule; the dev wrapper's `close()` now terminates, and
+  the double reports 0 to the server's close handler and 1005 to the peer for
+  a close with no code, as uWS does. The test server's `worker-flap` chaos
+  scenario checks its code and reason once, before it closes anything.
+  `test/close-frame.test.js` pins the rule; `test/close-frame-real.test.js`
+  drives each shape through a real client on all three surfaces and fails on
+  each of them with its half of the change removed.
 
 ### Fixed
 
@@ -38,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection to be served afterwards; `test/lifecycle-hook-boundary.test.js`
   drives open and close on `createTestServer` and `vite dev` and requires the
   next connection to be served. Both fail with the boundary removed.
+
+- **The README's retry-stopping example sends the code it names.** It called
+  `ws.close(4401, 'Unauthorized')`; uWS's `close()` ignores arguments and
+  sends no close frame, so the bundled client read 1006, classed it as
+  retryable and reconnected. The example uses `ws.end()`, and the README's
+  list of socket methods now says what each of the two sends.
 
 ## [0.6.0-next.95] - 2026-09-22
 

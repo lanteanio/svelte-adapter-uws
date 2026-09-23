@@ -50,6 +50,7 @@ import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLa
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
 import { runUnsubscribeHook } from './utils/unsubscribe-hook.js';
 import { runOpenHook, runDrainHook, runCloseHook } from './utils/hook-boundary.js';
+import { guardCloseFrames } from './utils/close-frame.js';
 import { sendControl } from './handler/control-egress.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
@@ -2262,6 +2263,9 @@ if (WS_ENABLED) {
 		},
 
 		open: (ws) => {
+			// Before anything can close this socket: every end() on it, the
+			// application's included, goes through the close rule.
+			guardCloseFrames(ws);
 			// Track which topics this connection is subscribed to.
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
