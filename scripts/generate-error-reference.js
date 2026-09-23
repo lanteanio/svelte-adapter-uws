@@ -321,6 +321,22 @@ function cell(value) {
 	return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
+/**
+ * An inline code span that renders `value` exactly: the fence is one backtick
+ * longer than the longest run inside it, and a value that starts or ends with a
+ * backtick, or starts and ends with a space, is padded with one space each
+ * side - the one case CommonMark strips a space, which it then strips again.
+ * @param {string} value
+ */
+function codeSpan(value) {
+	const text = String(value);
+	let longest = 0;
+	for (const run of text.match(/`+/g) || []) longest = Math.max(longest, run.length);
+	const fence = '`'.repeat(longest + 1);
+	const pad = /^`|`$/.test(text) || (/^ /.test(text) && / $/.test(text)) ? ' ' : '';
+	return fence + pad + text + pad + fence;
+}
+
 export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options = {}) {
 	const scan = options.scan || scanEmittedEvents();
 	const errors = [
@@ -376,7 +392,7 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 	for (const entry of entries) {
 		lines.push(
 			'| [' + entry.id + '](#' + entry.anchor + ') | `' + cell(entry.code || entry.event) +
-			'` | `' + cell(entry.messagePrefix) + '` |'
+			'` | ' + codeSpan(cell(entry.messagePrefix)) + ' |'
 		);
 	}
 	lines.push(
@@ -403,7 +419,7 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		''
 	);
 	for (const entry of consoleEntries) {
-		lines.push('- `' + cell(entry.messagePrefix) + '` - [' + entry.id + '](#' + entry.anchor + ')');
+		lines.push('- ' + codeSpan(cell(entry.messagePrefix)) + ' - [' + entry.id + '](#' + entry.anchor + ')');
 	}
 	lines.push(
 		'',
@@ -433,7 +449,7 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 			'## `' + entry.id + '`',
 			'',
 			'- **Code/event:** `' + (entry.code || entry.event) + '`',
-			'- **Message prefix:** `' + entry.messagePrefix + '`',
+			'- **Message prefix:** ' + codeSpan(entry.messagePrefix),
 			'- **Cause:** ' + entry.cause,
 			'- **Consequence:** ' + entry.consequence,
 			'- **Automatic recovery:** ' + entry.automaticRecovery,

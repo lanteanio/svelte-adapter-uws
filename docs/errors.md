@@ -93,7 +93,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook) | `ws.close-hook.threw` | `[ws] the close hook threw` |
 | [ADAPTER-ERR-COALESCED-UNSERIALIZABLE](#adapter-err-coalesced-unserializable) | `ws.send-coalesced.unserializable` | `[ws] a sendCoalesced value has no JSON form and was dropped` |
 | [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook) | `ws.recover-hook.threw` | `[ws] the recover-on-subscribe hook threw` |
-| [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` |
+| [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | ``[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got `` |
 | [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument) | `ws.metrics.instrument-threw` | `[ws] a metrics instrument threw; further errors from it are suppressed` |
 | [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled) | `ws.posture-export.disabled` | `[ws] posture export disabled: ` |
 | [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer) | `ws.posture-observer.threw` | `[ws] a posture transition handler threw` |
@@ -191,7 +191,7 @@ the stable ID tag on the line):
 - `[ws] the close hook threw` - [ADAPTER-ERR-CLOSE-HOOK](#adapter-err-close-hook)
 - `[ws] a sendCoalesced value has no JSON form and was dropped` - [ADAPTER-ERR-COALESCED-UNSERIALIZABLE](#adapter-err-coalesced-unserializable)
 - `[ws] the recover-on-subscribe hook threw` - [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook)
-- `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
+- ``[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got `` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
 - `[ws] a metrics instrument threw; further errors from it are suppressed` - [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument)
 - `[ws] posture export disabled: ` - [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled)
 - `[ws] a posture transition handler threw` - [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer)
@@ -1050,7 +1050,7 @@ searchable log prefix is:
 ## `ADAPTER-ERR-METRICS-MODULE-SHAPE`
 
 - **Code/event:** `ws.metrics.module-shape`
-- **Message prefix:** `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got `
+- **Message prefix:** ``[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ``
 - **Cause:** The export the build SELECTED from the module named by `websocket.metrics` cannot carry instrument factories. This is a statement about that one value, not about the module: the build takes the first of `default`, `metrics` and `registry` that is not nullish and forwards it without validating its shape, so a module carrying a perfectly good `metrics` registry prints this line whenever a primitive `default` sits in front of it.
 - **Consequence:** In the built runtime, metrics are disabled for the whole worker: no instrument is ever created, so the adapter series are ABSENT from the scrape rather than present at zero. Dashboards read as no data and alerts that fire on a threshold never fire at all. On the dev plugin the shape is the same and the loss is smaller, because dev registers no adapter instruments in any case: `platform.metrics` stays null and `metricsSnapshot()` answers null, so a scrape route being developed against dev reads as though no registry were configured at all. Dev keeps serving either way - a metrics module is not worth a dev server.
 - **Automatic recovery:** None. The runtime keeps serving traffic with metrics off - the alternative is a boot failure naming neither metrics nor the option that caused it.

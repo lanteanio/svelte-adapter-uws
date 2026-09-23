@@ -116,10 +116,17 @@ describe('generated operational error reference', () => {
 		// Console entries index printed lines, not diagnostic events, so their
 		// coverage row carries the searchable prefix instead of an event name
 		// the runtime never emits.
+		// How a prefix is fenced depends on the backticks it carries, and that it
+		// renders exactly is test/error-reference-code-spans.test.js's job; this
+		// asks only that every console entry has its bullet.
+		const lines = doc.split('\n');
 		for (const entry of ADAPTER_ERROR_REGISTRY) {
-			expect(doc).toContain(entry.emission === 'console'
-				? '- `' + entry.messagePrefix + '` - [' + entry.id + '](#' + entry.anchor + ')'
-				: '- `' + entry.event + '` - [' + entry.id + '](#' + entry.anchor + ')');
+			if (entry.emission === 'console') {
+				expect(lines.some((line) => line.startsWith('- `') && line.includes(entry.messagePrefix) &&
+					line.endsWith(' - [' + entry.id + '](#' + entry.anchor + ')')), entry.id).toBe(true);
+			} else {
+				expect(doc).toContain('- `' + entry.event + '` - [' + entry.id + '](#' + entry.anchor + ')');
+			}
 		}
 	});
 
