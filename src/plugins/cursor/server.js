@@ -1408,12 +1408,12 @@ export function createCursor(options = {}) {
 				// `msg` is absent exactly where it cannot help - a binary frame, one
 				// over 8 KiB, one not starting `{"ty`, a parse failure, or a value
 				// that is not a plain object - so the fallback still handles those.
-				let parsed = (msg && typeof msg === 'object') ? msg : null;
+				let parsed = (msg && typeof msg === 'object' && !Array.isArray(msg)) ? msg : null;
 				if (parsed === null) {
 					try { parsed = JSON.parse(FALLBACK_DECODER.decode(data)); } catch { return; }
 					// `null` parses successfully, and the type reads below are outside
 					// the catch: without this the frame `null` throws TypeError here.
-					if (parsed === null || typeof parsed !== 'object') return;
+					if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return;
 				}
 				if (parsed.type === 'cursor' && typeof parsed.topic === 'string') {
 					let subscribed = false;

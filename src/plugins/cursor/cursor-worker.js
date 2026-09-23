@@ -203,7 +203,7 @@ export function attachCursorWorker(scope) {
 		if (typeof raw !== 'string' || raw.length > MAX_FRAME_BYTES) return;
 		let msg;
 		try { msg = JSON.parse(raw); } catch { return; }
-		if (msg === null || typeof msg !== 'object') return;
+		if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) return;
 		if (msg.topic === cursorTopic && typeof msg.event === 'string') {
 			applyDecoded({ event: msg.event, data: msg.data });
 			return;
