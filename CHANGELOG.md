@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** A message is still at most 512 characters; one that was cut right after a space loses that trailing space. Nothing else about the line changes.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the invariant-violation counter is declared for TypeScript.** `platform.assertions`, the per-category counter, existed on every surface's platform and was documented in the README, but the published `Platform` type did not declare it, so TypeScript apps reading it failed to compile; it is now declared as a read-only `Map`.
+  - **Affects:** TypeScript apps that read `platform.assertions`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Types only. `introspect().assertions` keeps its plain-object type.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -70,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Every production platform member is declared on `Platform`.**
+  `platform.assertions` was the one missing. `test/platform-type-surface.test.js`
+  now reads the platform object literal with a parser and requires each of its
+  members on the interface, so the next undeclared one fails a test.
 
 - **A cut diagnostic message is trimmed again after the cut.**
   `normalizeDiagnosticMessage` (diagnostic-format.js) collapsed whitespace and

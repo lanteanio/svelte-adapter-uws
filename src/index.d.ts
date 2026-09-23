@@ -3472,6 +3472,14 @@ export interface Platform {
 	readonly closedWsAborts: number;
 
 	/**
+	 * Per-category count of framework invariant violations on this worker,
+	 * keyed by category string. The Map is live and owned by the runtime -
+	 * read it, do not modify it. `introspect()` reports the same counts as a
+	 * plain object.
+	 */
+	readonly assertions: ReadonlyMap<string, number>;
+
+	/**
 	 * A PII-free snapshot of this worker's transport-layer health: connection
 	 * count, backpressure posture, protection level, payload cap, and the
 	 * framework-invariant counters. Counts and enums only - never a topic
