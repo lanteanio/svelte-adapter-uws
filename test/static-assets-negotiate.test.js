@@ -397,6 +397,17 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(br, 'vary')).toBe('Accept-Encoding');
 		expect(header(br, 'cache-control')).toBe('no-cache');
 		expect(header(identity, 'cache-control')).toBe('no-cache');
+
+		const gzEtag = header(serve(entry, { acceptEncoding: 'gzip' }), 'etag');
+		const gz = serve(entry, { acceptEncoding: 'gzip', ifNoneMatch: gzEtag });
+		expect(gz.status).toBe('304 Not Modified');
+		expect(header(gz, 'etag')).toBe(gzEtag);
+		expect(header(gz, 'vary')).toBe('Accept-Encoding');
+		// Crossed: the identity validator does not name the gzip representation
+		// the request negotiates, so the full coded body goes out.
+		const crossed = serve(entry, { acceptEncoding: 'gzip', ifNoneMatch: entry.etag });
+		expect(crossed.status).toBe('200 OK');
+		expect(header(crossed, 'content-encoding')).toBe('gzip');
 	});
 
 	it('varies on Accept-Encoding on every representation', () => {
@@ -586,25 +597,35 @@ describeMaybe('static assets: resume over a real connection', () => {
 		const assetPath = path.join(tmpDir, 'asset.txt');
 		fs.writeFileSync(assetPath, IDENTITY);
 		fs.writeFileSync(assetPath + '.br', brBytes);
+		// A second asset with only a gzip sibling, so the gzip revalidation is
+		// driven without giving the first one a coding it must not have.
+		const gzAssetPath = path.join(tmpDir, 'gz-asset.txt');
+		fs.writeFileSync(gzAssetPath, IDENTITY);
+		fs.writeFileSync(gzAssetPath + '.gz', zlib.gzipSync(Buffer.from(IDENTITY)));
 		cacheDir(tmpDir, '/wire-probe', false);
 		const entry = staticCache.get('/wire-probe/asset.txt');
 		expect(entry, 'the wire probe asset must be in the static cache').toBeTruthy();
+		const gzEntry = staticCache.get('/wire-probe/gz-asset.txt');
+		expect(gzEntry?.gzBuffer, 'the gzip probe asset must keep its gzip sibling').toBeTruthy();
 
 		// Invoked exactly as request.js invokes it, so the header reads and the
 		// order of writes are the production ones - a status line written after
 		// the first header, for instance, is a real wire defect that no recorder
 		// can see.
-		const app = uWS.App().get('/wire-probe/asset.txt', (res, req) => {
+		const route = (served) => (res, req) => {
 			res.onAborted(() => {});
 			serveStatic(
-				res, entry,
+				res, served,
 				req.getHeader('accept-encoding'),
 				req.getHeader('if-none-match'),
 				false,
 				req.getHeader('range'),
 				req.getHeader('if-range')
 			);
-		});
+		};
+		const app = uWS.App()
+			.get('/wire-probe/asset.txt', route(entry))
+			.get('/wire-probe/gz-asset.txt', route(gzEntry));
 
 		await new Promise((resolve, reject) => {
 			app.listen('127.0.0.1', 0, (socket) => {
@@ -672,6 +693,19 @@ describeMaybe('static assets: resume over a real connection', () => {
 		expect(res.headers['etag']).toBe(first.headers['etag']);
 		expect(res.headers['vary']).toBe('Accept-Encoding');
 		expect(res.headers['cache-control']).toBe('no-cache');
+		expect(res.body.byteLength).toBe(0);
+	});
+
+	it('answers a conditional request for the gzip representation with 304', async () => {
+		const first = await rawGet(port, '/wire-probe/gz-asset.txt', { 'accept-encoding': 'gzip' });
+		expect(first.headers['content-encoding']).toBe('gzip');
+		const res = await rawGet(port, '/wire-probe/gz-asset.txt', {
+			'accept-encoding': 'gzip',
+			'if-none-match': /** @type {string} */ (first.headers['etag'])
+		});
+		expect(res.status).toBe(304);
+		expect(res.headers['etag']).toBe(first.headers['etag']);
+		expect(res.headers['etag']).toMatch(/-gzip"$/);
 		expect(res.body.byteLength).toBe(0);
 	});
 

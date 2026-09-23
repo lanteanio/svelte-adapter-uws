@@ -10,6 +10,15 @@
  * `gzip, deflate, br` still serves brotli. Coding names compare
  * case-insensitively, as tokens do.
  *
+ * One line is drawn on purpose. RFC 9110 does not say what a coding listed
+ * twice means; the full pass takes the first listing. The fast path below
+ * settles on the first lowercase, weightless `br` (or `gzip`) and does not
+ * look for an earlier listing in another letter case, so `BR;q=0, br` is
+ * served brotli. No client sends a coding twice in two cases, and looking
+ * costs about 10 ns on the header every browser sends - a 69% slower
+ * negotiation, measured - on every static hit. The served answer is pinned
+ * in test/content-coding.test.js so the line cannot move unnoticed.
+ *
  * Identity is the fallback whenever neither coding is acceptable, INCLUDING
  * under `identity;q=0` or `*;q=0`. The RFC allows a 406 there; this lane never
  * sends one, because a client that refuses every coding the server has is

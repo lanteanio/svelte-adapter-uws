@@ -52,6 +52,19 @@ describe('negotiateEncoding', () => {
 		expect(both('*;q=0.9, gzip;q=0.5')).toBe('br');
 		expect(both('*;q=0')).toBe('');
 		expect(both('identity;q=0, *;q=0')).toBe('');
+		// gzip reached through the wildcard alone, with brotli refused by name.
+		expect(both('br;q=0, *')).toBe('gzip');
+	});
+
+	it('the fast path takes a lowercase weightless listing, even after a refusal in another case', () => {
+		// The line the module draws on purpose (see its header): a coding listed
+		// twice in two letter cases is answered by the fast path's listing. Pinned
+		// so moving the line is a visible change, not a silent one.
+		expect(both('BR;q=0, br')).toBe('br');
+		expect(negotiateEncoding('GZIP;q=0, gzip', false, true)).toBe('gzip');
+		// A capitalised spelling on its own always takes the full pass.
+		expect(both('BR;q=0, gzip')).toBe('gzip');
+		expect(both('Br, gzip;q=0.5')).toBe('br');
 	});
 
 	it('only the codings the server holds are candidates', () => {
@@ -93,6 +106,9 @@ describe('negotiateEncoding', () => {
 		expect(both('br;q=, gzip;q=0.5')).toBe('br');
 		expect(both('br;q=0.5x, gzip;q=0.6')).toBe('br');
 		expect(both('br;q=1.5, gzip;q=0.6')).toBe('br');
+		// A weight above 1 is not a qvalue either: gzip keeps 1 and loses the
+		// tie to brotli rather than outranking it.
+		expect(both('gzip;q=1.5, br;q=1')).toBe('br');
 		// More than three decimals is outside the grammar too.
 		expect(both('br;q=0.0001, gzip;q=0.5')).toBe('br');
 		expect(both('br;q=1.000, gzip')).toBe('br');
