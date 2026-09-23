@@ -1,10 +1,12 @@
 // The control/ack channel is an amplifier, and this is what bounds it.
 //
 // A client names a topic in a few bytes and is answered with a whole frame.
-// Measured on this runtime at the worst legal shape: one 8,121-byte
-// `subscribe-batch` of 1,344 shortest-legal topics comes back as 97,484 bytes
-// across 1,345 frames - twelve times what it cost to ask, and repeatable,
-// because the frame is legal and nothing refuses the next one.
+// Measured on this runtime: one 8,121-byte `subscribe-batch` of 1,344
+// shortest-legal topics comes back as 1,344 frames and 97,484 bytes - twelve
+// times what it cost to ask. Filling the 256-topic cap and padding the rest
+// with empty strings does worse: 2,466 frames and 174,956 bytes for 8,175 in,
+// twenty-one times. Both repeat, because the frame is legal and nothing
+// refuses the next one.
 //
 // The defences that do not cover it: the 8 KiB control-frame limit bounds one
 // frame rather than the rate; every `messageAdmission` limit is zero-by-default,
@@ -99,7 +101,7 @@ describeUWS('the control-egress budget against the real runtime', () => {
 	it('cuts a connection that drives the amplifier past its window', async () => {
 		const { ws, state } = await connect(server.wsUrl);
 
-		// The worst legal shape, built to sit just under the 8 KiB control-frame
+		// A twelvefold legal shape, built to sit just under the 8 KiB control-frame
 		// limit: every topic past the batch cap of 256 is answered with its own
 		// BATCH_OVERFLOW denial, which is where the twelvefold amplification
 		// comes from.

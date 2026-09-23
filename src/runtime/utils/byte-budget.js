@@ -5,8 +5,8 @@
  * batch carries at most 256 topics (the bundled client chunks at 200), and 256
  * acks at the ack's own size is roughly 15 KB; a client restoring 5,000 topics sends twenty
  * such batches for roughly 300 KB. This sits about 270 times above the first and
- * about 13 times above the second, while the measured amplifier reaches it from
- * about 34 KB/s of sustained inbound - a rate no real client produces on the
+ * about 13 times above the second, while the worst measured amplifier reaches
+ * it from about 20 KB/s of sustained inbound - a rate no real client produces on the
  * control lane, where traffic is bursty at reconnect and quiet after.
  *
  * Here rather than beside the sender because all three socket surfaces need it:

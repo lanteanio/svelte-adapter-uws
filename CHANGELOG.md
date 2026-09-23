@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Only that one outcome changes. A dropped frame followed by entries that fall back to JSON still reports the status of the last send.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the control-channel ceiling documents its worst case.** The README measured a subscribe batch of short topics, twelve times amplified; filling the 256-topic cap and padding with empty entries, each denied on its own, is twenty-one times, so the 4 MiB per 10 s budget is reached from about 20 KB/s of inbound, not 34.
+  - **Affects:** Operators sizing inbound limits in front of the adapter from the documented figures.
+  - **Action:** None; the ceiling itself is unchanged and still cuts such a client with 4429.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -82,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **The control-egress figures name the shape that amplifies most.** Measured
+  on the built runtime: 1,344 shortest-legal topics in 8,121 bytes draw 1,344
+  frames and 97,484 bytes; the 256-topic cap padded with empty strings, which
+  past the cap are only type-checked and each answered with a denial, draws
+  2,466 frames and 174,956 bytes for 8,175. README, `control-egress.js`,
+  `byte-budget.js` and the suite's header now quote the second.
 
 - **`sendWireBatch` returns the status of its last send in every branch.** The
   JSON fallback started its result at 1, so when the dropped binary frame was

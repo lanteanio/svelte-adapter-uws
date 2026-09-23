@@ -7,10 +7,13 @@
 // a whole frame - so it is bounded per connection, in bytes over time, and a
 // connection that blows the bound is cut rather than served.
 //
-// MEASURED, on this runtime, at the worst legal shape: one 8,121-byte
-// `subscribe-batch` carrying 1,344 shortest-legal topics is answered with
-// 97,484 bytes across 1,345 frames. Twelve times what it cost to ask, and
-// repeatable - the frame is legal, so nothing refuses the next one.
+// MEASURED, on this runtime: one 8,121-byte `subscribe-batch` carrying 1,344
+// shortest-legal topics is answered with 1,344 frames and 97,484 bytes, twelve
+// times what it cost to ask. The worst shape fills the 256-topic cap and pads
+// the rest of the frame with empty strings, which past the cap are only
+// type-checked and each still answered with a denial: 8,175 bytes in, 2,466
+// frames and 174,956 bytes out, twenty-one times. Both are repeatable - the
+// frame is legal, so nothing refuses the next one.
 //
 // WHY THE EXISTING DEFENCES MISS IT. The control-frame limit (wire.js,
 // 8 KiB) bounds one frame, which bounds the frame COUNT per inbound frame but
