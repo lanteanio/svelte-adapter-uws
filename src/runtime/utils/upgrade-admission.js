@@ -38,8 +38,8 @@ const DEFAULT_MAX_DEFERRED = 1024;
  *
  * The returned object owns the counters and queue; one instance per
  * uWS app. Pure factory: no module-state capture, no globals - all
- * state lives in the closure so multiple instances do not interfere
- * (relevant for testing.js / vite.js parity in future work).
+ * state lives in the closure, so the production handler and every
+ * createTestServer in the same process each count their own upgrades.
  *
  * @param {{ maxConcurrent?: number, maxConnections?: number, perTickBudget?: number, maxDeferred?: number, cursorLane?: { fraction?: number } }} [opts]
  */
