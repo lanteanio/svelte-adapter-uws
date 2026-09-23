@@ -1018,7 +1018,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// previous value.
 	// No byte is read, allocated or copied on any frame path that was not before,
 	// and no copy primitive entered.
-	ingress: '91ce17b41a7fe6669a258f59a5f1335ffa28283d03a1feb0887eae6e1f4b9145',
+	//
+	// Re-pinned for the diagnostic length cut. diagnostic-format.js,
+	// reached through the registry and diagnostic modules, adds one
+	// .trimEnd() on the message string normalizeDiagnosticMessage has already
+	// cut to 512 characters. Diagnostic text only: no frame byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: '0a79d6e7264e7fecaf654300aceaeb584a1b8e6f6ba527ec4faa198d1f8c6048',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1897,7 +1903,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// reverted only this graph still moves.
 	// No byte is read, allocated or copied on any frame path that was not before,
 	// and no copy primitive entered.
-	platform: 'be5753a192aa2a7b6a525fb0f86689fe9b6cd3eb67c56ae209b0bfc390b7a691',
+	//
+	// Re-pinned for the diagnostic length cut. diagnostic-format.js,
+	// reached through the registry and diagnostic modules, adds one
+	// .trimEnd() on the message string normalizeDiagnosticMessage has already
+	// cut to 512 characters. Diagnostic text only: no frame byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: 'ac5bef9dea4ce72854aa71f5a6d50b7b7b7685e075e9068b14a8f5806d4785d9',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2233,7 +2245,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// this graph imports neither handler/subscribe-hooks.js nor handler/platform.js.
 	// No byte is read, allocated or copied on any frame path that was not before,
 	// and no copy primitive entered.
-	'wire-fanout': '2bcb98d5f2ba9f1f409521fb6f96c2de954a6cc44e517e06ae594b763f761f1d',
+	//
+	// Re-pinned for the diagnostic length cut. diagnostic-format.js,
+	// reached through the registry and diagnostic modules, adds one
+	// .trimEnd() on the message string normalizeDiagnosticMessage has already
+	// cut to 512 characters. Diagnostic text only: no frame byte is read,
+	// allocated or copied, and no copy primitive entered.
+	'wire-fanout': '37fd5f4160f3dc7bf7c982ee44e31c49e13b56798a980936854f1489d3fcbb3b',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

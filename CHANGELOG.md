@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Additive for the test server. `vite dev` has no outbound queue model, so it sends each coalesced value immediately and never calls `drain`.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a long diagnostic message now parses back.** A message longer than 512 characters was cut after normalizing, so a cut landing just past a space left a trailing one, and `parseDiagnostic` refused the line `formatDiagnostic` had just written because its message no longer matched its own normalized form.
+  - **Affects:** Log pipelines and tools that read adapter diagnostic lines back with `parseDiagnostic` from `svelte-adapter-uws/observability`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** A message is still at most 512 characters; one that was cut right after a space loses that trailing space. Nothing else about the line changes.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -64,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **A cut diagnostic message is trimmed again after the cut.**
+  `normalizeDiagnosticMessage` (diagnostic-format.js) collapsed whitespace and
+  trimmed before cutting to 512 characters, so the cut could end on a space;
+  the parser compares the message with its normalized form and with the
+  physical line, and refused both. `test/diagnostic-format.test.js` places a
+  space at every position from 505 to 515 and requires each formatted line to
+  parse as canonical, and fails at 511 without the second trim.
 
 - **A failing `open`, `drain` or `close` hook costs one connection, not the
   worker.** The hosts call these hooks from a transport callback and never

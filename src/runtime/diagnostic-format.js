@@ -20,7 +20,9 @@ export function normalizeDiagnosticMessage(value, fallback = 'unknown') {
 		.replace(UNSAFE_TEXT, unicodeEscape)
 		.replace(/\s+/g, ' ')
 		.trim();
-	return (text || fallback).slice(0, MAX_TEXT);
+	// Trimmed again after the cut: a cut landing just past a space would leave
+	// a trailing one, which the parser reads as a different message and refuses.
+	return (text || fallback).slice(0, MAX_TEXT).trimEnd();
 }
 
 function asciiJson(value) {

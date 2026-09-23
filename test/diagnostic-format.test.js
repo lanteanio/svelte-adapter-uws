@@ -163,6 +163,26 @@ describe('cross-package diagnostic contract', () => {
 		expect(parseDiagnostic(mutate(line))).toBeNull();
 	});
 
+	it('parses back a long message whichever character the length cut lands on', () => {
+		// A space placed at each position around the 512-character cut: every
+		// formatted line must parse, and the message it carries must be a fixed
+		// point of the normalizer the parser checks it against.
+		for (let at = 505; at <= 515; at++) {
+			const message = 'x'.repeat(at) + ' ' + 'y'.repeat(600 - at);
+			const line = formatDiagnostic({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.listener',
+				event: 'runtime.listen.failed',
+				severity: 'error',
+				message
+			});
+			const parsed = parseDiagnostic(line);
+			expect(parsed?.format, `cut near a space at ${at}`).toBe('canonical');
+			expect(parsed.record.message.endsWith(' ')).toBe(false);
+			expect(parsed.record.message.length).toBeLessThanOrEqual(512);
+		}
+	});
+
 	it('escapes JavaScript line separators in the JSON suffix', () => {
 		const line = formatDiagnostic({
 			source: 'svelte-realtime', component: 'runtime.client', event: 'socket.closed',
