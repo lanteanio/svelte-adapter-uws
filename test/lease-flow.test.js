@@ -336,6 +336,22 @@ describe('send-gate window sizing', () => {
 		expect(tight).toBeLessThan(idle);
 	});
 
+	it('narrows along a ramp, never in a step', () => {
+		// A step at the knee handed out the full window at one reading and under
+		// a third of it a hair above, which no client pacing can follow. Across
+		// the whole range a thousandth of a ratio moves the window by at most
+		// what the ramp's slope allows, and never upward.
+		let previous = leaseGrantSize({ heapRatio: 0, subscriberRatio: 1 });
+		const slope = Math.ceil((256 * 0.001) / 0.3) + 1;
+		for (let i = 1; i <= 1000; i++) {
+			const window = leaseGrantSize({ heapRatio: i / 1000, subscriberRatio: 1 });
+			expect(window, `at ${i / 1000}`).toBeLessThanOrEqual(previous);
+			expect(previous - window, `step at ${i / 1000}`).toBeLessThanOrEqual(slope);
+			previous = window;
+		}
+		expect(leaseGrantSize({ heapRatio: 0.7, subscriberRatio: 1 }), 'full at the knee').toBe(256);
+	});
+
 	it('shrinks the window under a high subscriber-to-connection ratio', () => {
 		const light = leaseGrantSize({ heapRatio: 0.2, subscriberRatio: 10 });
 		const heavy = leaseGrantSize({ heapRatio: 0.2, subscriberRatio: 200 });

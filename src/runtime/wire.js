@@ -541,6 +541,9 @@ export function leaseReportedSaturation(raw) {
 	return raw >= MAX_QUEUED_REQUESTS ? 1 : raw / MAX_QUEUED_REQUESTS;
 }
 
+/** Heap ratio above which the send-gate window starts to narrow. See leaseGrantSize. */
+const HEAP_KNEE = 0.7;
+
 /**
  * Size the next send-gate window from the worker's current posture. Heap
  * headroom and subscriber load narrow the window so a tightening worker hands
@@ -561,6 +564,16 @@ export function leaseReportedSaturation(raw) {
  *                       memory wall. It was V8 arena fullness until 0.6.0-next.93,
  *                       which idles at 0.6-0.9 where the wall basis idles at a
  *                       few percent - the same gate, a 4-20x different window.
+ *
+ * THE HEAP KNEE SITS BELOW THE MEMORY THRESHOLD ON PURPOSE. Against the wall
+ * basis 0.7 means 70% of the way to an out-of-memory kill, and a window that
+ * starts narrowing there is backpressure applied before the alarm, not after.
+ * The window ramps down linearly from the full base at the knee - never a step
+ * - to half of it at the MEMORY reason's default threshold (0.85) and to the
+ * scale floor as the ratio nears 1. Between the knee and that threshold the
+ * pressure surface still reads NONE while windows are already smaller; the
+ * window is a pure function of `heap_used_ratio` and of subscriptions per
+ * connection, both exported, so the band is readable from them.
  *   subscriberRatio > 25 <- counters.totalSubscriptions over the live connection
  *                       count, the same producer the sampler's own subscriberRatio
  *                       threshold reads.
@@ -587,7 +600,7 @@ export function leaseGrantSize(w) {
 	const heapRatio = typeof w.heapRatio === 'number' && w.heapRatio > 0 ? w.heapRatio : 0;
 	const subRatio = typeof w.subscriberRatio === 'number' && w.subscriberRatio > 0 ? w.subscriberRatio : 0;
 	let scale = 1;
-	if (heapRatio > 0.7) scale *= (1 - heapRatio);
+	if (heapRatio > HEAP_KNEE) scale *= (1 - heapRatio) / (1 - HEAP_KNEE);
 	if (subRatio > 25) scale *= 25 / subRatio;
 	if (scale < 0.05) scale = 0.05;
 	else if (scale > 1) scale = 1;

@@ -150,6 +150,24 @@ describe('the grant window is calibrated to the memory signal it consumes', () =
 		}
 	});
 
+	it('has narrowed to half the base by the time the signal names MEMORY', async () => {
+		// The documented relation between the two numbers: the ramp starts
+		// before the alarm and is halfway down when the alarm fires, so the
+		// band where windows are smaller while the surface still reads NONE
+		// is bounded. Moving either number moves this.
+		const { state, metrics } = await builtModules();
+		const prev = state.counters.lastHeapUsedRatio;
+		try {
+			const threshold = metrics.resolvePressureThresholds(undefined).memoryHeapUsedRatio;
+			state.counters.lastHeapUsedRatio = 0;
+			const base = metrics.grantSizeFor().count;
+			state.counters.lastHeapUsedRatio = threshold;
+			expect(metrics.grantSizeFor().count).toBe(Math.round(base / 2));
+		} finally {
+			state.counters.lastHeapUsedRatio = prev;
+		}
+	});
+
 	it('keeps the full window for a worker the shipped reader puts below that point', async () => {
 		const { state, metrics } = await builtModules();
 		const prev = state.counters.lastHeapUsedRatio;

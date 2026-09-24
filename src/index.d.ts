@@ -1142,7 +1142,9 @@ export interface WebSocketOptions {
 	 * - `heap_used_ratio` - used fraction of the nearest memory wall: heap
 	 *   against the V8 `heap_size_limit`, resident set against the cgroup
 	 *   memory limit, worst-of (gauge, sampled). The heap arm is
-	 *   per-isolate, so each worker has its own.
+	 *   per-isolate, so each worker has its own. Above 0.7 the send gate grants
+	 *   flow-controlled connections smaller windows, half-size at the default
+	 *   0.85 MEMORY threshold.
 	 * - `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` -
 	 *   kernel pressure-stall readings (gauges, sampled). Registered only when
 	 *   the startup probe finds PSI; a later transient read failure writes `NaN`

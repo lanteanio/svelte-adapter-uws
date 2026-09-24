@@ -1050,7 +1050,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the 400/426 refusal writer and observability-manifest.js the
 	// malformed_handshake reason. Header reads and a refusal status only; no
 	// request or frame bytes are copied or written differently.
-	ingress: 'dbdbaf2da7eb2b013bd01b343a03c287dd0ea986a301314189294172e022547a',
+	//
+	// Re-pinned for the send-gate ramp. wire.js scales the heap arm of
+	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
+	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
+	// threshold. Window arithmetic only; no bytes are copied or written differently.
+	ingress: 'ffd6d7dc962ff854ee79571fbd7e42376eaacbbbc4d479491b03d24cf1fb2309',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1967,7 +1972,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the 400/426 refusal writer and observability-manifest.js the
 	// malformed_handshake reason. Header reads and a refusal status only; no
 	// request or frame bytes are copied or written differently.
-	platform: 'b75f87f756d08295131f834b0e8b5f2e20e15479214fc6f5bb8010dadf6c3463',
+	//
+	// Re-pinned for the send-gate ramp. wire.js scales the heap arm of
+	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
+	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
+	// threshold. Window arithmetic only; no bytes are copied or written differently.
+	platform: '8c35459c63e94643151fbbb3df634d3d0cc090bd870c41233c64bf33624eb243',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2335,14 +2345,24 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the 400/426 refusal writer and observability-manifest.js the
 	// malformed_handshake reason. Header reads and a refusal status only; no
 	// request or frame bytes are copied or written differently.
-	'wire-fanout': '1f6b43d65fa53ee963ffd6ef674dd904a3dbe7837f92821d776cd85dc27b7f2f',
+	//
+	// Re-pinned for the send-gate ramp. wire.js scales the heap arm of
+	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
+	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
+	// threshold. Window arithmetic only; no bytes are copied or written differently.
+	'wire-fanout': '567dd304347f088b3764bdda7e8c5164741ace9a658b7918a01af1353789cc22',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
 	// and the pure leaseReportedSaturation helper - integer-only comparisons
 	// and one division. No byte is read, allocated or copied, and no copy
 	// primitive entered the graph.
-	wire: '589bd4e8c28710157db7d5910670e362df1cbdbb33e47b5edc09e6cc9582797d'
+	//
+	// Re-pinned for the send-gate ramp. wire.js scales the heap arm of
+	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
+	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
+	// threshold. Window arithmetic only; no bytes are copied or written differently.
+	wire: '6dc4e9d8f7158c3694077825679724bd4645b165713546741327be0e168c7e5d',
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
 	ingress: Object.freeze(['dispatchIngressFrame']),

@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The refusal comes before the capacity, origin, rate-limit and application checks, so a malformed handshake is never answered or counted as load; it is counted as `upgrade_rejected_total{reason="malformed_handshake"}`, and a 426 carries `Sec-WebSocket-Version: 13`. Letter case is ignored, and only spaces and tabs are trimmed. A GET to the WebSocket path that is not a handshake, or an upgrade to another protocol, is answered as before. `createTestServer` and `vite dev` refuse the same handshakes with the same statuses, except that `vite dev` refuses an upgrade to another protocol on that path with 400, as its WebSocket library already did.
   - **Detail:** [Changed engineering detail](#changed).
+- **Changed: the flow-control window narrows along a ramp as memory fills, not in one step.** Past a `heap_used_ratio` of 0.7 a flow-controlled connection's window fell from the full 256 requests to under a third at once; it now ramps down, reaching half at the default 0.85 MEMORY threshold and a twentieth near the wall.
+  - **Affects:** Clients that opt into internal flow control, on workers whose memory reading passes 0.7.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Below 0.7 every window is the full base, as before. Between 0.7 and 0.985 every window is larger than it was, and from there to the wall both reach the same floor. The window is a function of `heap_used_ratio` and of subscriptions per connection, both exported, so a worker that grants smaller windows while `pressure_reason` still reads none can be read from them.
+  - **Detail:** [Changed engineering detail](#changed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -128,6 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control.
 
 ### Changed
+
+- **The send-gate window ramps from its knee.** `leaseGrantSize` scales the
+  heap arm by `(1 - ratio) / (1 - 0.7)` above the 0.7 knee, where it
+  multiplied by `1 - ratio` and so jumped from 1 to 0.3 at the knee. The knee
+  stays below the MEMORY threshold on purpose, as backpressure before the
+  alarm, and the sizer's documentation says so. `test/lease-flow.test.js`
+  pins the ramp (never a step, full at the knee) and
+  `test/pressure-sampler-isolation.test.js` pins half the base at the shipped
+  MEMORY threshold.
 
 - **One handshake rule on every surface.** `webSocketHandshakeRefusal`
   (utils/ws-handshake.js) reads how many Upgrade, key and version lines
