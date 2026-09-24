@@ -1,3 +1,5 @@
+import { WEBSOCKET_VERSION } from '../utils/ws-handshake.js';
+
 export class PayloadTooLargeError extends Error {
 	constructor() { super('Payload too large'); }
 }
@@ -69,6 +71,26 @@ export function send400(res, headOnly = false, closeConnection = false) {
 		// response finished with its close flag, and writing one too puts it on
 		// the wire twice.
 		endText(res, 'Bad Request', headOnly, closeConnection);
+	});
+}
+
+/**
+ * A WebSocket handshake refused by `webSocketHandshakeRefusal`: 400, or 426
+ * naming the version the client should retry with (RFC 6455 4.4).
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {400 | 426} status
+ */
+export function sendHandshakeRefusal(res, status) {
+	if (status === 400) {
+		send400(res);
+		return;
+	}
+	res.cork(() => {
+		res.writeStatus('426 Upgrade Required');
+		res.writeHeader('sec-websocket-version', WEBSOCKET_VERSION);
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Upgrade Required');
 	});
 }
 

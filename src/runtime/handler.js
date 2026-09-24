@@ -39,7 +39,8 @@ import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-di
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
-import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless } from './handler/http-helpers.js';
+import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless, sendHandshakeRefusal } from './handler/http-helpers.js';
+import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './utils/ws-handshake.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
 import { batchRelay } from './handler/relay.js';
@@ -1691,6 +1692,18 @@ if (WS_ENABLED) {
 				return;
 			}
 
+			// The handshake itself, also ahead of every capacity answer: uWS routes
+			// a request here on the key's length alone, and one no one could
+			// complete is refused as what it is rather than answered, or counted, as
+			// load. One walk of the header list, which a repeated line needs.
+			const handshakeRefusal = webSocketHandshakeRefusal(readUwsHandshake(req));
+			if (handshakeRefusal !== null) {
+				mUpgradeRejected?.inc({ reason: 'malformed_handshake' });
+				traceUpgradeRejection(req, undefined, 'malformed_handshake');
+				sendHandshakeRefusal(res, handshakeRefusal);
+				return;
+			}
+
 			// Cursor-only upgrade lane (the worker's second WebSocket). Read the
 			// requested subprotocol and route the upgrade through the reserved
 			// cursor sub-budget only when a lane is configured; an unconfigured
@@ -3321,67 +3334,83 @@ if (WS_ENABLED) {
 				: uWS.DISABLED
 	});
 
-	// app.ws handles real handshakes. Register this GET afterwards so a direct
-	// browser navigation can receive the opted-out accessible refusal without
-	// shadowing upgrades. When the gate is open, this endpoint is not a
-	// capacity page and retains the ordinary Upgrade Required response.
-	// uWS routes a GET without sec-websocket-key PAST the ws() handler
-	// (req.setYield on a non-handshake), so a real browser NAVIGATION to the
-	// WS path never reaches serveUpgradeRefusal - without this route it would
-	// fall through to the SSR catch-all. Registered for EVERY enabled ceiling
-	// resolveWaitingRoom() honors, including perTickBudget, whether the
-	// waiting room is on (holding page) or opted out (accessible 503).
-	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
-		// The navigation refusal backs off exactly like the upgrade refusal:
-		// same posture-widened jittered Retry-After, room-configured base
-		// where a room exists, the shared default where none does. One
-		// condition, one number, whichever route observed it.
-		const navigationRetryAfter = () => {
-			const lvl = postureLevel();
-			const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
-			return WAITING_ROOM !== null
-				? WAITING_ROOM.jitteredRetryAfter(spread)
-				: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
-		};
-		route('get', WS_PATH, (res, req) => {
-			res.onAborted(() => {});
-			const atCapacity = postureLevel() === 'siege' || !admission.hasCapacity();
-			if (!atCapacity) {
-				res.cork(() => {
-					res.writeStatus('426 Upgrade Required');
-					res.writeHeader('content-type', 'text/plain');
-					res.end('WebSocket upgrade required');
-				});
-				return;
-			}
-			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
-				if (WAITING_ROOM !== null) {
-					// Same page the refusal path serves: no seeded count, the
-					// first poll fills it in.
-					sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
-						undefined,
-						createWaitingRoomRequest(req)
-					));
-					return;
-				}
-				sendWaitingRoomPage(res, {
-					body: buildAccessibleCapacityRefusalPage(),
-					lang: 'en',
-					dir: 'ltr',
-					headers: [['retry-after', String(navigationRetryAfter())]],
-					varyAcceptLanguage: false
-				}, '503 Service Unavailable');
-				return;
-			}
-			const retryAfter = navigationRetryAfter();
+	// app.ws handles real handshakes, and this GET, registered after it, sees
+	// what uWS yields past it: the ws() handler takes a request only when its
+	// Sec-WebSocket-Key is 24 characters long and yields every other request on
+	// this path.
+	//
+	// An ATTEMPTED upgrade among those - an empty or truncated key, or a
+	// websocket Upgrade with none - is a handshake no one could complete, and
+	// is refused 400 as the upgrade handler refuses the rest of the malformed
+	// set. That holds with or without a ceiling, so the route is always
+	// registered.
+	//
+	// A plain GET is a browser NAVIGATION. With an admission ceiling enabled
+	// (every one resolveWaitingRoom() honors, perTickBudget included) it gets
+	// the holding page or the accessible 503 at capacity and Upgrade Required
+	// otherwise, since serveUpgradeRefusal never sees it. Without one it, and an
+	// upgrade to another protocol, yields on to the application exactly as
+	// before this route existed.
+	const admissionCeiling = admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0;
+	// The navigation refusal backs off exactly like the upgrade refusal:
+	// same posture-widened jittered Retry-After, room-configured base
+	// where a room exists, the shared default where none does. One
+	// condition, one number, whichever route observed it.
+	const navigationRetryAfter = () => {
+		const lvl = postureLevel();
+		const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+		return WAITING_ROOM !== null
+			? WAITING_ROOM.jitteredRetryAfter(spread)
+			: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+	};
+	route('get', WS_PATH, (res, req) => {
+		if (isWebSocketUpgradeAttempt(readUwsHandshake(req))) {
+			mUpgradeRejected?.inc({ reason: 'malformed_handshake' });
+			traceUpgradeRejection(req, undefined, 'malformed_handshake');
+			send400(res);
+			return;
+		}
+		if (!admissionCeiling) {
+			req.setYield(true);
+			return;
+		}
+		res.onAborted(() => {});
+		const atCapacity = postureLevel() === 'siege' || !admission.hasCapacity();
+		if (!atCapacity) {
 			res.cork(() => {
-				res.writeStatus('503 Service Unavailable');
+				res.writeStatus('426 Upgrade Required');
 				res.writeHeader('content-type', 'text/plain');
-				res.writeHeader('retry-after', String(retryAfter));
-				res.end('Server is at upgrade capacity, please retry');
+				res.end('WebSocket upgrade required');
 			});
+			return;
+		}
+		if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+			if (WAITING_ROOM !== null) {
+				// Same page the refusal path serves: no seeded count, the
+				// first poll fills it in.
+				sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
+					undefined,
+					createWaitingRoomRequest(req)
+				));
+				return;
+			}
+			sendWaitingRoomPage(res, {
+				body: buildAccessibleCapacityRefusalPage(),
+				lang: 'en',
+				dir: 'ltr',
+				headers: [['retry-after', String(navigationRetryAfter())]],
+				varyAcceptLanguage: false
+			}, '503 Service Unavailable');
+			return;
+		}
+		const retryAfter = navigationRetryAfter();
+		res.cork(() => {
+			res.writeStatus('503 Service Unavailable');
+			res.writeHeader('content-type', 'text/plain');
+			res.writeHeader('retry-after', String(retryAfter));
+			res.end('Server is at upgrade capacity, please retry');
 		});
-	}
+	});
 
 	console.log(`[svelte-adapter-uws] WebSocket endpoint registered at ${WS_PATH}`);
 	if (WS_PATH !== '/ws') {

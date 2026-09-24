@@ -1039,7 +1039,12 @@ export interface WebSocketOptions {
 	 *   `Host`, `Origin`, `Authorization`, `Proxy-Authorization` or
 	 *   `Content-Type`, which cannot be given one reading - or
 	 *   `ambiguous_framing` again, for a framing header sent empty or sent
-	 *   twice, which only the whole header set shows. Then `ip_rate_limit`,
+	 *   twice, which only the whole header set shows. Then
+	 *   `malformed_handshake`, which is decided before any capacity reason:
+	 *   400 without exactly one Upgrade line naming `websocket` (any letter
+	 *   case), a Connection that lists `upgrade`, exactly one key that is the
+	 *   base64 of 16 octets, or with a repeated version line; 426 with
+	 *   `Sec-WebSocket-Version: 13` for any version but 13. Then `ip_rate_limit`,
 	 *   `bad_origin`, `deferred_overflow`, `auth_timeout`, `auth_rejected`,
 	 *   `hook_error`. One more reason, `auth_rate_limit`, is emitted on the `connect({ auth: true })`
 	 *   preflight POST rather than on an upgrade - it shares this counter

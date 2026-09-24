@@ -7,7 +7,8 @@ import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
-import { FORBIDDEN_METHODS, send405, endText, endBodyless } from './runtime/handler/http-helpers.js';
+import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal } from './runtime/handler/http-helpers.js';
+import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './runtime/utils/ws-handshake.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -2577,6 +2578,15 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 
+			// Mirrors production: the handshake itself, also ahead of every
+			// capacity answer.
+			const handshakeRefusal = webSocketHandshakeRefusal(readUwsHandshake(req));
+			if (handshakeRefusal !== null) {
+				mUpgradeRejectedT?.inc({ reason: 'malformed_handshake' });
+				sendHandshakeRefusal(res, handshakeRefusal);
+				return;
+			}
+
 			// Cursor-only upgrade lane (the worker's second WebSocket).
 			// Mirrors the production handler: route through the reserved
 			// cursor sub-budget only when a lane is configured.
@@ -3626,58 +3636,67 @@ export async function createTestServer(options = {}) {
 		}
 	});
 
-	// app.ws handles real handshakes; uWS yields a keyless GET past it, so
-	// browser NAVIGATION lands here. Mirrors the production handler: register
-	// for every enabled ceiling (including perTickBudget), serving the
-	// holding page when the waiting room is on and the accessible 503 when it
-	// is opted out.
-	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
-		// Mirrors the production handler: the navigation refusal backs off
-		// exactly like the upgrade refusal, one number per condition.
-		const navigationRetryAfter = () => {
-			const lvl = postureLevelT();
-			const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
-			return WAITING_ROOM !== null
-				? WAITING_ROOM.jitteredRetryAfter(spread)
-				: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
-		};
-		app.get(wsPath, guardFramingMirror((res, req) => {
-			res.onAborted(() => {});
-			const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
-			if (!atCapacity) {
-				res.cork(() => {
-					res.writeStatus('426 Upgrade Required');
-					res.writeHeader('content-type', 'text/plain');
-					res.end('WebSocket upgrade required');
-				});
-				return;
-			}
-			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
-				if (WAITING_ROOM !== null) {
-					sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
-						undefined,
-						createWaitingRoomRequest(req)
-					));
-					return;
-				}
-				sendWaitingRoomPage(res, {
-					body: buildAccessibleCapacityRefusalPage(),
-					lang: 'en',
-					dir: 'ltr',
-					headers: [['retry-after', String(navigationRetryAfter())]],
-					varyAcceptLanguage: false
-				}, '503 Service Unavailable');
-				return;
-			}
-			const retryAfter = navigationRetryAfter();
+	// app.ws handles real handshakes; uWS yields every request on this path
+	// whose key is not 24 characters long past it. Mirrors the production
+	// handler: an attempted upgrade among those is refused 400, always, and a
+	// browser NAVIGATION gets the holding page or the accessible 503 at
+	// capacity when a ceiling (perTickBudget included) is enabled. Without one
+	// it yields on, as it did before this route existed.
+	const admissionCeiling = admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0;
+	// Mirrors the production handler: the navigation refusal backs off
+	// exactly like the upgrade refusal, one number per condition.
+	const navigationRetryAfter = () => {
+		const lvl = postureLevelT();
+		const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+		return WAITING_ROOM !== null
+			? WAITING_ROOM.jitteredRetryAfter(spread)
+			: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+	};
+	app.get(wsPath, guardFramingMirror((res, req) => {
+		if (isWebSocketUpgradeAttempt(readUwsHandshake(req))) {
+			mUpgradeRejectedT?.inc({ reason: 'malformed_handshake' });
+			sendHandshakeRefusal(res, 400);
+			return;
+		}
+		if (!admissionCeiling) {
+			req.setYield(true);
+			return;
+		}
+		res.onAborted(() => {});
+		const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
+		if (!atCapacity) {
 			res.cork(() => {
-				res.writeStatus('503 Service Unavailable');
+				res.writeStatus('426 Upgrade Required');
 				res.writeHeader('content-type', 'text/plain');
-				res.writeHeader('retry-after', String(retryAfter));
-				res.end('Server is at upgrade capacity, please retry');
+				res.end('WebSocket upgrade required');
 			});
-		}));
-	}
+			return;
+		}
+		if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+			if (WAITING_ROOM !== null) {
+				sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
+					undefined,
+					createWaitingRoomRequest(req)
+				));
+				return;
+			}
+			sendWaitingRoomPage(res, {
+				body: buildAccessibleCapacityRefusalPage(),
+				lang: 'en',
+				dir: 'ltr',
+				headers: [['retry-after', String(navigationRetryAfter())]],
+				varyAcceptLanguage: false
+			}, '503 Service Unavailable');
+			return;
+		}
+		const retryAfter = navigationRetryAfter();
+		res.cork(() => {
+			res.writeStatus('503 Service Unavailable');
+			res.writeHeader('content-type', 'text/plain');
+			res.writeHeader('retry-after', String(retryAfter));
+			res.end('Server is at upgrade capacity, please retry');
+		});
+	}));
 
 	// Waiting-room poll + holding page. Mirrors the production handler routes:
 	// read-only, registered whenever the waiting room is enabled, and the poll

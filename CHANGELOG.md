@@ -107,6 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Production behaviour for a single server is unchanged. A capable socket joined this way receives one wire-id announce and then the binary frame, a second join of a topic it holds announces nothing, and a tracked leave, including the one a revoked subscribe runs, takes it out of the cohort. A socket that joined before the topic's first shared publish was already moved into the cohort by that publish. Each server now keeps its own join and leave, so a process that runs several servers no longer joins one server's sockets to another's cohort.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Changed: a malformed WebSocket handshake is refused with 400, and an unsupported version with 426.** uWS accepted a handshake on its key's length alone and sent a keyless one on to the application, so a request without `Connection: upgrade`, with a non-base64 key or with version 8 still opened a socket; every surface now refuses it.
+  - **Affects:** Clients that send a nonstandard handshake: a hand-rolled client, a proxy that rewrites `Connection` or `Upgrade`, or a client asking for WebSocket version 8, which `vite dev` accepted. Browsers and the `ws` library send conforming handshakes.
+  - **Action:** None for browser and `ws` clients. A client refused here needs one `Upgrade: websocket` line, a `Connection` that lists `upgrade`, one base64 key of 16 bytes and `Sec-WebSocket-Version: 13`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The refusal comes before the capacity, origin, rate-limit and application checks, so a malformed handshake is never answered or counted as load; it is counted as `upgrade_rejected_total{reason="malformed_handshake"}`, and a 426 carries `Sec-WebSocket-Version: 13`. Letter case is ignored, and only spaces and tabs are trimmed. A GET to the WebSocket path that is not a handshake, or an upgrade to another protocol, is answered as before. `createTestServer` and `vite dev` refuse the same handshakes with the same statuses, except that `vite dev` refuses an upgrade to another protocol on that path with 400, as its WebSocket library already did.
+  - **Detail:** [Changed engineering detail](#changed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -122,6 +128,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control.
 
 ### Changed
+
+- **One handshake rule on every surface.** `webSocketHandshakeRefusal`
+  (utils/ws-handshake.js) reads how many Upgrade, key and version lines
+  arrived, whether any Connection line lists `upgrade`, and the first value of
+  each. It answers 400 unless there is one Upgrade line and it is `websocket`,
+  a Connection lists `upgrade`, there is one key and it is the canonical
+  base64 of 16 octets, and there is at most one version line; it answers 426
+  with `Sec-WebSocket-Version: 13` for any version but 13. Case folding and
+  trimming are ASCII-only. The production and test-server upgrade handlers
+  read the lines in one walk ahead of every capacity answer, since a repeated
+  line is what a lookup cannot see. The GET route on the WebSocket path is now
+  always registered: it refuses an attempted upgrade uWS yields past `ws()` (a
+  key that is not 24 characters, or a websocket Upgrade with none) and yields a
+  plain GET on with `req.setYield`, which the request metrics still count
+  once. `vite dev` reads `rawHeaders` in its upgrade listener and refuses an
+  attempted upgrade that arrives as a plain request in a middleware. The rule
+  costs 38 ns, and 133 ns with the read of nine header lines under Node.
+  `test/ws-handshake-real.test.js` drives the native runtime's raw-socket
+  cases against all three surfaces and pins the order against capacity under
+  siege.
 
 - **`ws.end()` follows one close rule on every surface.** `closeFrameReason`
   (utils/close-frame.js) takes the code only from 1000-1003, 1007-1014 and

@@ -1044,7 +1044,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// handler.js loses the import-time install and empties a closed connection's
 	// cohort set once released. Membership routing only; no bytes are read, copied
 	// or written differently.
-	ingress: '20008d9be28f5ec2057f56d46987c81822c5af72c98d2db14367c86f6abe11b6',
+	//
+	// Re-pinned for the WebSocket handshake rule. utils/ws-handshake.js is new and
+	// reads the handshake's header lines in one walk; handler/http-helpers.js gains
+	// the 400/426 refusal writer and observability-manifest.js the
+	// malformed_handshake reason. Header reads and a refusal status only; no
+	// request or frame bytes are copied or written differently.
+	ingress: 'dbdbaf2da7eb2b013bd01b343a03c287dd0ea986a301314189294172e022547a',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1955,7 +1961,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// handler.js loses the import-time install and empties a closed connection's
 	// cohort set once released. Membership routing only; no bytes are read, copied
 	// or written differently.
-	platform: '1689423d535b76e52afac53ebe5edae2fb48ff453ce94606fabdd167141ce143',
+	//
+	// Re-pinned for the WebSocket handshake rule. utils/ws-handshake.js is new and
+	// reads the handshake's header lines in one walk; handler/http-helpers.js gains
+	// the 400/426 refusal writer and observability-manifest.js the
+	// malformed_handshake reason. Header reads and a refusal status only; no
+	// request or frame bytes are copied or written differently.
+	platform: 'b75f87f756d08295131f834b0e8b5f2e20e15479214fc6f5bb8010dadf6c3463',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2317,7 +2329,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// handler.js loses the import-time install and empties a closed connection's
 	// cohort set once released. Membership routing only; no bytes are read, copied
 	// or written differently.
-	'wire-fanout': '16bfd7fd12313640e5edfce727b1492f287224bf57fd392d1048b5b66331179c',
+	//
+	// Re-pinned for the WebSocket handshake rule. utils/ws-handshake.js is new and
+	// reads the handshake's header lines in one walk; handler/http-helpers.js gains
+	// the 400/426 refusal writer and observability-manifest.js the
+	// malformed_handshake reason. Header reads and a refusal status only; no
+	// request or frame bytes are copied or written differently.
+	'wire-fanout': '1f6b43d65fa53ee963ffd6ef674dd904a3dbe7837f92821d776cd85dc27b7f2f',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

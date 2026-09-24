@@ -27,6 +27,7 @@ import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
+import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readRawHandshake, WEBSOCKET_VERSION } from './runtime/utils/ws-handshake.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
@@ -2260,6 +2261,23 @@ export default function uws(options = {}) {
 			// own close pipeline.
 			server.httpServer?.once('close', () => { fireShutdownOnceV(); });
 
+			// Mirror production: an attempted upgrade that arrives as a plain
+			// request - a websocket Upgrade without `Connection: upgrade`, or a
+			// key alone - never reaches the listener above, and is refused 400
+			// here like the rest of the malformed set. Anything else on the path
+			// goes on to the application.
+			server.middlewares.use((req, res, next) => {
+				const url = req.url || '';
+				if (req.method !== 'GET' || !url.startsWith(wsPath) || new URL(url, 'http://localhost').pathname !== wsPath ||
+					!isWebSocketUpgradeAttempt(readRawHandshake(req.rawHeaders))) {
+					next();
+					return;
+				}
+				res.statusCode = 400;
+				res.setHeader('content-type', 'text/plain');
+				res.end('Bad Request');
+			});
+
 			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
 			// HTTP POST so session cookies are refreshed via a standard Set-Cookie
 			// on a 200-series response. Mirrors the production handler in dev.
@@ -2530,6 +2548,17 @@ export default function uws(options = {}) {
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
+				// Mirror production: a handshake no one could complete is refused
+				// before anything else looks at it. Read from `rawHeaders`, which
+				// keeps the repeated lines `headers` joins.
+				const handshakeRefusal = webSocketHandshakeRefusal(readRawHandshake(req.rawHeaders));
+				if (handshakeRefusal !== null) {
+					socket.end(handshakeRefusal === 400
+						? 'HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request'
+						: 'HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: ' + WEBSOCKET_VERSION +
+							'\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nUpgrade Required');
+					return;
+				}
 				// The missing-Origin branch delegates trust to an app upgrade hook.
 				// Resolve the handler before reading that authority: configureServer
 				// starts module loading without awaiting it, so an upgrade arriving in
