@@ -59,7 +59,9 @@ export function handleRequest(res, req) {
 	// or repeated one - costs about 8% of that answer, where a lookup form
 	// costs at most a few percent and measured inside the control arm's own
 	// drift on the quietest host tried. Every asset request would pay the walk,
-	// forever.
+	// forever. Doing the walk INSTEAD of the lane's own seven lookups, reading
+	// all nine values in one pass, costs the same - bench/41 put it at about
+	// 9.5% - so the lookups are not what makes the walk expensive.
 
 	const pathname = req.getUrl();
 
