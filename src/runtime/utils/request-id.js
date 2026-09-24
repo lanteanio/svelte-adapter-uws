@@ -1,13 +1,25 @@
 /**
- * Slot used to carry the per-connection requestId from `upgrade` to `open`.
- *
- * `res.upgrade()` does not hand its argument through to `open`: uWS builds its
- * own userData object and copies the properties across with plain assignments,
- * string and Symbol keys alike. The `open` hook deletes this slot after
- * promoting the value into the Symbol-keyed `WS_PLATFORM` clone, so it never
- * leaks into hook code.
+ * The string key the request id used to cross `res.upgrade()` on. Nothing is
+ * stamped on it any more - the id rides {@link CARRY_REQUEST_ID} and lives on
+ * `userData[WS_PLATFORM].requestId` from `open` on - and it stays exported so
+ * an import of it still resolves.
  */
 export const WS_REQUEST_ID_KEY = '__adapter_uws_request_id__';
+
+/**
+ * Keys the runtime carries per-connection values under from `res.upgrade()` to
+ * `open`.
+ *
+ * `res.upgrade()` does not hand its argument through: uWS builds its own
+ * userData object and copies the enumerable own properties across with plain
+ * assignments, string and Symbol keys alike, so an accessor for a carried key
+ * on Object.prototype would take the value and the far side would never see
+ * it. A Symbol created here has no name any other code can reach, so no such
+ * accessor can exist; `open` promotes each value and deletes the slot before
+ * any hook runs.
+ */
+export const CARRY_REQUEST_ID = Symbol('adapter-uws.carry.request-id');
+export const CARRY_TRACE_CONTEXT = Symbol('adapter-uws.carry.trace-context');
 
 /**
  * Sanitize a possibly-present `X-Request-ID` header value into a value

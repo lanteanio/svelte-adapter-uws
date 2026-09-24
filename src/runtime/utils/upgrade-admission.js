@@ -300,14 +300,6 @@ export function createUpgradeAdmission(opts) {
 }
 
 /**
- * String-keyed carrier used only across `res.upgrade()`. uWebSockets.js does
- * not preserve Symbol keys in upgrade userData, so `open` immediately promotes
- * this marker to the collision-safe `WS_CONNECTION_PERMIT` symbol and deletes
- * the string property before application hooks observe the object.
- */
-export const WS_CONNECTION_PERMIT_KEY = '__adapter_uws_connection_permit__';
-
-/**
  * Decide the shape of an at-capacity request rejection. Only an explicitly
  * acceptable `text/html` media range on a non-WebSocket request gets HTML.
  * Lookalike media types, q=0 exclusions, library requests, and actual

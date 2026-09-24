@@ -1,5 +1,5 @@
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
-import { WS_REQUEST_ID_KEY } from './request-id.js';
+import { WS_PLATFORM } from './ws-symbols.js';
 
 /**
  * Invoke the app's `unsubscribe` hook without letting its failure leave the
@@ -48,14 +48,13 @@ export function runUnsubscribeHook(hook, ws, topic, ctx) {
 function reportUnsubscribeHookFailure(err, ws, topic, ctx) {
 	/** @type {Record<string, unknown>} */
 	const attributes = { topic, error: diagnosticError(err) };
-	// The connection's request id, as the per-connection platform carries it
-	// and as the upgrade stamped it on userData. The socket may already be
-	// closed by the time a rejection lands, and an anonymous connection may
-	// never have had one: the id is a courtesy of the report, not a condition.
+	// The connection's request id, from the platform the hook was handed or the
+	// one the connection holds. The socket may already be closed by the time a
+	// rejection lands: the id is a courtesy of the report, not a condition.
 	let requestId;
 	try {
 		requestId = ctx?.platform?.requestId;
-		if (typeof requestId !== 'string') requestId = ws?.getUserData?.()?.[WS_REQUEST_ID_KEY];
+		if (typeof requestId !== 'string') requestId = ws?.getUserData?.()?.[WS_PLATFORM]?.requestId;
 	} catch { /* closed socket, or a platform that refuses the read */ }
 	if (typeof requestId === 'string') attributes.requestId = requestId;
 	emitOperationalEvent({

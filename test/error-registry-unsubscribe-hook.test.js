@@ -36,7 +36,7 @@ describe('runUnsubscribeHook', () => {
 	afterAll(() => { disposeSink?.(); });
 	afterEach(() => { events = []; });
 
-	const ws = { getUserData: () => ({ __adapter_uws_request_id__: 'req-42' }) };
+	const ws = { getUserData: () => ({ [Symbol.for('adapter-uws.ws.platform')]: { requestId: 'req-42' } }) };
 
 	it('the registry entry exists and names its emitter', () => {
 		expect(entry).toBeTruthy();

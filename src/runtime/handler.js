@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, CARRY_TRACE_CONTEXT, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, leaseReportedSaturation, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -77,8 +77,6 @@ import {
 	WS_CONNECTION_DURATION_BUCKETS
 } from './transport-metrics.js';
 import { activeTraceContext, extractTraceContext, traceOperation, tracingEnabled } from './tracing.js';
-
-const WS_TRACE_CONTEXT_KEY = '__uwsTraceContext';
 
 /**
  * A stand-in for a uWS request, built from values read while it was still
@@ -2039,10 +2037,9 @@ if (WS_ENABLED) {
 
 			// Per-connection requestId stamped at upgrade time. Honours an
 			// X-Request-ID upgrade header if present, else generates a fresh
-			// UUID. Carried across the upgrade boundary as a string-keyed
-			// userData slot (uWebSockets.js strips Symbol keys when handing
-			// userData to the WS binding). The `open` hook promotes this
-			// string into the Symbol-keyed per-connection platform clone.
+			// UUID. Carried across the upgrade on CARRY_REQUEST_ID, which no
+			// other code can name; the `open` hook promotes it into the
+			// per-connection platform clone.
 			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 			const wsTraceParent = tracingEnabled ? extractTraceContext(headers) : null;
 
@@ -2065,8 +2062,8 @@ if (WS_ENABLED) {
 							res.cork(() => {
 								upgradeWithConnectionPermit({
 									remoteAddress: clientIp,
-									[WS_REQUEST_ID_KEY]: wsRequestId,
-									[WS_TRACE_CONTEXT_KEY]: connectionTraceContext
+									[CARRY_REQUEST_ID]: wsRequestId,
+									[CARRY_TRACE_CONTEXT]: connectionTraceContext
 								});
 							});
 						};
@@ -2191,8 +2188,8 @@ if (WS_ENABLED) {
 					}
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
-					ud[WS_REQUEST_ID_KEY] = wsRequestId;
-					ud[WS_TRACE_CONTEXT_KEY] = connectionTraceContext;
+					ud[CARRY_REQUEST_ID] = wsRequestId;
+					ud[CARRY_TRACE_CONTEXT] = connectionTraceContext;
 					// Headers actually written to the 101. This is a SNAPSHOT, not the
 					// app's object, and the snapshot is what gets validated and what
 					// gets written. The object belongs to the app and stays mutable,
@@ -2294,19 +2291,25 @@ if (WS_ENABLED) {
 			// would overwrite live per-connection state, so escalate to the hard tier.
 			fatal(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
 			userData[WS_SUBSCRIPTIONS] = new Set();
-			// Promote the upgrade-time requestId (carried across the upgrade on
-			// a string slot) into a per-connection platform clone on the Symbol
-			// slot, then drop the string slot so userData stays clean for hook
-			// code.
+			// Promote the upgrade-time requestId and trace context (carried across
+			// the upgrade on keys only this module can name - see CARRY_REQUEST_ID)
+			// into a per-connection platform clone, then drop the carry slots so
+			// userData stays clean for hook code. A request id that did not arrive
+			// is minted rather than left undefined: every log line for the
+			// connection correlates on it.
 			const wsPlatform = Object.create(platform);
-			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+			const carriedRequestId = userData[CARRY_REQUEST_ID];
+			// Only a uWS that stopped copying Symbol keys would lose it; say so
+			// rather than let the minted id hide it.
+			assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
+			wsPlatform.requestId = typeof carriedRequestId === 'string' ? carriedRequestId : randomUuid();
 			Object.defineProperty(wsPlatform, 'connectionTraceContext', {
-				value: userData[WS_TRACE_CONTEXT_KEY] ?? null
+				value: userData[CARRY_TRACE_CONTEXT] ?? null
 			});
 			userData[WS_PLATFORM] = wsPlatform;
-			delete userData[WS_REQUEST_ID_KEY];
-			delete userData[WS_TRACE_CONTEXT_KEY];
-			assert(userData[WS_REQUEST_ID_KEY] === undefined, 'ws.request-id-leak', null);
+			delete userData[CARRY_REQUEST_ID];
+			delete userData[CARRY_TRACE_CONTEXT];
+			assert(userData[CARRY_REQUEST_ID] === undefined, 'ws.request-id-leak', null);
 			// Server-trusted attribution, resolved exactly once per connection and
 			// BEFORE the app open hook, so open/message hooks and every bundled
 			// limiter read one settled answer. Placed after the platform install so

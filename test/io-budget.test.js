@@ -1055,7 +1055,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
 	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
 	// threshold. Window arithmetic only; no bytes are copied or written differently.
-	ingress: 'ffd6d7dc962ff854ee79571fbd7e42376eaacbbbc4d479491b03d24cf1fb2309',
+	//
+	// Re-pinned for the private upgrade carry. utils/request-id.js adds the
+	// CARRY_REQUEST_ID / CARRY_TRACE_CONTEXT Symbols, utils/connection-permit.js
+	// carries the permit on a Symbol of its own and drops its fallback keys,
+	// upgrade-admission.js loses the string permit key, and handler.js promotes the
+	// carried values from the Symbols. Key names only; no bytes are copied or
+	// written differently.
+	ingress: '45ea563e8638647e6ecaef53fe4c9a900c885eade6ca860d5b4c9a6ebc9da564',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1983,7 +1990,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// holds the in-flight set, handler/lifecycle.js aborts it at the end of the
 	// shutdown budget, and request.js / ssr.js / admin.js pass the signal into the
 	// Request. No bytes are read, copied or written differently.
-	platform: 'bdaf036283b943d5341a2388ea9f77b67bdbc4a75111c47bcc04f748ed818e11',
+	//
+	// Re-pinned for the private upgrade carry. utils/request-id.js adds the
+	// CARRY_REQUEST_ID / CARRY_TRACE_CONTEXT Symbols, utils/connection-permit.js
+	// carries the permit on a Symbol of its own and drops its fallback keys,
+	// upgrade-admission.js loses the string permit key, and handler.js promotes the
+	// carried values from the Symbols. Key names only; no bytes are copied or
+	// written differently.
+	platform: '75df5890fb9656b7d12e30ab1613d93263c4ff0e162f57996e77bddf59e6fbda',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2356,7 +2370,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
 	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
 	// threshold. Window arithmetic only; no bytes are copied or written differently.
-	'wire-fanout': '567dd304347f088b3764bdda7e8c5164741ace9a658b7918a01af1353789cc22',
+	//
+	// Re-pinned for the private upgrade carry. utils/request-id.js adds the
+	// CARRY_REQUEST_ID / CARRY_TRACE_CONTEXT Symbols, utils/connection-permit.js
+	// carries the permit on a Symbol of its own and drops its fallback keys,
+	// upgrade-admission.js loses the string permit key, and handler.js promotes the
+	// carried values from the Symbols. Key names only; no bytes are copied or
+	// written differently.
+	'wire-fanout': 'cc657606234734429731051f54621b86d7e74f55ffd63acae47f20cc71282c16',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

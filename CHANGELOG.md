@@ -131,6 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Requests whose body arrives in full are unaffected.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a request id, trace context or connection permit can no longer go missing between upgrade and open.** uWS copies upgrade userData by assignment, so an accessor on Object.prototype for one of the adapter's string keys took the value: the connection ran without its request id, and with `maxConnections` set the first connection stopped the worker.
+  - **Affects:** Apps, or libraries they load, that define an accessor on `Object.prototype` for `__adapter_uws_request_id__`, `__uwsTraceContext` or `__adapter_uws_connection_permit__`, and test code that imports `WS_REQUEST_ID_KEY` from `svelte-adapter-uws/testing`.
+  - **Action:** None. Test code that read the request id through `WS_REQUEST_ID_KEY` reads `userData[WS_PLATFORM].requestId`, as it already had to once `open` had run.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The three values now cross the upgrade on keys no other code can name. `WS_REQUEST_ID_KEY` is still exported with the same value and marked deprecated; no slot uses it. A request id that fails to arrive is minted rather than left undefined. An application's own `__adapter_uws_request_id__` or `__uwsTraceContext` property in its upgrade userData now reaches its hooks unchanged, where the adapter used to overwrite it at upgrade and delete it at open; a non-enumerable property at `__adapter_uws_connection_permit__` is dropped by the upgrade copy like any other non-enumerable property, where the adapter used to recreate it.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -216,6 +222,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **The upgrade carry rides private Symbols.** The request id and trace
+  context cross `res.upgrade()` on `CARRY_REQUEST_ID` and
+  `CARRY_TRACE_CONTEXT` (utils/request-id.js), and the admission permit on a
+  Symbol each `createConnectionPermitCarrier()` makes; all three rode string
+  keys an accessor on `Object.prototype` could intercept. uWS copies every
+  enumerable own property of the upgrade userData, Symbol keys included, by
+  assignment, and the testing typings now say so. The permit carrier no
+  longer needs its collision fallback keys. `open` records a
+  `ws.request-id-carry` assertion and mints an id if one ever fails to
+  arrive, on every surface.
+  `test/upgrade-carry-real.test.js` boots the built server with accessors
+  installed for every old key and requires the connection to open with its
+  request id; `test/connection-permit-carrier.test.js` pins the carrier
+  against an assignment copy.
 
 - **A read in progress ends when the client goes.** `readBody` hands the abort
   a way to error its stream (`state.failBody`), and both lanes' `onAborted`

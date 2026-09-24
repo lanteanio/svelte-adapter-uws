@@ -244,13 +244,17 @@ describeUWS('admission metrics on createTestServer', () => {
 		replacement.ws?.close();
 	});
 
-	it('preserves application userData at the carrier key and releases its permit on close', async () => {
+	it('leaves application userData at the old carrier key alone and releases its permit on close', async () => {
+		// The permit crosses the upgrade on a key no application can name, so an
+		// application property of any name arrives exactly as uWS copies it: an
+		// enumerable one intact, next to nothing the carrier left behind.
 		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		const appKey = '__adapter_uws_connection_permit__';
 		const appValue = Object.freeze({ owner: 'application' });
 		let openedDescriptor;
 		let openedNames;
+		let openedSymbols;
 		let observeOpen;
 		const openObserved = new Promise((resolve) => { observeOpen = resolve; });
 		server = await createTestServer({
@@ -261,7 +265,7 @@ describeUWS('admission metrics on createTestServer', () => {
 					Object.defineProperty(userData, appKey, {
 						value: appValue,
 						writable: false,
-						enumerable: false,
+						enumerable: true,
 						configurable: false
 					});
 					return userData;
@@ -270,6 +274,7 @@ describeUWS('admission metrics on createTestServer', () => {
 					const userData = ws.getUserData();
 					openedDescriptor = Object.getOwnPropertyDescriptor(userData, appKey);
 					openedNames = Object.getOwnPropertyNames(userData);
+					openedSymbols = Object.getOwnPropertySymbols(userData).map((s) => s.description);
 					observeOpen();
 				}
 			},
@@ -279,13 +284,11 @@ describeUWS('admission metrics on createTestServer', () => {
 		const connection = await attemptUpgrade(server.wsUrl);
 		expect(connection.opened).toBe(true);
 		await openObserved;
-		expect(openedDescriptor).toEqual({
-			value: appValue,
-			writable: false,
-			enumerable: false,
-			configurable: false
-		});
-		expect(openedNames.filter((key) => key.startsWith(`${appKey}:`))).toEqual([]);
+		expect(openedDescriptor?.value).toBe(appValue);
+		expect(openedDescriptor?.enumerable).toBe(true);
+		// And nothing the carry used is left for the hooks to see.
+		expect(openedNames).not.toContain('__adapter_uws_request_id__');
+		expect(openedSymbols.filter((d) => d?.startsWith('adapter-uws.carry'))).toEqual([]);
 		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(0);
 
 		await new Promise((resolve) => {

@@ -453,12 +453,10 @@ export function createChaosState(opts?: { random?: () => number }): {
 // per-connection bookkeeping. Tests asserting on connection state read
 // userData via these to avoid coupling to Symbol identity tricks.
 //
-// `WS_REQUEST_ID_KEY` is a string (not a Symbol): uWebSockets.js strips
-// Symbol-keyed properties from the userData object passed to
-// `res.upgrade()`, so the upgrade->open carrier slot has to be a string
-// key. The `open` hook moves the value into the Symbol-keyed
-// `WS_PLATFORM` slot and deletes the string key, so test code reading
-// userData after `open` should read `WS_PLATFORM`, not the string key.
+// `WS_REQUEST_ID_KEY` names no slot any more: the request id crosses
+// `res.upgrade()` on a key private to the runtime and lives on
+// `userData[WS_PLATFORM].requestId` from `open` on, which is where test code
+// reads it.
 
 /** Set of topics a connection is subscribed to. Stamped before `open` fires. */
 export const WS_SUBSCRIPTIONS: unique symbol;
@@ -490,11 +488,12 @@ export const WS_CAPS: unique symbol;
 export const WS_ATTRIBUTION: unique symbol;
 
 /**
- * String key (not a Symbol) used to ferry the per-connection requestId
- * across the upgrade->open transition. uWebSockets.js strips Symbol keys
- * from the userData object handed to `res.upgrade()`, so the carrier has
- * to be a string. The `open` hook deletes this slot after promoting the
- * value into the `WS_PLATFORM` Symbol slot, so it never appears in
- * userData while a hook is running.
+ * The string key the per-connection requestId used to cross
+ * `res.upgrade()` on. Nothing is stamped on it any more: uWS copies upgrade
+ * userData with plain assignments, which an accessor on `Object.prototype`
+ * for a nameable key can intercept, so the id now crosses on a key private
+ * to the runtime. Read `userData[WS_PLATFORM].requestId` instead.
+ *
+ * @deprecated Names no slot; kept so an import of it still resolves.
  */
 export const WS_REQUEST_ID_KEY: '__adapter_uws_request_id__';

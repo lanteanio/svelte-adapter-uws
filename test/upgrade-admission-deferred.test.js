@@ -139,7 +139,7 @@ describe('bounded upgrade deferral', () => {
 	it('uses no front-removing array operation in the queue implementation', () => {
 		const source = readFileSync(new URL('../src/runtime/utils/upgrade-admission.js', import.meta.url), 'utf8');
 		const start = source.indexOf('export function createUpgradeAdmission');
-		const end = source.indexOf('export const WS_CONNECTION_PERMIT_KEY', start);
+		const end = source.indexOf('\nexport ', start + 1);
 		expect(source.slice(start, end)).not.toContain('.shift(');
 	});
 });

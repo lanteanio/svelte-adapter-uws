@@ -1009,8 +1009,8 @@ export const WS_SHARED_COHORTS = Symbol.for('adapter-uws.ws.shared-cohorts');
 
 /**
  * Marks a WebSocket that owns one `upgradeAdmission.maxConnections` permit.
- * The upgrade callback reserves it, `open` promotes the temporary string
- * carrier to this Symbol, and `close` releases it exactly once. Absent when
+ * The upgrade callback reserves it, `open` promotes the carrier the permit
+ * crossed the upgrade on to this Symbol, and `close` releases it exactly once. Absent when
  * the whole-lifetime connection gate is disabled.
  */
 export const WS_CONNECTION_PERMIT = Symbol.for('adapter-uws.ws.connection-permit');

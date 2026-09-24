@@ -125,6 +125,11 @@ export function message(ws, ctx) {
 		ws.close();
 		return;
 	}
+	if (msg.type === 'request-id-probe') {
+		// The request id the connection's platform carries, as the upgrade set it.
+		platform.send(ws, 'probe', 'request-id', { requestId: platform.requestId });
+		return;
+	}
 	if (msg.type === 'membership-probe') {
 		// Join or leave a topic outside the wire protocol, the accounted way or
 		// by writing the registry directly, so a suite can compare the worker's

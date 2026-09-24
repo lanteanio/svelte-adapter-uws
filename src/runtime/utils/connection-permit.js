@@ -1,56 +1,28 @@
-import { WS_CONNECTION_PERMIT_KEY } from './upgrade-admission.js';
 import { WS_CONNECTION_PERMIT } from './ws-symbols.js';
 
 /**
  * Build the upgrade-to-open carrier for one server instance.
  *
- * uWebSockets.js copies enumerable string properties from upgrade userData but
- * does not preserve Symbols. The temporary string slot therefore has to be
- * collision-safe: an application is entitled to return any own property at
- * the adapter's preferred key, including a non-configurable accessor.
+ * uWS copies the enumerable own properties of the userData passed to
+ * `res.upgrade()` onto the object `open` receives - Symbol keys included -
+ * with plain assignments. The permit rides a Symbol created here: no other
+ * code can name it, so no application property collides with it and no
+ * inherited accessor can take it in the copy. Each server gets its own Symbol
+ * and marker identity, so a permit carried for one server is never honoured
+ * by another.
  */
 export function createConnectionPermitCarrier() {
 	const identity = Object.freeze({});
-	let fallbackSequence = 0;
-
-	function fallbackKey(userData) {
-		let key;
-		do {
-			key = `${WS_CONNECTION_PERMIT_KEY}:${++fallbackSequence}`;
-		} while (Object.prototype.hasOwnProperty.call(userData, key));
-		return key;
-	}
-
-	function restoreOriginal(userData, marker) {
-		if (marker?.identity !== identity) return false;
-		const current = Object.getOwnPropertyDescriptor(userData, marker.carrierKey);
-		if (current?.value !== marker) return false;
-
-		if (marker.carrierKey !== WS_CONNECTION_PERMIT_KEY) {
-			delete userData[marker.carrierKey];
-		}
-		if (marker.originalDescriptor === undefined) {
-			delete userData[WS_CONNECTION_PERMIT_KEY];
-		} else {
-			Object.defineProperty(userData, WS_CONNECTION_PERMIT_KEY, marker.originalDescriptor);
-		}
-		return true;
-	}
+	const carry = Symbol('adapter-uws.carry.connection-permit');
 
 	return Object.freeze({
 		install(userData) {
 			if (userData === null || (typeof userData !== 'object' && typeof userData !== 'function')) {
 				throw new TypeError('WebSocket upgrade userData must be an object.');
 			}
-			const descriptor = Object.getOwnPropertyDescriptor(userData, WS_CONNECTION_PERMIT_KEY);
-			const originalDescriptor = descriptor === undefined
-				? undefined
-				: Object.freeze({ ...descriptor });
-			const carrierKey = descriptor !== undefined && descriptor.configurable === false
-				? fallbackKey(userData)
-				: WS_CONNECTION_PERMIT_KEY;
-			const marker = Object.freeze({ identity, carrierKey, originalDescriptor });
-			Object.defineProperty(userData, carrierKey, {
+			const marker = Object.freeze({ identity });
+			// Enumerable, or the copy leaves it behind.
+			Object.defineProperty(userData, carry, {
 				value: marker,
 				writable: false,
 				enumerable: true,
@@ -60,18 +32,16 @@ export function createConnectionPermitCarrier() {
 		},
 
 		restore(userData) {
-			for (const key of Object.getOwnPropertyNames(userData)) {
-				const marker = Object.getOwnPropertyDescriptor(userData, key)?.value;
-				if (marker?.identity !== identity || marker.carrierKey !== key) continue;
-				if (!restoreOriginal(userData, marker)) return false;
-				userData[WS_CONNECTION_PERMIT] = true;
-				return true;
-			}
-			return false;
+			if (Object.getOwnPropertyDescriptor(userData, carry)?.value?.identity !== identity) return false;
+			delete userData[carry];
+			userData[WS_CONNECTION_PERMIT] = true;
+			return true;
 		},
 
 		rollback(userData, marker) {
-			return restoreOriginal(userData, marker);
+			if (Object.getOwnPropertyDescriptor(userData, carry)?.value !== marker) return false;
+			delete userData[carry];
+			return true;
 		}
 	});
 }

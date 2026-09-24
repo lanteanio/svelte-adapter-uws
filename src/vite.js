@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
@@ -2681,7 +2681,7 @@ export default function uws(options = {}) {
 						|| req.socket?.remoteAddress
 						|| '';
 					const merged = { remoteAddress, .../** @type {any} */ (userData) };
-					merged[WS_REQUEST_ID_KEY] = wsRequestId;
+					merged[CARRY_REQUEST_ID] = wsRequestId;
 					/** @type {any} */ (ws).__userData = merged;
 					wss.emit('connection', ws, req);
 				});
@@ -2708,9 +2708,11 @@ export default function uws(options = {}) {
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
 				const wsPlatform = Object.create(platform);
-				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+				const carriedRequestId = userData[CARRY_REQUEST_ID];
+				assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
+				wsPlatform.requestId = typeof carriedRequestId === 'string' ? carriedRequestId : randomUuid();
 				userData[WS_PLATFORM] = wsPlatform;
-				delete userData[WS_REQUEST_ID_KEY];
+				delete userData[CARRY_REQUEST_ID];
 				// Attribution parity with the production handler: resolved once,
 				// before the app open hook, fail-closed. Dev must refuse exactly the
 				// resolver production refuses, or the failure ships unseen.
