@@ -135,6 +135,20 @@ export function admin(request) {
 		});
 	}
 	const path = new URL(request.url).pathname;
+	// Held open until `request.signal` aborts or three seconds pass, recording
+	// the abort on `globalThis.__adminHoldAborts` for a suite running the server
+	// in its own process.
+	if (path.endsWith('/hold')) {
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => resolve(new Response('held')), 3000);
+			globalThis.__adminHoldStarted = (globalThis.__adminHoldStarted ?? 0) + 1;
+			request.signal.addEventListener('abort', () => {
+				clearTimeout(timer);
+				(globalThis.__adminHoldAborts ??= []).push(request.signal.reason?.name);
+				resolve(new Response('aborted'));
+			}, { once: true });
+		});
+	}
 	// Bodyless answers, so the wire the admin writer produces for them is
 	// observable on a real build: a 204, and a 200 that declares a length it
 	// carries no bytes for (what a HEAD-answering handler does).

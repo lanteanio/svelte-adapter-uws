@@ -1,6 +1,7 @@
 import { origin, get_origin, body_size_limit, ADMIN_PATH } from './config.js';
 import { METHODS, FORBIDDEN_METHODS, send405, endBodyless } from './http-helpers.js';
 import { readBody } from './ssr.js';
+import { openRequestSignal, closeRequestSignal } from './state-pool.js';
 import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
@@ -180,8 +181,11 @@ export function handleAdminRequest(res, req) {
 
 	// Shared abort flag, mandatory uWS pattern: set onAborted before any async
 	// work so an aborted request never writes to a freed response.
-	const state = { aborted: false };
-	res.onAborted(() => { state.aborted = true; });
+	const state = { aborted: false, bodyReceived: false, failBody: null };
+	/** @type {AbortController | null} */
+	let controller = null;
+	// Aborted as the SSR lane aborts it: on a disconnect before the body arrived.
+	res.onAborted(() => { state.aborted = true; state.failBody?.(); if (!state.bodyReceived) controller?.abort(); });
 
 	// `get_origin` derives the base origin from the Host (and proxy) headers
 	// when ORIGIN is unset - the zero-config default. It throws on a missing /
@@ -246,16 +250,21 @@ export function handleAdminRequest(res, req) {
 		? undefined
 		: readBody(res, body_size_limit, state, contentLengthHint);
 
+	// Opened here, past every early answer above, so a request refused before
+	// it reaches the handler never registers one.
+	controller = openRequestSignal();
 	let request;
 	try {
 		request = new Request(parsed, {
 			method: METHOD,
 			headers,
 			body,
+			signal: controller.signal,
 			// @ts-expect-error - duplex is required when a body stream is attached
 			duplex: 'half'
 		});
 	} catch {
+		closeRequestSignal(controller);
 		if (!state.aborted) sendAdminError(res, 400, 'bad request', headOnly);
 		return;
 	}
@@ -263,13 +272,14 @@ export function handleAdminRequest(res, req) {
 	// === ASYNC PHASE ===
 	// Resolve through Promise.resolve so a synchronous throw inside the app
 	// handler is caught here too, not just a rejected promise.
+	const opened = controller;
 	if (!tracingEnabled) {
-		void runAdminHandler(request, res, state, null, headOnly);
+		void runAdminHandler(request, res, state, null, headOnly).finally(() => closeRequestSignal(opened));
 		return;
 	}
 	traceOperation('adapter.http.admin', {
 		kind: 'server',
 		parent: extractTraceContext(headers),
 		attributes: { 'http.request.method': METHOD, 'http.route.type': 'admin' }
-	}, (span) => runAdminHandler(request, res, state, span, headOnly));
+	}, (span) => runAdminHandler(request, res, state, span, headOnly).finally(() => closeRequestSignal(opened)));
 }

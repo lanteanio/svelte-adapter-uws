@@ -58,7 +58,9 @@ const COMPRESSIBLE_TYPES = new Set([
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {number} limit
- * @param {{ aborted: boolean }} state - Shared abort flag from request handler
+ * @param {{ aborted: boolean, bodyReceived?: boolean, failBody?: (() => void) | null }} state - Shared abort flag
+ *   from request handler; `bodyReceived` is set once the last chunk of the body
+ *   has arrived, and `failBody` is what the abort calls to end a read in progress
  * @param {number} [contentLength] - Known Content-Length (NaN if unknown)
  * @returns {ReadableStream<Uint8Array>}
  */
@@ -75,6 +77,12 @@ export function readBody(res, limit, state, contentLength) {
 				controller.error(new Error('Request aborted'));
 				return;
 			}
+			// A client that goes away mid-body sends no last chunk, so a read in
+			// progress would wait forever - and the request with it. The abort
+			// ends the read instead.
+			state.failBody = () => {
+				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
+			};
 		},
 		pull(controller) {
 			if (state.aborted) {
@@ -107,6 +115,7 @@ export function readBody(res, limit, state, contentLength) {
 					offset += view.byteLength;
 					if (isLast) {
 						done = true;
+						state.bodyReceived = true;
 						controller.enqueue(buf.subarray(0, offset));
 						controller.close();
 					}
@@ -129,6 +138,7 @@ export function readBody(res, limit, state, contentLength) {
 				controller.enqueue(copy);
 				if (isLast) {
 					done = true;
+					state.bodyReceived = true;
 					controller.close();
 				}
 			});
@@ -188,6 +198,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 			method,
 			headers,
 			body,
+			signal: state.signal,
 			// @ts-expect-error
 			duplex: 'half'
 		});

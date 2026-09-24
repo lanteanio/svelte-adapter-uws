@@ -1362,7 +1362,7 @@ if (is_primary) {
 	// here directly (the same instance the handler graph above loaded) because
 	// entering the draining state and closing the sockets are two separate acts
 	// at two separate moments - see the drain-before-delay ordering below.
-	const { beginDrain } = await import('./handler/lifecycle.js');
+	const { beginDrain, abortInFlightRequests } = await import('./handler/lifecycle.js');
 
 	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
 	// handles, so a bare process.exit() aborts the whole process
@@ -1371,6 +1371,11 @@ if (is_primary) {
 	// callbacks complete, then exit. The main thread (single-process) has no
 	// worker-teardown hazard and exits directly.
 	function exitWorkerClean(code) {
+		// Ahead of closing the App, whose closing sockets would abort them with a
+		// bare disconnect: a request cut off here is cut off by the shutdown, and
+		// its signal says so whichever timer - this worker's budget or the
+		// primary's - ran out first.
+		abortInFlightRequests();
 		if (isMainThread) { process.exit(code); return; }
 		try { forceCloseApp(); } catch { /* nothing to close */ }
 		const t = setTimer(() => process.exit(code), 0);
@@ -1574,6 +1579,11 @@ if (is_primary) {
 
 			// Step 4: in-flight requests finish.
 			drained = await Promise.race([drain().then(() => true), whenAborted(signal).then(() => false)]);
+			// Tell every request still open that it is about to be dropped, so a
+			// handler that passed its signal on can stop: the stragglers of a
+			// drain that ran out of budget, and admin requests, which the drain
+			// does not wait for.
+			abortInFlightRequests();
 			if (!drained) {
 				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_REQUESTS_DROPPED,
 					`${budget_ms}ms)${prefix ? ' ' + prefix.trim() : ''}; closing anyway - the requests still open at this point are dropped.`));

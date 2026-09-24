@@ -12,6 +12,13 @@ import { createDivergenceDiagnosticStore } from '../divergence-diagnostics.js';
 /** Pooled HttpResponse abort-flag objects, reused to avoid per-request allocation. @type {{ aborted: boolean }[]} */
 export const statePool = [];
 
+/**
+ * The AbortController behind each in-flight SSR and admin request's
+ * `request.signal`. Shutdown aborts whatever is still here when its drain budget
+ * runs out. @type {Set<AbortController>}
+ */
+export const requestSignals = new Set();
+
 /** Cache of pre-built JSON envelope prefixes, keyed topic\0event. @type {Map<string, string>} */
 export const envelopePrefixCache = new Map();
 

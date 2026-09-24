@@ -3777,7 +3777,13 @@ export async function createTestServer(options = {}) {
 			const base = 'http://' + (adminHeaders.host || 'localhost');
 
 			let adminAborted = false;
-			res.onAborted(() => { adminAborted = true; });
+			// Mirrors production: the handler's request.signal aborts when the client
+			// goes away before the body has arrived - this lane buffers a body in
+			// full before the handler runs, so that is a request without one.
+			let adminBodyReceived = false;
+			/** @type {AbortController | null} */
+			let adminController = null;
+			res.onAborted(() => { adminAborted = true; if (!adminBodyReceived) adminController?.abort(); });
 
 			const failAdmin = (status, closeConnection = false) => {
 				if (adminAborted) return;
@@ -3840,7 +3846,8 @@ export async function createTestServer(options = {}) {
 			const runAdmin = (body) => {
 				let request;
 				try {
-					request = new Request(adminParsed, { method, headers: adminHeaders, body });
+					adminController = new AbortController();
+					request = new Request(adminParsed, { method, headers: adminHeaders, body, signal: adminController.signal });
 				} catch { failAdmin(400); return; }
 				Promise.resolve()
 					.then(() => handler.admin(request))
@@ -3857,7 +3864,10 @@ export async function createTestServer(options = {}) {
 			const adminChunks = [];
 			res.onData((chunk, isLast) => {
 				adminChunks.push(Buffer.from(new Uint8Array(chunk)));
-				if (isLast) runAdmin(adminChunks.length ? Buffer.concat(adminChunks) : undefined);
+				if (isLast) {
+					adminBodyReceived = true;
+					runAdmin(adminChunks.length ? Buffer.concat(adminChunks) : undefined);
+				}
 			});
 		}));
 	}

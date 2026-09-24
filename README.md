@@ -1617,11 +1617,11 @@ On `SIGTERM` or `SIGINT`, the server:
 1. Reports **not ready** - `readinessCheckPath` (default `/readyz`) answers `503` with the body `draining`, so a load balancer stops routing new work here. The server keeps accepting and serving; liveness (`healthCheckPath`, default `/healthz`) keeps answering `200`, so a liveness probe never restarts an instance that is shutting down on purpose.
 2. Waits `SHUTDOWN_DELAY_MS` (default `0`) for that readiness change to propagate to the balancer. Still accepting throughout.
 3. Runs the `hooks.ws` `shutdown` hook, then closes the listen socket and sends every WebSocket client a clean `1001 Going Away`.
-4. Waits for in-flight SSR requests to finish.
+4. Waits for in-flight SSR requests to finish. A request's `request.signal` aborts when its client disconnects before the request body has arrived in full - always, for a request without one - as under SvelteKit's Node adapter, and, with a reason naming the shutdown, when the budget below runs out and the request is about to be dropped - so a handler that passes the signal to a `fetch` or a query can stop.
 5. Runs the `sveltekit:shutdown` listeners on `process` and **awaits** them, so a database pool close or a final durable write completes before the process goes away.
 6. Exits.
 
-Steps 3 to 5 share ONE budget, `SHUTDOWN_TIMEOUT` seconds (default 30), which starts after the delay in step 2. Application code runs in steps 3 and 5, and neither can hold the process past that budget: when it expires the sequence continues, the phase that ran out is named on stderr, and the exit still happens. Both receive an `AbortSignal` and the deadline so they can give up cleanly on their own terms.
+Steps 3 to 5 share ONE budget, `SHUTDOWN_TIMEOUT` seconds (default 30), which starts after the delay in step 2. Application code runs in steps 3 to 5, and none of it can hold the process past that budget: when it expires the sequence continues, the phase that ran out is named on stderr, and the exit still happens. The hook and the listeners receive an `AbortSignal` and the deadline, and each request still open has its own `request.signal` aborted, so all of them can give up cleanly on their own terms.
 
 Set `SHUTDOWN_TIMEOUT=0` if your cleanup must never be cut off: there is then no budget, both phases are awaited to completion, and the hook receives `signal: null, deadline: null` so it can see that nothing will interrupt it. The trade is the obvious one - a hook that never settles holds the process until your supervisor kills it - so the server logs that it is running without a budget.
 

@@ -1977,7 +1977,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
 	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
 	// threshold. Window arithmetic only; no bytes are copied or written differently.
-	platform: '8c35459c63e94643151fbbb3df634d3d0cc090bd870c41233c64bf33624eb243',
+	//
+	// Re-pinned for the request signal. handler/state-pool.js opens and releases
+	// the AbortController behind each SSR and admin request's signal, handler/state.js
+	// holds the in-flight set, handler/lifecycle.js aborts it at the end of the
+	// shutdown budget, and request.js / ssr.js / admin.js pass the signal into the
+	// Request. No bytes are read, copied or written differently.
+	platform: 'bdaf036283b943d5341a2388ea9f77b67bdbc4a75111c47bcc04f748ed818e11',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

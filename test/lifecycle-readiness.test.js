@@ -764,6 +764,9 @@ describeUWS('graceful shutdown of the built server', () => {
 		// stable ID tag the operator searches the reference by.
 		expect(output.text).toContain('in-flight requests did not finish within the shutdown budget (2000ms)');
 		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED]');
+		// The handler is told before it is dropped: its request.signal aborts,
+		// with a reason that names the shutdown.
+		expect(output.text).toContain('[slow-hold] signal aborted: The server shut down before the request finished');
 		// The client-visible half of the consequence: the held request is dropped
 		// as the sockets close, so its client sees a reset, never a response.
 		expect(await held).toBe('reset');

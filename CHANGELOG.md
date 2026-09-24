@@ -119,9 +119,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Below 0.7 every window is the full base, as before. Between 0.7 and 0.985 every window is larger than it was, and from there to the wall both reach the same floor. The window is a function of `heap_used_ratio` and of subscriptions per connection, both exported, so a worker that grants smaller windows while `pressure_reason` still reads none can be read from them.
   - **Detail:** [Changed engineering detail](#changed).
+- **Added: the request signal aborts when the client disconnects and when shutdown stops waiting.** The Request handed to SvelteKit carried no signal, so `event.request.signal` never fired; it now aborts when the client goes away before its request body has arrived in full, as under SvelteKit's Node adapter, and when the shutdown budget runs out.
+  - **Affects:** Endpoints, load functions and hooks that pass `event.request.signal` to a `fetch`, a query or a stream, and admin handlers that read `request.signal`.
+  - **Action:** None. To stop slow work early, pass `event.request.signal` on, as with SvelteKit's Node adapter.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** A request whose response completes never sees the signal abort, and neither does one whose client leaves after its body arrived, so a form action that has its data finishes what it started, as with the Node adapter. A response the server itself cuts off mid-stream aborts it like a disconnect. On disconnect the reason is an `AbortError`; at shutdown it is an `AbortError` whose message names the shutdown, admin requests included. Code that ignores the signal runs exactly as before. Each rendered request allocates one `AbortController`, about 2 microseconds on its `Request`; built assets and prerendered pages are served without one.
+  - **Detail:** [Added engineering detail](#added).
+- **Fixed: a request whose client disconnects mid-body no longer hangs forever.** The body stream waited for a last chunk that never came, so a handler reading the body never returned and the request stayed counted as in flight, which also made every graceful shutdown wait out its whole budget; the disconnect now ends the read with an error.
+  - **Affects:** Endpoints, form actions and admin handlers that read a request body, on servers whose clients can drop mid-upload.
+  - **Action:** None. A handler that reads the body sees the read reject with `Request aborted`, as it already did for a client gone before the read began.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Requests whose body arrives in full are unaffected.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **A signal for every rendered and admin request.** The SSR lane opens an
+  `AbortController` per request (`openRequestSignal`, handler/state-pool.js)
+  and passes its signal into the `Request`. `onAborted` aborts it until
+  `readBody` has seen the last chunk of the body, which is where SvelteKit's
+  Node adapter stops aborting (measured on a real `node:http` server: a GET
+  and a partial body abort, a fully read body does not). The request's settle
+  releases it. In-flight controllers sit in `requestSignals`
+  (handler/state.js); `abortInFlightRequests` (handler/lifecycle.js) aborts
+  them after the shutdown drain, whatever it waited for, and again ahead of a
+  worker's exit, so the named reason arrives before closing sockets would
+  send a bare disconnect. The admin lane opens its controller after its early
+  refusals, and `createTestServer`'s admin lane mirrors it. Priced at +1.9 us
+  on `new Request` alone; an A/B on the built rendered page (autocannon, 10
+  connections, rotated arms with an identical control) put the arm at +0.52%
+  and -1.12% against control drifts of +1.60% and +4.60%, too noisy to resolve
+  a cost that size. `test/request-signal-real.test.js` pins disconnect, a
+  completed response, a fully received and a partial body, and shutdown on
+  the SSR lane, and disconnect on both admin lanes;
+  `test/lifecycle-readiness.test.js` pins the shutdown wiring in a real
+  process.
 
 - **`svelte-adapter-uws/subscriptions` re-exports `trackedSubscribe` and
   `trackedUnsubscribe`** from `runtime/utils/ws-symbols.js`, with its own
@@ -183,6 +216,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **A read in progress ends when the client goes.** `readBody` hands the abort
+  a way to error its stream (`state.failBody`), and both lanes' `onAborted`
+  call it, so a read waiting on a chunk the client will never send rejects
+  instead of pending forever. `test/request-signal-real.test.js` pins it
+  through a partial body whose request is released.
 
 - **Tracked membership joins the shared cohort of the connection's own server.**
   `trackedSubscribe` and `trackedUnsubscribe` read the cohort join and leave

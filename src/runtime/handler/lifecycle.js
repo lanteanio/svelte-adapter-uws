@@ -6,7 +6,7 @@ import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, overrideTopicEpoch, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow, processMonotonicNow, randomU32, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../runtime.js';
-import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, topicSubscriberCounts, wsConnections } from './state.js';
+import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, requestSignals, resumeBuffers, streamTracking, topicSubscriberCounts, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { bumpOut, stopPressureSampling } from './pressure-metrics.js';
@@ -347,6 +347,18 @@ export function stopTlsReload() {
 		tlsRetryTimer = null;
 	}
 	disarmTlsExpirySentinel();
+}
+
+/**
+ * Abort the `request.signal` of every request still in flight. Shutdown calls
+ * this when its drain budget runs out: those requests are about to be dropped,
+ * and a handler that passed the signal on - to a fetch, a query, a stream - can
+ * stop instead of running on against a connection that is going away.
+ */
+export function abortInFlightRequests() {
+	const reason = new DOMException('The server shut down before the request finished', 'AbortError');
+	for (const controller of requestSignals) controller.abort(reason);
+	requestSignals.clear();
 }
 
 /**

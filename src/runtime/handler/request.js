@@ -1,7 +1,7 @@
 import { counters, staticCache } from './state.js';
 import { METHODS, FORBIDDEN_METHODS, send400, send405 } from './http-helpers.js';
 import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
-import { acquireState, releaseState } from './state-pool.js';
+import { acquireState, releaseState, openRequestSignal, closeRequestSignal } from './state-pool.js';
 import { resolveTransportAddress, ADMIN_PATH } from './config.js';
 import { serveStatic, tryPrerendered } from './static-assets.js';
 import { handleSSR } from './ssr.js';
@@ -224,17 +224,23 @@ export function handleRequest(res, req) {
 	const { direct: directAddress, effective: remoteAddress } = resolveTransportAddress(res);
 
 	// Set onAborted BEFORE any async work (mandatory uWS pattern).
-	// No AbortController here - readBody uses the state flag directly,
-	// avoiding 4-5 object allocations (controller + signal + event target)
-	// on every request. GET/HEAD requests (majority of traffic) never
-	// need an AbortController at all.
+	// readBody reads the state flag directly; the controller is the one the
+	// application's `request.signal` comes from, aborted here when the client
+	// goes away before its request body has arrived in full, as SvelteKit's
+	// Node adapter does - a form action that has its data finishes what it
+	// started. Only the SSR lane pays for it - every lane above answered
+	// without one.
 	const state = acquireState();
+	const controller = openRequestSignal();
+	state.signal = controller.signal;
 	res.onAborted(() => {
 		state.aborted = true;
+		state.failBody?.();
+		if (!state.bodyReceived) controller.abort();
 	});
 
 	// === ASYNC PHASE: SSR ===
 	counters.inFlightCount++;
 	handleSSR(res, METHOD, url, headers, remoteAddress, state, directAddress)
-		.finally(() => { releaseState(state); requestDone(); });
+		.finally(() => { closeRequestSignal(controller); releaseState(state); requestDone(); });
 }
