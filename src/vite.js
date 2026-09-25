@@ -28,6 +28,7 @@ import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readRawHandshake, WEBSOCKET_VERSION } from './runtime/utils/ws-handshake.js';
+import { invalidRequestTarget } from './runtime/utils/request-target.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
@@ -2282,6 +2283,15 @@ export default function uws(options = {}) {
 			// HTTP POST so session cookies are refreshed via a standard Set-Cookie
 			// on a 200-series response. Mirrors the production handler in dev.
 			server.middlewares.use(wsAuthPath, async (req, res, next) => {
+				// Mirror production, which refuses a target with a raw byte or a `#`
+				// on every route: node's parser has refused the raw bytes already,
+				// and hands a `#` on, which this mount matches through.
+				if (invalidRequestTarget(req.originalUrl || req.url || '', undefined)) {
+					res.statusCode = 400;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Bad Request');
+					return;
+				}
 				await handlerReady;
 				if (!userHandlers.authenticate) { next(); return; }
 				if (req.method !== 'POST') {
@@ -2550,8 +2560,17 @@ export default function uws(options = {}) {
 				if (pathname !== wsPath) return;
 				// Mirror production: a handshake no one could complete is refused
 				// before anything else looks at it. Read from `rawHeaders`, which
-				// keeps the repeated lines `headers` joins.
-				const handshakeRefusal = webSocketHandshakeRefusal(readRawHandshake(req.rawHeaders));
+				// keeps the repeated lines `headers` joins. The target is part of the
+				// handshake: node's parser has already refused one with raw bytes,
+				// but hands a `#` on, and the URL parse above reads `/ws#x` and
+				// `/x/../ws` as the path. Production routes on the raw spelling, so
+				// it upgrades neither.
+				const target = req.url || '';
+				const queryAt = target.indexOf('?');
+				const rawPath = queryAt === -1 ? target : target.slice(0, queryAt);
+				const handshakeRefusal = invalidRequestTarget(target, undefined) || rawPath !== wsPath
+					? 400
+					: webSocketHandshakeRefusal(readRawHandshake(req.rawHeaders));
 				if (handshakeRefusal !== null) {
 					socket.end(handshakeRefusal === 400
 						? 'HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request'

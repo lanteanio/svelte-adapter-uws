@@ -1,0 +1,1 @@
+static-non-ascii-name

@@ -41,6 +41,7 @@ import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
 import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless, sendHandshakeRefusal } from './handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './utils/ws-handshake.js';
+import { invalidRequestTarget } from './utils/request-target.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
 import { batchRelay } from './handler/relay.js';
@@ -199,7 +200,7 @@ export function noteRelayFrameRefused(lane) {
 }
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest, markAdminRouteMounted } from './handler/admin.js';
-import { registerRoute } from './handler/route-registry.js';
+import { registerRoute, yieldsToApp } from './handler/route-registry.js';
 
 // EVERY route registration on `app` goes through this helper, never through
 // `app.get(...)` directly: it records the registration so the TLS hot-reload
@@ -228,9 +229,16 @@ let transportMetricHooks = null;
  *
  * @param {(res: any, req: any) => void} handler
  */
-const guardFraming = (handler) => (res, req) => {
+const guardFraming = (handler, checkTarget) => (res, req) => {
 	if (framingRefusal(req.getHeader('transfer-encoding') || undefined, undefined) !== null) {
 		send400(res, req.getMethod() === 'head', true);
+		return;
+	}
+	// A target with a byte outside visible ASCII or a fragment, which RFC 9112
+	// does not allow. The catch-all asks the same question itself, where it
+	// reads the path anyway.
+	if (checkTarget && invalidRequestTarget(req.getUrl(), req.getQuery())) {
+		send400(res, req.getMethod() === 'head');
 		return;
 	}
 	handler(res, req);
@@ -240,7 +248,7 @@ const route = (method, ...args) => {
 	// Ahead of the metric wrapper, so a refusal is counted like any other
 	// answer rather than vanishing from the request totals.
 	if (method !== 'ws' && typeof args[args.length - 1] === 'function') {
-		args[args.length - 1] = guardFraming(args[args.length - 1]);
+		args[args.length - 1] = guardFraming(args[args.length - 1], args[0] !== '/*');
 	}
 	if (transportMetricHooks !== null) {
 		const last = args.length - 1;
@@ -1693,8 +1701,15 @@ if (WS_ENABLED) {
 			// The handshake itself, also ahead of every capacity answer: uWS routes
 			// a request here on the key's length alone, and one no one could
 			// complete is refused as what it is rather than answered, or counted, as
-			// load. One walk of the header list, which a repeated line needs.
-			const handshakeRefusal = webSocketHandshakeRefusal(readUwsHandshake(req));
+			// load. One walk of the header list, which a repeated line needs. The
+			// handshake's target is part of it (RFC 6455 4.2.1), refused 400 as on
+			// every route. uWS matched this route on the configured path as sent,
+			// so with the path configured in visible ASCII a raw byte or a `#` in
+			// the path meets the catch-all instead, and what this answers for is
+			// the query.
+			const handshakeRefusal = invalidRequestTarget(req.getUrl(), req.getQuery())
+				? 400
+				: webSocketHandshakeRefusal(readUwsHandshake(req));
 			if (handshakeRefusal !== null) {
 				mUpgradeRejected?.inc({ reason: 'malformed_handshake' });
 				traceUpgradeRejection(req, undefined, 'malformed_handshake');
@@ -3414,6 +3429,9 @@ if (WS_ENABLED) {
 			res.end('Server is at upgrade capacity, please retry');
 		});
 	});
+	// Without a ceiling the path's pages are the application's, and so are
+	// their data requests and any spelling that resolves onto the path.
+	if (!admissionCeiling) yieldsToApp(WS_PATH);
 
 	console.log(`[svelte-adapter-uws] WebSocket endpoint registered at ${WS_PATH}`);
 	if (WS_PATH !== '/ws') {

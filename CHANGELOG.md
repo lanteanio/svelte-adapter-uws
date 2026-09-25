@@ -137,6 +137,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The three values now cross the upgrade on keys no other code can name. `WS_REQUEST_ID_KEY` is still exported with the same value and marked deprecated; no slot uses it. A request id that fails to arrive is minted rather than left undefined. An application's own `__adapter_uws_request_id__` or `__uwsTraceContext` property in its upgrade userData now reaches its hooks unchanged, where the adapter used to overwrite it at upgrade and delete it at open; a non-enumerable property at `__adapter_uws_connection_permit__` is dropped by the upgrade copy like any other non-enumerable property, where the adapter used to recreate it.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Changed: a request target carrying a byte outside visible ASCII, or a fragment, is refused with 400.** uWS decoded raw non-ASCII bytes in the request line and served the page behind them, and routed on a path that kept its `#`; every route and the WebSocket handshake now refuse such a target, as RFC 9112 asks.
+  - **Affects:** Clients that send raw UTF-8, control characters or a `#` in the request line instead of percent-encoding them. Browsers and HTTP libraries encode these, and leave the fragment out.
+  - **Action:** None for browser traffic. A client refused here percent-encodes the target: `/caf%C3%A9`, not the raw bytes.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Percent-encoded targets are served as before, non-ASCII page names included, and a static file with a non-ASCII name is now served for its encoded spelling. Built assets pay one read of the query and a scan of the target, which measured within run-to-run noise (bench/40). A handshake refused for its query counts as `upgrade_rejected_total{reason="malformed_handshake"}`; one whose path carries such a byte misses the WebSocket route and is refused like any other request. node's HTTP parser refuses the raw bytes itself and passes a `#` on, so under `vite dev` the WebSocket handshake and the auth path refuse a fragment and pages are served as Vite serves them. `createTestServer` refuses on the routes it mirrors.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a target that resolves onto one of the adapter's own paths is refused instead of reaching the app.** `/x/../healthz` skipped the health answer and reached the app's router as `/healthz`, as the same spelling did for the readiness and auth paths and waiting-room pages; it now gets 400, as a target entering the admin prefix already did.
+  - **Affects:** Clients that spell a request to one of these paths with dot segments, a backslash or percent-encoding, or ask for its SvelteKit data, as `/healthz/__data.json` does.
+  - **Action:** None. Request the path as it is spelled.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Direct requests to these paths are answered as before. A refused spelling is refused whatever the method, a method the path itself does not answer included, since it is routed as one path and read as another either way. The WebSocket path counts as one of them only while an admission ceiling answers its GETs; without one its pages, their data and such spellings stay the app's, and `vite dev` refuses such a spelling on the handshake. A page one trailing slash further on, `/healthz/`, is a path of its own that the adapter never answered, so it and its data stay the app's. An escaped spelling of the admin prefix that ends in an escape no decoder reads is refused too, where a request other than GET or HEAD used to reach the app's `handle` hook.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a static file whose name a browser percent-encodes is served for that spelling.** Assets were looked up by their raw file name, so `static/maß.txt` requested as `/ma%C3%9F.txt`, or `My Report.pdf` as `/My%20Report.pdf`, got the app's 404; the encoded spelling now finds the file, as under SvelteKit's Node adapter.
+  - **Affects:** Apps whose `static/` directory or build output holds a file whose name carries a space, a non-ASCII letter or another character a browser encodes, such as `Übersicht.pdf`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The raw bytes of a non-ASCII name, the only spelling that reached such a file before, are refused as a request target. An escaped spelling that decodes to a file's name is served, escapes in either letter case, except where it escapes a character `decodeURI` keeps encoded, `/`, `#`, `?` and `&` among them, as under the Node adapter; a name written decomposed is also found for its composed spelling. A target that matches a file as sent is served exactly as before, on the same single map lookup.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -173,6 +191,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control.
 
 ### Changed
+
+- **The request target is checked on every route.** `invalidRequestTarget`
+  (utils/request-target.js) refuses a path or query carrying a byte outside
+  0x21-0x7E or a `#`. The catch-all asks it where it reads the path, before
+  the built-asset lookup; the route wrapper asks it for every other route; the
+  WebSocket upgrade asks it first in its handshake verdict, counted as
+  `malformed_handshake`. `createTestServer` mirrors the route wrapper and the
+  upgrade; the dev plugin's upgrade asks it of `req.url` and refuses a raw
+  path other than the WebSocket path's own spelling, and its auth mount asks
+  it too. `bench/40-request-target-guard-ab.mjs` puts the query read and the
+  scan inside the noise band of a built-asset answer on quiet runs: -0.12%
+  against a control drift of -2.49%, and +1.28% against +2.07%.
+  `test/request-target-real.test.js` pins the prerendered, built-asset and
+  exact-route lanes and the test server, `test/ws-handshake-real.test.js` the
+  handshake on all three surfaces, and the raw-byte case in
+  `test/http-request-lanes.test.js` now expects 400.
 
 - **The send-gate window ramps from its knee.** `leaseGrantSize` scales the
   heap arm by `(1 - ratio) / (1 - 0.7)` above the 0.7 knee, where it
@@ -222,6 +256,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **Exact mounts are refused on a resolved spelling.** `registerRoute` records
+  every exact path it registers except a WebSocket route's, and a route that
+  yields to the application takes its path back out (`yieldsToApp`, the
+  WebSocket path's GET route without an admission ceiling).
+  `entersExactMount` (handler/route-registry.js) asks whether a reading of the
+  target, with SvelteKit's `/__data.json`, `.html__data.json` and
+  `/__route.js` suffixes stripped and a data request's
+  `x-sveltekit-trailing-slash` parameter applied as its router does, is one of
+  them without being the raw spelling; the parameter is parsed only when a
+  mount is at stake.
+  The catch-all asks it of the raw, resolved and decoded path, now for every
+  app rather than only beside a mounted admin route. It parses only a path
+  that can drop a segment (a dot segment, `%2e`, a backslash), not every path
+  with a dot or an escape, and decodes only ASCII escapes, which cannot throw,
+  so an encoded prefix spelling ending in a bad escape is judged too.
+  `bench/42-resolution-gate-cost.mjs` finds the gate adding, without an admin
+  route, 10-28 ns to a plain or dotted path, about 60 ns to a data request,
+  about 78 ns to an escaped non-ASCII path and about 365 ns to a dot segment;
+  with the admin route mounted a data request drops from 331 to 65 ns and an
+  escaped path from 584 to 92 ns. `test/route-registry.test.js` pins the
+  predicate, `test/request-target-real.test.js` dot segments, an encoded dot
+  segment, an encoded letter and the data and route suffixes onto the probes,
+  an app page and its data still served, the page one trailing slash further
+  on and its data left to the app, and the WebSocket path left to the app
+  without a ceiling; `test/admin-prefix-entry-real.test.js` pins resolved
+  and encoded prefix spellings ending in an undecodable escape, and a raw byte
+  or a fragment on the admin lane.
+
+- **An encoded spelling of a static file's name finds it.** After the
+  prerendered lookup misses, a GET or HEAD whose target carries a `%` looks
+  it up decoded with `decodeURI`, as sirv decodes before its file lookup
+  (`encodedStaticEntry`, handler/static-assets.js), and serves a hit through
+  `serveStatic` under an `adapter.http.static` span. `cacheDir` also keys a
+  name's NFC form, as sirv does, where it differs, is still not ASCII, and no
+  file holds that key; a file's own name replaces such an alias.
+  `test/request-target-real.test.js` serves `test/fixture/static/maß.txt` for
+  `/ma%C3%9F.txt` and its lowercase escapes, refuses its raw bytes, does not
+  serve `/.well-known%2Fprobe.txt` as the file behind the separator, and,
+  through the built index, finds a name with a space and a name written
+  decomposed, keeps an alias from shadowing a file in either walk order, and
+  registers no alias that composes to ASCII.
 
 - **The upgrade carry rides private Symbols.** The request id and trace
   context cross `res.upgrade()` on `CARRY_REQUEST_ID` and

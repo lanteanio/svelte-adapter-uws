@@ -47,12 +47,13 @@ const BACKSLASH = String.fromCharCode(92);
  * One request with the target written verbatim into the request line.
  * @param {number} port
  * @param {string} target
+ * @param {string} [method]
  */
-function rawRequest(port, target) {
+function rawRequest(port, target, method = 'GET') {
 	return new Promise((resolve) => {
 		let buf = '';
 		const sock = net.connect(port, '127.0.0.1', () => {
-			sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+			sock.write(`${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
 		});
 		sock.setTimeout(5000, () => { sock.destroy(); resolve({ status: 0, body: '' }); });
 		sock.on('data', (d) => { buf += d.toString(); });
@@ -143,6 +144,34 @@ describeUWS('a target that resolves into the reserved admin prefix', () => {
 			expect(refused.status, `${target} must be refused`).toBe(400);
 			expect(refused.body, `${target} must not reach the app's router`)
 				.not.toContain('appRouteReached');
+		}
+	}, 60000);
+
+	it('refuses a resolved entry whose escape does not decode', async () => {
+		// The path reaches the prefix by resolution or by its escapes and ends in
+		// an escape no UTF-8 decoder accepts. The prefix answer cannot wait on
+		// that decode: SvelteKit answers such a path 400 itself, but only after
+		// the app's `handle` hook has run on it, so a 400 alone does not show
+		// that the reservation held. The adapter's own refusal is the plain
+		// `Bad Request` body. POST, because a GET is refused by the prerendered
+		// lookup's own decode before SvelteKit is asked.
+		for (const method of ['GET', 'POST']) {
+			for (const target of ['/foo/../__realtime/introspect%', '/foo/../__realtime/%zz', '/%5F%5Frealtime/introspect%', '/__%72ealtime/%E0%A4%A']) {
+				const refused = await rawRequest(server.port, target, method);
+				expect(refused.status, `${method} ${target} must be refused`).toBe(400);
+				expect(refused.body, `${method} ${target} must be refused before the app sees it`).toBe('Bad Request');
+			}
+		}
+	}, 60000);
+
+	it('refuses a raw byte or a fragment in a target the admin lane routes', async () => {
+		// The admin mount is a wildcard, so these match it on their raw spelling
+		// and meet the route wrapper's target check rather than the catch-all's.
+		const E_ACUTE = String.fromCharCode(0xe9);
+		for (const target of [`/__realtime/intro${E_ACUTE}`, '/__realtime/introspect#x', `/__realtime/introspect?x=${E_ACUTE}`]) {
+			const refused = await rawRequest(server.port, target);
+			expect(refused.status, `${target} must be refused`).toBe(400);
+			expect(refused.body, `${target} must not reach the admin handler`).toBe('Bad Request');
 		}
 	}, 60000);
 

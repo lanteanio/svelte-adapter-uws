@@ -118,19 +118,14 @@ describeUWS('request lanes against the real built runtime', () => {
 		expect(/[^\x00-\x7f]/.test(redirect.head)).toBe(false);
 	}, 30000);
 
-	it('encodes a raw-byte target the same way, and the redirect lands where the lookup matched', async () => {
+	it('refuses a raw-byte target instead of decoding it, as node\'s parser does', async () => {
 		// A client that sends the name's UTF-8 bytes raw in the request line.
-		// uWS hands them to the runtime as the decoded characters, and the header
-		// used to carry those characters' bytes back out unencoded.
+		// uWS hands them to the runtime as the decoded characters; a request
+		// target is ASCII, so the line is refused rather than guessed at.
 		const target = Buffer.concat([Buffer.from('/prerendered/caf'), E_ACUTE, Buffer.from('/?x='), E_ACUTE]);
-		const redirect = await exchange(port, request('GET', target));
-		expect(redirect.status).toBe(308);
-		expect(redirect.headers.location).toBe('/prerendered/caf%C3%A9?x=%C3%A9');
-		expect(/[^\x00-\x7f]/.test(redirect.head)).toBe(false);
-
-		const landed = await exchange(port, request('GET', redirect.headers.location.split('?')[0]));
-		expect(landed.status).toBe(200);
-		expect(landed.body.toString()).toContain('data-testid="prerendered-non-ascii"');
+		const refused = await exchange(port, request('GET', target));
+		expect(refused.status).toBe(400);
+		expect(/[^\x00-\x7f]/.test(refused.head)).toBe(false);
 	}, 30000);
 
 	it('compresses a single-chunk SSR response by the weights in Accept-Encoding', async () => {

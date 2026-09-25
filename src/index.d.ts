@@ -1043,7 +1043,8 @@ export interface WebSocketOptions {
 	 *   `malformed_handshake`, which is decided before any capacity reason:
 	 *   400 without exactly one Upgrade line naming `websocket` (any letter
 	 *   case), a Connection that lists `upgrade`, exactly one key that is the
-	 *   base64 of 16 octets, or with a repeated version line; 426 with
+	 *   base64 of 16 octets, or with a repeated version line or a query
+	 *   outside visible ASCII or carrying a `#`; 426 with
 	 *   `Sec-WebSocket-Version: 13` for any version but 13. Then `ip_rate_limit`,
 	 *   `bad_origin`, `deferred_overflow`, `auth_timeout`, `auth_rejected`,
 	 *   `hook_error`. One more reason, `auth_rate_limit`, is emitted on the `connect({ auth: true })`

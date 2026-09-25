@@ -50,6 +50,17 @@ const CASES = [
 	['a websocket Upgrade with no key', [['Connection', 'Upgrade'], ['Upgrade', 'websocket']], 400]
 ];
 
+// A target RFC 9112 does not allow, on an otherwise complete handshake: a raw
+// byte or a fragment. The raw byte goes out as its UTF-8 bytes, which node's
+// parser refuses itself on the dev surface; the fragment it hands on, and its
+// URL parse reads `/ws#x` as the path.
+/** @type {Array<[string, string]>} */
+const TARGETS = [
+	['a raw non-ASCII byte in the query', '/ws?x=' + String.fromCharCode(0xe9)],
+	['a fragment after the query', '/ws?x=1#y'],
+	['a fragment', '/ws#x']
+];
+
 /**
  * Send one GET with exactly these header lines and read the status line and
  * headers of the answer.
@@ -206,8 +217,41 @@ for (const surface of SURFACES) {
 				if (expected === 426) expect(got['sec-websocket-version']).toBe('13');
 			});
 		}
+
+		it('never upgrades a spelling that only resolves onto the path', async () => {
+			// uWS routes on the raw path, so production hands `/x/../ws` to the
+			// catch-all and the application, as it does a plain GET to the path,
+			// and the test server has no route for it. node's URL parse reads it
+			// as the path, so the dev plugin refuses it rather than open a socket
+			// production never would.
+			const { status } = await exchange(port, NORMAL, '/x/../ws');
+			expect(status).not.toBe(101);
+			if (surface.label === 'vite dev') expect(status).toBe(400);
+		});
+
+		for (const [name, path] of TARGETS) {
+			// uWS routes on the raw path, so `/ws#x` misses the WebSocket route
+			// and production's catch-all refuses it. The test server mirrors the
+			// adapter's routes and not the catch-all, so only the targets its
+			// WebSocket route receives are asked of it.
+			const routed = path.startsWith('/ws?');
+			(surface.label === 'createTestServer' && !routed ? it.skip : it)(`answers 400 to a complete handshake with ${name} in its target`, async () => {
+				expect((await exchange(port, NORMAL, path)).status).toBe(400);
+			});
+		}
 	});
 }
+
+describe('the dev plugin\'s auth mount', () => {
+	it('refuses a fragment in its target, which node hands on and the mount matches through', async () => {
+		// Production routes the auth path on the raw spelling, so `/__ws/auth#x`
+		// meets the catch-all and its 400. The dev mount matches by prefix, and
+		// without an authenticate hook it would pass the request on.
+		const port = await bootDev();
+		expect((await exchange(port, [], '/__ws/auth#x')).status).toBe(400);
+		expect((await exchange(port, [], '/__ws/auth')).status, 'the plain path is passed on').toBe(404);
+	});
+});
 
 describeUWS('a GET to the WebSocket path that is not a handshake', () => {
 	it('reaches the application on production, and an upgrade to another protocol does too', async () => {
@@ -278,6 +322,19 @@ describeUWS('the handshake is judged before capacity', () => {
 			expect((await exchange(server.port, replaced('Sec-WebSocket-Version', '8'))).status).toBe(426);
 			expect(metrics.reason('upgrade_rejected_total', 'malformed_handshake')).toBe(2);
 			expect(metrics.reason('upgrade_rejected_total', 'siege')).toBe(1);
+		} finally {
+			await server.close();
+		}
+	});
+
+	it('counts a handshake whose target carries a fragment as malformed, under siege too', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const metrics = recordingRegistry();
+		const server = await createTestServer({ protection: 'siege', metrics });
+		try {
+			expect((await exchange(server.port, NORMAL, '/ws?x=1#y')).status).toBe(400);
+			expect(metrics.reason('upgrade_rejected_total', 'malformed_handshake')).toBe(1);
+			expect(metrics.reason('upgrade_rejected_total', 'siege')).toBe(0);
 		} finally {
 			await server.close();
 		}

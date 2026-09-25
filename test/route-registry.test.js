@@ -6,7 +6,7 @@
 // current registration target exactly like uWS's.
 
 import { describe, it, expect } from 'vitest';
-import { registerRoute, mirrorRoutes } from '../src/runtime/handler/route-registry.js';
+import { registerRoute, mirrorRoutes, entersExactMount, yieldsToApp } from '../src/runtime/handler/route-registry.js';
 
 function mockApp() {
 	/** @type {Record<string, Array<{ method: string, args: any[] }>>} */
@@ -106,5 +106,66 @@ describe('mirrorRoutes', () => {
 		mirrorRoutes(app, ['a.example.com']);
 		expect(app.routers['a.example.com']).toHaveLength(1);
 		expect(app.routers['a.example.com'][0].args[0]).toBe('/x');
+	});
+});
+
+describe('entersExactMount', () => {
+	// The catch-all asks this of the raw target and of each reading of it. The
+	// exact mounts are the paths registered without a wildcard or a parameter.
+	const app = mockApp();
+	registerRoute(app, 'get', '/probe', () => {});
+	registerRoute(app, 'get', '/probe.json', () => {});
+	registerRoute(app, 'get', '/', () => {});
+	registerRoute(app, 'any', '/reserved/*', () => {});
+	registerRoute(app, 'get', '/item/:id', () => {});
+
+	it('holds a reading of the target that lands on an exact mount it does not spell', () => {
+		expect(entersExactMount('/probe', '/x/../probe')).toBe(true);
+		expect(entersExactMount('/probe', '/%70robe')).toBe(true);
+		expect(entersExactMount('/probe.json', '/x/../probe.json')).toBe(true);
+	});
+
+	it('never holds the direct spelling, which reaches the catch-all only for a method the mount does not answer', () => {
+		expect(entersExactMount('/probe', '/probe')).toBe(false);
+		expect(entersExactMount('/probe.json', '/probe.json')).toBe(false);
+	});
+
+	it('reads a data or route-resolution request as the path in front of its suffix', () => {
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json')).toBe(true);
+		expect(entersExactMount('/probe/__route.js', '/probe/__route.js')).toBe(true);
+		expect(entersExactMount('/__data.json', '/__data.json'), 'the root page').toBe(true);
+		expect(entersExactMount('/other/__data.json', '/other/__data.json')).toBe(false);
+		expect(entersExactMount('/probe.html__data.json', '/probe.html__data.json'), 'reads as /probe.html').toBe(false);
+	});
+
+	it('reads a trailing slash as the page\'s own, as SvelteKit rebuilds it', () => {
+		// `/probe/` is a page of its own - uWS does not route it to the mount -
+		// and a data request carries that slash in a query parameter.
+		expect(entersExactMount('/probe/', '/probe/')).toBe(false);
+		expect(entersExactMount('/probe//__data.json', '/probe//__data.json')).toBe(false);
+		expect(entersExactMount('/probe//__route.js', '/probe//__route.js')).toBe(false);
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json', 'x-sveltekit-trailing-slash=1')).toBe(false);
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json', 'x-sveltekit-invalidated=01&x-sveltekit-trailing-slash=%31'), 'decoded as URLSearchParams decodes').toBe(false);
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json', 'x-sveltekit-invalidated=01')).toBe(true);
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json', 'xx-sveltekit-trailing-slash=1'), 'another parameter').toBe(true);
+		expect(entersExactMount('/probe/__data.json', '/probe/__data.json', '?x-sveltekit-trailing-slash=1'), 'a second `?` belongs to the name').toBe(true);
+		registerRoute(app, 'get', '/slashed/', () => {});
+		expect(entersExactMount('/slashed/__data.json', '/slashed/__data.json', 'x-sveltekit-trailing-slash=1'), 'a mount spelled with its slash').toBe(true);
+		expect(entersExactMount('/slashed/__data.json', '/slashed/__data.json')).toBe(false);
+	});
+
+	it('counts neither a wildcard nor a parameter route as an exact mount', () => {
+		expect(entersExactMount('/reserved/*', '/other')).toBe(false);
+		expect(entersExactMount('/item/:id', '/other')).toBe(false);
+	});
+
+	it('leaves out a WebSocket route, and a path whose route yields to the application', () => {
+		registerRoute(app, 'ws', '/socket', {});
+		expect(entersExactMount('/socket', '/x/../socket'), 'upgrades only').toBe(false);
+		registerRoute(app, 'get', '/shared', () => {});
+		expect(entersExactMount('/shared', '/x/../shared')).toBe(true);
+		yieldsToApp('/shared');
+		expect(entersExactMount('/shared', '/x/../shared')).toBe(false);
+		expect(entersExactMount('/shared/__data.json', '/shared/__data.json')).toBe(false);
 	});
 });

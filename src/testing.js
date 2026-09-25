@@ -9,6 +9,7 @@ import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createL
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal } from './runtime/handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './runtime/utils/ws-handshake.js';
+import { invalidRequestTarget } from './runtime/utils/request-target.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -61,6 +62,17 @@ const guardFramingMirror = (handler) => (res, req) => {
 			// uWS writes `connection: close` itself for the flag below.
 			if (headOnly) res.endWithoutBody('Bad Request'.length, true);
 			else res.end('Bad Request', true);
+		});
+		return;
+	}
+	// And the target, as production reads it on every route.
+	if (invalidRequestTarget(req.getUrl(), req.getQuery())) {
+		const headOnly = req.getMethod() === 'head';
+		res.cork(() => {
+			res.writeStatus('400 Bad Request');
+			res.writeHeader('content-type', 'text/plain');
+			if (headOnly) res.endWithoutBody('Bad Request'.length);
+			else res.end('Bad Request');
 		});
 		return;
 	}
@@ -2578,9 +2590,11 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 
-			// Mirrors production: the handshake itself, also ahead of every
-			// capacity answer.
-			const handshakeRefusal = webSocketHandshakeRefusal(readUwsHandshake(req));
+			// Mirrors production: the handshake itself, its target included, also
+			// ahead of every capacity answer.
+			const handshakeRefusal = invalidRequestTarget(req.getUrl(), req.getQuery())
+				? 400
+				: webSocketHandshakeRefusal(readUwsHandshake(req));
 			if (handshakeRefusal !== null) {
 				mUpgradeRejectedT?.inc({ reason: 'malformed_handshake' });
 				sendHandshakeRefusal(res, handshakeRefusal);

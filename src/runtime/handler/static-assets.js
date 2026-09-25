@@ -30,6 +30,8 @@ const DOWNLOAD_EXTENSIONS = new Set([
 // dimension that entry is keyed on.
 const VARY_ON = 'Accept-Encoding';
 
+const NON_ASCII = /[^\x00-\x7f]/;
+
 /**
  * A cached asset. Beyond the identity representation, an entry carries each
  * available content-coding's own validator, response headers and the subset of
@@ -217,6 +219,17 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 		}
 
 		staticCache.set(urlPath, entry);
+		// Also under its composed form, as SvelteKit's Node adapter keys its
+		// files: a name written decomposed, as some macOS tools write it, is found
+		// for the composed spelling a browser sends. Never over a key a file
+		// already holds, and a file's own name replaces such an alias, so a name
+		// that normalizes onto another file's never shadows it. Only a composed
+		// form that is still not ASCII: a target is ASCII, so such an alias is
+		// reached through its encoded spelling alone, and a name that composes
+		// to plain ASCII (a Kelvin sign) is not served for a target that is not
+		// its name.
+		const composed = urlPath.normalize('NFC');
+		if (composed !== urlPath && NON_ASCII.test(composed) && !staticCache.has(composed)) staticCache.set(composed, entry);
 
 		// Prerendered pages: register clean pathname aliases for the static fast
 		// path and tryPrerendered().
@@ -597,4 +610,27 @@ export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatc
 	}
 
 	return false;
+}
+
+/**
+ * The static file a percent-encoded target names, for a file whose name a
+ * browser encodes - a space, a non-ASCII letter. The fast path matches the
+ * target as sent against the file's own name, which the encoded spelling
+ * never is, and the raw bytes of a non-ASCII name are refused as a target.
+ *
+ * Decoded with `decodeURI`, as SvelteKit's Node adapter decodes before its own
+ * file lookup, so an encoded `/` does not reach into a directory the path did
+ * not name.
+ *
+ * @param {string} pathname  a target carrying a `%`
+ * @returns {NegotiatedStaticEntry | undefined}
+ */
+export function encodedStaticEntry(pathname) {
+	let name;
+	try {
+		name = decodeURI(pathname);
+	} catch {
+		return undefined;
+	}
+	return name === pathname ? undefined : staticCache.get(name);
 }

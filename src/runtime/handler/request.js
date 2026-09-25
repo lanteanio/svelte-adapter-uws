@@ -3,22 +3,34 @@ import { METHODS, FORBIDDEN_METHODS, send400, send405 } from './http-helpers.js'
 import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
 import { acquireState, releaseState, openRequestSignal, closeRequestSignal } from './state-pool.js';
 import { resolveTransportAddress, ADMIN_PATH } from './config.js';
-import { serveStatic, tryPrerendered } from './static-assets.js';
+import { serveStatic, tryPrerendered, encodedStaticEntry } from './static-assets.js';
 import { handleSSR } from './ssr.js';
 import { requestDone } from './lifecycle.js';
 import { adminRouteMounted } from './admin.js';
 import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
 import { windowsReservedPath } from '../utils/windows-path.js';
+import { invalidRequestTarget } from '../utils/request-target.js';
+import { entersExactMount } from './route-registry.js';
 
 // Read once: the platform does not change under a running process.
 const WINDOWS = process.platform === 'win32';
 
-// Characters through which a raw path can reach a DIFFERENT path than the one
-// spelled: dot segments in either spelling, the backslash a special scheme
-// reads as a separator, the whitespace the URL parser strips, and the percent
-// that lets a segment spell any character at all. See the admin-prefix check
-// below, which is the only reader.
-const MAY_RESOLVE = /[.%\\\t\n\r]/;
+// What makes the URL parser drop a segment of a raw path: a dot segment, a
+// `%2e` in any case (a dot segment spelled encoded), and the backslash a
+// special scheme reads as a separator. The whitespace it strips never gets
+// this far: the target check refuses it first. A dot inside a name, as in
+// `/__data.json`, changes nothing, so such a path skips the URL parse. See the
+// resolution checks below, which are its only readers.
+const DROPS_SEGMENT = /(?:^|\/)\.\.?(?:\/|$)|\\|%2e/i;
+
+// An escape of an ASCII character, which is all a reachable prefix or exact
+// mount is made of: uWS matches a mount on the raw target, and a target
+// carrying anything but visible ASCII is refused before it is routed. Decoding
+// only these reads every escape that could spell such a mount and cannot
+// throw, as a decoder for the whole of UTF-8 does on an escape it cannot read.
+const ASCII_ESCAPE = /%([0-7][0-9a-f])/gi;
+/** @param {string} _ @param {string} hex */
+const asciiFromEscape = (_, hex) => String.fromCharCode(parseInt(hex, 16));
 
 // Any authority works: the check compares pathnames, which resolve the same
 // under all of them.
@@ -64,6 +76,16 @@ export function handleRequest(res, req) {
 	// 9.5% - so the lookups are not what makes the walk expensive.
 
 	const pathname = req.getUrl();
+	const query = req.getQuery();
+
+	// Two things RFC 9112 does not allow in a target, refused in the path and
+	// the query on every lane - the built asset below included: a byte outside
+	// visible ASCII and a fragment. uWS hands raw bytes over as decoded
+	// characters, where node's parser refuses them, and keeps a `#` in the path
+	// it routes on, so `/healthz#frag` would miss the probe and reach the app's
+	// router truncated. bench/40 put the query read and the scan inside the
+	// noise of a built-asset answer.
+	if (invalidRequestTarget(pathname, query)) return send400(res, method === 'head');
 
 	// === STATIC FILE FAST PATH ===
 	// Minimum work: 1 Map lookup + 7 header reads (negotiation, the entity
@@ -108,8 +130,6 @@ export function handleRequest(res, req) {
 		return send400(res, method === 'head');
 	}
 
-	// Build full URL only for SSR - static files never reach here
-	const query = req.getQuery();
 	// One map lookup, exactly as before, for every method this adapter carries.
 	// Only a method the map does not know pays the forbidden-set check, so the
 	// hot path is unchanged.
@@ -149,41 +169,53 @@ export function handleRequest(res, req) {
 	// bare prefix on the catch-all, so treating the bare prefix as reserved here
 	// would refuse a resolved target whose direct spelling is served.
 	//
-	// The scan decides almost every request for free, and what bounds it to
-	// these five characters is that a path can arrive in the prefix only by
-	// DROPPING a segment - a dot segment (`.`, or `%2e`), a backslash (a path
-	// separator for a special scheme, so `..\` and `\` both count), or one of
-	// the whitespace characters the URL parser strips - or by SPELLING one of
-	// the prefix's own characters percent-encoded (`%`). Everything else the
-	// parser rewrites only lengthens a segment, and a `#` truncates without
-	// touching the head, so neither can carry a target into a prefix its raw
-	// form was outside of.
-	if (ADMIN_PREFIX !== null && adminRouteMounted() && MAY_RESOLVE.test(pathname) &&
-		!pathname.startsWith(ADMIN_PREFIX)) {
-		try {
+	// The scans decide almost every request for free, and what bounds them is
+	// that a path can arrive in the prefix only by DROPPING a segment - a dot
+	// segment (`.`, `..`, or either spelled with `%2e`) or a backslash (a path
+	// separator for a special scheme, so `..\` and `\` both count) - or by
+	// SPELLING one of the prefix's own characters percent-encoded (`%`).
+	// Everything else the parser rewrites only lengthens a segment or encodes
+	// a character the prefix does not contain, and the whitespace it strips
+	// and the `#` it truncates at are refused by the target check above.
+	//
+	// The adapter's EXACT mounts - the probes, the auth path, the waiting-room
+	// pages, the WebSocket path where a ceiling answers its GETs - are routed
+	// on the raw target the same way, so `/x/../healthz` misses the health
+	// route and would reach the app's router as `/healthz`, and so would
+	// `/healthz/__data.json`, which SvelteKit answers for the path in front of
+	// the suffix. A target that resolves, decodes or strips onto one of them
+	// without being spelled as it is refused here too.
+	if (entersExactMount(pathname, pathname, query)) return send400(res, METHOD === 'HEAD');
+	const dropsSegment = DROPS_SEGMENT.test(pathname);
+	if (dropsSegment || pathname.includes('%')) {
+		let resolved = pathname;
+		if (dropsSegment) {
 			// Pathname resolution does not depend on the authority, so this uses
 			// a fixed base rather than deriving the request's own origin (which
 			// reads proxy headers and can throw). Concatenated, not passed as a
 			// base, so a `//host` target resolves as a path and not as an
 			// authority.
-			const resolved = new URL(RESOLUTION_BASE + pathname).pathname;
-			if (resolved.startsWith(ADMIN_PREFIX)) return send400(res, METHOD === 'HEAD');
-			// Decoded the STRONGER way, with `decodeURIComponent` rather than the
-			// router's gentler decode, because the two lanes below disagree: the
-			// prerendered lookup decodes this way, while SvelteKit's router
-			// leaves `%2F` encoded. Decoding the stronger way covers both -
-			// anything the router would place inside the prefix lands there
-			// under this reading too - and what it refuses beyond the router's
-			// reading is exactly a target spelling the reserved prefix with an
-			// encoded separator, which no app path needs.
-			//
-			// A target neither call can parse is left to the lanes below, which
-			// read the same characters and answer for them there; the only
-			// decision made here is the prefix one.
-			if (resolved.includes('%') && decodeURIComponent(resolved).startsWith(ADMIN_PREFIX)) {
-				return send400(res, METHOD === 'HEAD');
-			}
-		} catch { /* not a path this check can rule on */ }
+			try { resolved = new URL(RESOLUTION_BASE + pathname).pathname; } catch { /* read as sent */ }
+		}
+		const guardsPrefix = ADMIN_PREFIX !== null && adminRouteMounted() && !pathname.startsWith(ADMIN_PREFIX);
+		if (entersExactMount(resolved, pathname, query)) return send400(res, METHOD === 'HEAD');
+		if (guardsPrefix && resolved.startsWith(ADMIN_PREFIX)) return send400(res, METHOD === 'HEAD');
+		if (resolved.includes('%')) {
+			// Decoded the STRONGER way, `%2F` included, rather than the router's
+			// gentler decode, because the two lanes below disagree: the
+			// prerendered lookup decodes `%2F`, while SvelteKit's router leaves it
+			// encoded. Decoding the stronger way covers both - anything the router
+			// would place inside the prefix lands there under this reading too -
+			// and what it refuses beyond the router's reading is exactly a target
+			// spelling the reserved prefix with an encoded separator, which no app
+			// path needs. An escape nothing can decode stays as it is, so a
+			// target ending in one is still judged by the rest of its spelling:
+			// SvelteKit answers such a path 400 itself, but only after the app's
+			// `handle` hook has run on it.
+			const decodedPath = resolved.replace(ASCII_ESCAPE, asciiFromEscape);
+			if (entersExactMount(decodedPath, pathname, query)) return send400(res, METHOD === 'HEAD');
+			if (guardsPrefix && decodedPath.startsWith(ADMIN_PREFIX)) return send400(res, METHOD === 'HEAD');
+		}
 	}
 
 	// === PRERENDERED CHECK ===
@@ -204,6 +236,41 @@ export function handleRequest(res, req) {
 				req.getHeader('if-match'), req.getHeader('if-unmodified-since'), req.getHeader('if-modified-since'));
 		if (served) {
 			return;
+		}
+
+		// A static file whose name a browser percent-encodes, asked for that way:
+		// the fast path above matched the target as sent. Traced as the static
+		// answer it is, and only when there is a file to serve.
+		const encodedFile = pathname.includes('%') ? encodedStaticEntry(pathname) : undefined;
+		if (encodedFile !== undefined) {
+			if (!tracingEnabled) {
+				return serveStatic(
+					res, encodedFile,
+					req.getHeader('accept-encoding'),
+					req.getHeader('if-none-match'),
+					METHOD === 'HEAD',
+					req.getHeader('range'),
+					req.getHeader('if-range'),
+					req.getHeader('if-match'),
+					req.getHeader('if-unmodified-since'),
+					req.getHeader('if-modified-since')
+				);
+			}
+			return traceOperation('adapter.http.static', {
+				kind: 'server',
+				parent: requestTraceContext(req),
+				attributes: { 'http.request.method': METHOD, 'http.route.type': 'static' }
+			}, () => serveStatic(
+				res, encodedFile,
+				req.getHeader('accept-encoding'),
+				req.getHeader('if-none-match'),
+				METHOD === 'HEAD',
+				req.getHeader('range'),
+				req.getHeader('if-range'),
+				req.getHeader('if-match'),
+				req.getHeader('if-unmodified-since'),
+				req.getHeader('if-modified-since')
+			));
 		}
 	}
 
