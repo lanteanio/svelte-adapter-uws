@@ -61,7 +61,12 @@ async function bootDev(pluginOptions = {}) {
 	await plugin.configureServer({
 		httpServer,
 		middlewares: {
-			use(path, fn) { middleware.push({ path, fn }); }
+			// Connect also takes `use(fn)`, mounted at the empty route, which is
+			// how the plugin registers its WebSocket-path handshake check.
+			use(path, fn) {
+				if (typeof path === 'function') middleware.push({ path: '', fn: path });
+				else middleware.push({ path, fn });
+			}
 		},
 		config: {
 			root: process.cwd(),
