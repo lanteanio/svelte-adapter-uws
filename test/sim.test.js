@@ -126,6 +126,29 @@ describe('runSim - custom scenario + handler', () => {
 		// only the allowed topic is actually subscribed
 		expect(r.finalState.topicCounts).toEqual({ allowed: 1 });
 	});
+
+	it('synthesizes a conforming handshake, and a caller\'s own headers still reach the handshake rule', async () => {
+		/** @type {Array<{ state: string, status: string | null }>} */
+		const outcomes = [];
+		await runSim({
+			seed: 'handshake',
+			clients: 0,
+			scenario: async (api) => {
+				const plain = api.connect();
+				const badKey = api.connect({ headers: { 'sec-websocket-key': 'not-a-key' } });
+				const oldVersion = api.connect({ headers: { 'Sec-WebSocket-Version': '8' } });
+				await api.advance();
+				for (const c of [plain, badKey, oldVersion]) {
+					outcomes.push({ state: c.state, status: c.rejection ? String(c.rejection.status).slice(0, 3) : null });
+				}
+			}
+		});
+		expect(outcomes).toEqual([
+			{ state: 'open', status: null },
+			{ state: 'rejected', status: '400' },
+			{ state: 'rejected', status: '426' }
+		]);
+	});
 });
 
 describe('runSim - the socket double closes as uWS does', () => {

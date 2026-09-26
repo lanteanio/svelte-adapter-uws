@@ -12,6 +12,15 @@ import { closeFrameReason } from './utils/close-frame.js';
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// A conforming RFC 6455 handshake. The key is the RFC's own sample nonce: fixed,
+// so a run stays a function of its seed.
+const SIM_HANDSHAKE = Object.freeze({
+	upgrade: 'websocket',
+	connection: 'Upgrade',
+	'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+	'sec-websocket-version': '13'
+});
+
 /**
  * Normalize a wire payload to an ArrayBuffer (what the dispatch's `message`
  * handler reads: `.byteLength`, `new Uint8Array(msg)`, `Buffer.from(msg)`).
@@ -203,7 +212,9 @@ export function createInMemoryApp(opts) {
 	 * @param {{ headers?: Record<string, string>, query?: string }} [connectOpts]
 	 */
 	function connect(connectOpts = {}) {
-		const headers = connectOpts.headers || {};
+		// The handshake a browser sends, which the upgrade route refuses without;
+		// a caller's own headers replace any of it, a malformed handshake included.
+		const headers = { ...SIM_HANDSHAKE, ...(connectOpts.headers || {}) };
 		/** @type {Array<{ payload: string | Uint8Array, isBinary: boolean }>} */
 		const received = [];
 		/** @type {Array<(frame: { payload: string | Uint8Array, isBinary: boolean }) => void>} */

@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Clients that send a nonstandard handshake: a hand-rolled client, a proxy that rewrites `Connection` or `Upgrade`, or a client asking for WebSocket version 8, which `vite dev` accepted. Browsers and the `ws` library send conforming handshakes.
   - **Action:** None for browser and `ws` clients. A client refused here needs one `Upgrade: websocket` line, a `Connection` that lists `upgrade`, one base64 key of 16 bytes and `Sec-WebSocket-Version: 13`.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** The refusal comes before the capacity, origin, rate-limit and application checks, so a malformed handshake is never answered or counted as load; it is counted as `upgrade_rejected_total{reason="malformed_handshake"}`, and a 426 carries `Sec-WebSocket-Version: 13`. Letter case is ignored, and only spaces and tabs are trimmed. A GET to the WebSocket path that is not a handshake, or an upgrade to another protocol, is answered as before. `createTestServer` and `vite dev` refuse the same handshakes with the same statuses, except that `vite dev` refuses an upgrade to another protocol on that path with 400, as its WebSocket library already did.
+  - **Compatibility:** The refusal comes before the capacity, origin, rate-limit and application checks, so a malformed handshake is never answered or counted as load; it is counted as `upgrade_rejected_total{reason="malformed_handshake"}`, and a 426 carries `Sec-WebSocket-Version: 13`. Letter case is ignored, and only spaces and tabs are trimmed. A GET to the WebSocket path that is not a handshake, or an upgrade to another protocol, is answered as before. `createTestServer` and `vite dev` refuse the same handshakes with the same statuses, except that `vite dev` refuses an upgrade to another protocol on that path with 400, as its WebSocket library already did. Simulator clients send a conforming handshake, so an `upgrade` hook under `svelte-adapter-uws/sim` now sees `upgrade`, `connection`, `sec-websocket-key` and `sec-websocket-version`, and a scenario's own `connect` headers replace them.
   - **Detail:** [Changed engineering detail](#changed).
 - **Changed: the flow-control window narrows along a ramp as memory fills, not in one step.** Past a `heap_used_ratio` of 0.7 a flow-controlled connection's window fell from the full 256 requests to under a third at once; it now ramps down, reaching half at the default 0.85 MEMORY threshold and a twentieth near the wall.
   - **Affects:** Clients that opt into internal flow control, on workers whose memory reading passes 0.7.
@@ -241,7 +241,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   costs 38 ns, and 133 ns with the read of nine header lines under Node.
   `test/ws-handshake-real.test.js` drives the native runtime's raw-socket
   cases against all three surfaces and pins the order against capacity under
-  siege.
+  siege. The simulator runs the test server's upgrade route, so its clients
+  now send a conforming handshake (the RFC 6455 sample key, fixed so a run
+  stays a function of its seed), and headers a scenario passes to `connect`
+  replace any of it; the golden corpus reproduces unchanged.
 
 - **`ws.end()` follows one close rule on every surface.** `closeFrameReason`
   (utils/close-frame.js) takes the code only from 1000-1003, 1007-1014 and
