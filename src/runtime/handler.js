@@ -264,8 +264,8 @@ const route = (method, ...args) => {
 // Tell the shared header collector which names THIS deployment reads as a
 // single value, before anything listens. Repeated lines of a header the
 // collector does not know about are comma-joined, which is right for a chain
-// and wrong for these: `get_origin` throws on a joined protocol or builds an
-// unparseable URL from a joined host, and the client-IP resolver takes a joined
+// and wrong for these: `get_origin` refuses a joined protocol, host or port
+// (every request would answer 400), and the client-IP resolver takes a joined
 // address header's LEADING bytes, which are the client's rather than the
 // proxy's. The names are operator-chosen, so only this layer knows them.
 // Declared here rather than at each collection site because handler/request.js
@@ -1454,9 +1454,10 @@ if (WS_ENABLED) {
 			// place: an unguarded throw escapes the uWS callback as a synchronous
 			// exception, so no response is ever written and the request hangs
 			// until the client gives up.
-			// The reachable trigger is a client-supplied PROTOCOL_HEADER /
-			// PORT_HEADER value on a deployment configured for one; a Host-less
-			// request cannot reach here, because uWS answers that itself.
+			// The reachable trigger is any Host value that is not an authority,
+			// or a configured proxy header's value that is not a host, port or
+			// scheme; a Host-less request cannot reach here, because uWS answers
+			// that itself.
 			// Resolved BEFORE the state object and the body reader exist, so
 			// refusing costs nothing to unwind. The admin route carries the same
 			// guard for the same reason.

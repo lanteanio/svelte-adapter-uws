@@ -150,9 +150,9 @@ export function isFramingHeader(header) {
  *
  *   - `get_origin` (handler/config.js) rejects a protocol that is not exactly
  *     "http" or "https", so two `x-forwarded-proto: https` lines joined into
- *     "https, https" throw on EVERY request of a deployment configured exactly
- *     as the README recommends. The host is worse: "a.test, a.test" builds a
- *     request URL that `new Request()` refuses outright.
+ *     "https, https" would refuse EVERY request of a deployment configured
+ *     exactly as the README recommends. A joined host, "a.test, a.test", is
+ *     not an authority and is refused the same way.
  *   - the client-IP resolver's non-chain branch (utils/trusted-proxies.js)
  *     takes the value verbatim and, over its length bound, truncates KEEPING
  *     THE LEADING bytes because for a single-address header those are the

@@ -279,4 +279,42 @@ describeUWS('platform.introspect transport snapshot', () => {
 		expect(await raw('/__realtime/a/../introspect')).toBe(200);
 		expect(seen).toEqual(['/__realtime/introspect']);
 	});
+
+	// The Host value is the URL's authority here as it is in production, so one
+	// carrying a path would hand the handler a pathname the request line never
+	// named - another admin path, or one outside the prefix.
+	it('refuses a Host that is not an authority, as production does', async () => {
+		/** @type {string[]} */
+		const seen = [];
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			handler: {
+				admin: async (request) => {
+					seen.push(new URL(request.url).pathname);
+					return new Response('reached', { status: 200 });
+				}
+			}
+		});
+		const port = Number(new URL(server.url).port);
+		const net = await import('node:net');
+
+		/** @param {string} host */
+		const raw = (host) => new Promise((resolve) => {
+			let buf = '';
+			const sock = net.connect(port, '127.0.0.1', () => {
+				sock.write(`GET /__realtime/introspect HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+			});
+			sock.setTimeout(5000, () => { sock.destroy(); resolve(0); });
+			sock.on('data', (d) => { buf += d.toString(); });
+			sock.on('close', () => resolve(Number(buf.split('\r\n')[0].split(' ')[1] || 0)));
+			sock.on('error', () => resolve(0));
+		});
+
+		for (const host of ['a/__realtime/other?', 'a/reflect?', 'a#', '']) {
+			expect(await raw(host), JSON.stringify(host)).toBe(400);
+		}
+		expect(seen, 'a moved path reached the app handler').toEqual([]);
+		expect(await raw(`127.0.0.1:${port}`)).toBe(200);
+		expect(seen).toEqual(['/__realtime/introspect']);
+	});
 });

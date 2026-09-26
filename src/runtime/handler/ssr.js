@@ -7,7 +7,7 @@ import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
-import { PayloadTooLargeError, send413, send500, endText, endBodyless } from './http-helpers.js';
+import { PayloadTooLargeError, send400, send413, send500, endText, endBodyless } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { declaresBodyPastCap, isDedupBufferable, readBodyUpTo } from './ssr-dedup.js';
@@ -173,7 +173,16 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 	const requestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 	const headOnly = method === 'HEAD';
 	try {
-		const base_origin = origin || get_origin(headers);
+		// A request whose Host (or configured proxy header) cannot be part of an
+		// origin is the client's fault, and refused before any body is read, as
+		// the admin and auth lanes refuse it.
+		let base_origin;
+		try {
+			base_origin = origin || get_origin(headers);
+		} catch {
+			send400(res, headOnly);
+			return;
+		}
 
 		// Parse Content-Length once for both the 413 check and the small-body
 		// pre-allocation hint. Keep NaN when the header is absent or non-numeric.
@@ -194,14 +203,24 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 				? undefined
 				: readBody(res, body_size_limit, state, contentLengthHint);
 
-		const request = new Request(base_origin + url, {
-			method,
-			headers,
-			body,
-			signal: state.signal,
-			// @ts-expect-error
-			duplex: 'half'
-		});
+		// An origin that passed the checks above can still name a host the URL
+		// parser refuses - a port past 65535, a malformed `xn--` label - and the
+		// client sent that too. Nothing has asked for the body yet, so uWS reads
+		// past it to the next request as it does behind the 413 above.
+		let request;
+		try {
+			request = new Request(base_origin + url, {
+				method,
+				headers,
+				body,
+				signal: state.signal,
+				// @ts-expect-error
+				duplex: 'half'
+			});
+		} catch {
+			send400(res, headOnly);
+			return;
+		}
 
 		// Branch at definition time on the module-level constant address_header.
 		// In the common case (no proxy), the closure captures only remoteAddress

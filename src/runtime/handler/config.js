@@ -1,12 +1,13 @@
 // Substituted by the adapter's build step; free identifiers until then.
 /* global WS_ENABLED */
 /* global WS_OPTIONS */
+/* global ENV_PREFIX */
 import uWS from 'uWebSockets.js';
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { env } from '../env.js';
 import { wsModule } from '../ws-handler-bridge.js';
-import { parse_as_bytes, parse_origin } from '../utils.js';
+import { parse_as_bytes, parse_origin, originFromHeaders, OriginHeaderError, refusedHeaderSetting } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { createTrustedProxyMatcher, createClientIpResolver } from '../utils/trusted-proxies.js';
 
@@ -170,8 +171,20 @@ export const wsDebug = WS_ENABLED && env('WS_DEBUG', '') === '1';
 // when no hook is registered.
 export const closeHookRegistered = WS_ENABLED && !!wsModule.close;
 
+/** Where `get_origin` reads the origin from. Default scheme: 'https' for SSLApp. */
+const ORIGIN_SOURCE = Object.freeze({
+	isTls: is_tls,
+	protocolHeader: protocol_header,
+	hostHeader: host_header,
+	portHeader: port_header
+});
+
+let warnedRefusedProxyHeader = false;
+
 /**
- * Construct the origin from request headers.
+ * Construct the origin from request headers. Throws an `OriginHeaderError`
+ * for a value that cannot be part of one, and every lane that calls this
+ * answers that 400.
  *
  * WARNING: PROTOCOL_HEADER / HOST_HEADER / PORT_HEADER are trusted as-is.
  * Only use these behind a trusted reverse proxy that overwrites the headers.
@@ -181,35 +194,22 @@ export const closeHookRegistered = WS_ENABLED && !!wsModule.close;
  * @returns {string}
  */
 export function get_origin(headers) {
-	// Default protocol matches the app type: 'https' for SSLApp, 'http' for App.
-	const default_protocol = is_tls ? 'https' : 'http';
-	const protocol = protocol_header
-		? decodeURIComponent(headers[protocol_header] || default_protocol)
-		: default_protocol;
-
-	if (protocol !== 'http' && protocol !== 'https') {
-		throw new Error(
-			`The ${protocol_header} header specified '${protocol}' which is not a valid protocol. Only 'http' and 'https' are supported.`
-		);
+	try {
+		return originFromHeaders(headers, ORIGIN_SOURCE);
+	} catch (err) {
+		// A refused CONFIGURED header is most often the proxy writing it
+		// wrong, and then every request is answered 400 - say so once, with
+		// the setting that names it. A refused Host header is only the client's.
+		if (!warnedRefusedProxyHeader && err instanceof OriginHeaderError) {
+			const setting = refusedHeaderSetting(err.header, ORIGIN_SOURCE, ENV_PREFIX);
+			if (setting !== null) {
+				warnedRefusedProxyHeader = true;
+				console.warn(`[svelte-adapter-uws] Answered a request 400 Bad Request: ${err.message} ` +
+					`${setting} names it; if every request is refused, check what the proxy in front writes into it.`);
+			}
+		}
+		throw err;
 	}
-
-	const host = (host_header && headers[host_header]) || headers['host'];
-	if (!host) {
-		throw new Error('Could not determine host. The request must have a host header.');
-	}
-
-	const port = port_header ? headers[port_header] : undefined;
-	if (port && isNaN(+port)) {
-		throw new Error(
-			`The ${port_header} header specified ${port} which is an invalid port.`
-		);
-	}
-
-	// Strip existing port from host before appending PORT_HEADER value
-	// (the Host header often includes the port, e.g. "example.com:3000")
-	const hostWithoutPort = port ? host.replace(/:\d+$/, '') : host;
-
-	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
 }
 
 // Whether a WebSocket permessage-deflate compressor is configured (any non-DISABLED

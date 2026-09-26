@@ -142,4 +142,88 @@ describe('Vite fixed-origin parity', () => {
 		// was still loading and returned 403 before the hook existed.
 		expect(await connecting).toBe(101);
 	});
+
+	it('refuses a Host that is not an authority on auth, as production does', async () => {
+		// Counts runs rather than reading the request path: this harness mounts
+		// without stripping the mount path, which Vite's connect does.
+		let ran = 0;
+		const { port } = await bootDev({
+			origin: undefined,
+			handler: {
+				authenticate() { ran++; }
+			}
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		/** @param {string} host */
+		const post = (host) => new Promise((resolve, reject) => {
+			const req = httpRequest({
+				host: '127.0.0.1',
+				port,
+				path: '/__ws/auth',
+				method: 'POST',
+				headers: { host, 'x-requested-with': 'XMLHttpRequest', 'content-length': '0' }
+			}, (res) => {
+				res.resume();
+				res.once('end', () => resolve(res.statusCode));
+			});
+			req.once('error', reject);
+			req.end();
+		});
+
+		// node's parser hands each of these on; the last one passes the
+		// grammar and is refused by the URL parser.
+		for (const host of ['a/other?', 'a#', 'a b', 'xn--zz']) {
+			expect(await post(host), JSON.stringify(host)).toBe(400);
+		}
+		expect(ran, 'the hook ran for a refused Host').toBe(0);
+		expect(await post('127.0.0.1')).toBe(204);
+		expect(ran).toBe(1);
+	});
+
+	it('builds the auth request on ORIGIN and reads no Host, as production does', async () => {
+		/** @type {string[]} */
+		const origins = [];
+		const { port } = await bootDev({
+			origin: 'https://pinned.example',
+			handler: {
+				authenticate({ request }) { origins.push(new URL(request.url).origin); }
+			}
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		for (const host of ['127.0.0.1', 'attacker.example', 'a/other?']) {
+			expect(await postAuth(port, 'https://pinned.example', host), host).toBe(204);
+		}
+		expect(origins).toEqual(['https://pinned.example', 'https://pinned.example', 'https://pinned.example']);
+	});
+
+	it('refuses an absolute-form target on auth, which production never routes', async () => {
+		// Concatenated onto the origin, `http://evil.example/__ws/auth` puts its
+		// scheme into the host and its own host into the path
+		// (`http://127.0.0.1http//evil.example/__ws/auth`).
+		for (const origin of [undefined, 'https://pinned.example']) {
+			let ran = 0;
+			const { port } = await bootDev({
+				origin,
+				handler: { authenticate() { ran++; } }
+			});
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			const status = await new Promise((resolve, reject) => {
+				const req = httpRequest({
+					host: '127.0.0.1',
+					port,
+					path: 'http://evil.example/__ws/auth',
+					method: 'POST',
+					headers: { host: '127.0.0.1', 'x-requested-with': 'XMLHttpRequest', 'content-length': '0' }
+				}, (res) => {
+					res.resume();
+					res.once('end', () => resolve(res.statusCode));
+				});
+				req.once('error', reject);
+				req.end();
+			});
+			expect(status, String(origin)).toBe(400);
+			expect(ran, String(origin)).toBe(0);
+		}
+	});
 });

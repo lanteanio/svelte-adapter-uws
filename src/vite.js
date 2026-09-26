@@ -28,7 +28,7 @@ import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readRawHandshake, WEBSOCKET_VERSION } from './runtime/utils/ws-handshake.js';
-import { invalidRequestTarget } from './runtime/utils/request-target.js';
+import { invalidRequestTarget, invalidHost } from './runtime/utils/request-target.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
@@ -2285,8 +2285,14 @@ export default function uws(options = {}) {
 			server.middlewares.use(wsAuthPath, async (req, res, next) => {
 				// Mirror production, which refuses a target with a raw byte or a `#`
 				// on every route: node's parser has refused the raw bytes already,
-				// and hands a `#` on, which this mount matches through.
-				if (invalidRequestTarget(req.originalUrl || req.url || '', undefined)) {
+				// and hands a `#` on, which this mount matches through. A target
+				// that is not a path (`http://host/__ws/auth`) is refused too: uWS
+				// answers it before any route, and connect keeps its scheme and host
+				// in front of what remains after it strips the mount, so the URL
+				// built below would read that scheme into its host
+				// (`https://pinned.examplehttp//host`).
+				const authTarget = req.originalUrl || req.url || '';
+				if (invalidRequestTarget(authTarget, undefined) || authTarget[0] !== '/') {
 					res.statusCode = 400;
 					res.setHeader('content-type', 'text/plain');
 					res.end('Bad Request');
@@ -2327,6 +2333,18 @@ export default function uws(options = {}) {
 					return;
 				}
 
+				// Without ORIGIN the Host value becomes the request URL's authority,
+				// so one that is not an authority - `a/other?` - would put its own
+				// path in front of the target. Production refuses it before reading
+				// the body, and with ORIGIN set builds the URL on that and reads no
+				// Host at all; node's parser hands such a value on.
+				if (!PINNED_ORIGIN_V && invalidHost(headers['host'])) {
+					res.statusCode = 400;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Bad Request');
+					return;
+				}
+
 				// Read body (capped at 64 KB; the hook rarely needs it).
 				const AUTH_BODY_LIMIT = 64 * 1024;
 				/** @type {Buffer[]} */
@@ -2346,15 +2364,25 @@ export default function uws(options = {}) {
 				}
 				const bodyBuf = Buffer.concat(chunks);
 
-				const origin = (req.socket?.encrypted ? 'https://' : 'http://') + (headers['host'] || 'localhost');
+				// A host that passed the check above can still be one the URL
+				// parser refuses, as production answers it.
+				const origin = PINNED_ORIGIN_V || ((req.socket?.encrypted ? 'https://' : 'http://') + headers['host']);
 				const url = req.url || wsAuthPath;
-				const request = new Request(origin + url, {
-					method: 'POST',
-					headers,
-					body: bodyBuf.length > 0 ? bodyBuf : undefined,
-					// @ts-expect-error
-					duplex: 'half'
-				});
+				let request;
+				try {
+					request = new Request(origin + url, {
+						method: 'POST',
+						headers,
+						body: bodyBuf.length > 0 ? bodyBuf : undefined,
+						// @ts-expect-error
+						duplex: 'half'
+					});
+				} catch {
+					res.statusCode = 400;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Bad Request');
+					return;
+				}
 
 				const cookies = createCookies(headers['cookie'], request.url);
 				const clientIp = req.socket?.remoteAddress || '';

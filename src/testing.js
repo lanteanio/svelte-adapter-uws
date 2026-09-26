@@ -9,7 +9,7 @@ import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createL
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal } from './runtime/handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './runtime/utils/ws-handshake.js';
-import { invalidRequestTarget } from './runtime/utils/request-target.js';
+import { invalidRequestTarget, invalidHost } from './runtime/utils/request-target.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -3789,7 +3789,6 @@ export async function createTestServer(options = {}) {
 			const adminHeaders = {};
 			const ambiguousAdminHeader = collectRequestHeaders(req, adminHeaders);
 			const adminUrl = query ? `${pathname}?${query}` : pathname;
-			const base = 'http://' + (adminHeaders.host || 'localhost');
 
 			let adminAborted = false;
 			// Mirrors production: the handler's request.signal aborts when the client
@@ -3815,6 +3814,13 @@ export async function createTestServer(options = {}) {
 				failAdmin(400, isFramingHeader(ambiguousAdminHeader));
 				return;
 			}
+			// The Host value is the URL's authority, so one carrying a path or a
+			// query would pick the pathname checked below. Refused as production
+			// refuses it; uWS has already refused a request with no Host at all.
+			if (invalidHost(adminHeaders.host)) {
+				failAdmin(400);
+				return;
+			}
 
 			// The route matched the RAW path and building a Request normalizes
 			// dot segments, so `${adminPath}/../reflect` matches this route and
@@ -3824,7 +3830,7 @@ export async function createTestServer(options = {}) {
 			// before any body is read.
 			let adminParsed;
 			try {
-				adminParsed = new URL(base + adminUrl);
+				adminParsed = new URL('http://' + adminHeaders.host + adminUrl);
 			} catch { failAdmin(400); return; }
 			if (adminParsed.pathname !== adminPath &&
 				!adminParsed.pathname.startsWith(adminPath + '/')) {

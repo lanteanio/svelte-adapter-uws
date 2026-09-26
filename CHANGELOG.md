@@ -155,6 +155,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The raw bytes of a non-ASCII name, the only spelling that reached such a file before, are refused as a request target. An escaped spelling that decodes to a file's name is served, escapes in either letter case, except where it escapes a character `decodeURI` keeps encoded, `/`, `#`, `?` and `&` among them, as under the Node adapter; a name written decomposed is also found for its composed spelling. A target that matches a file as sent is served exactly as before, on the same single map lookup.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a Host header carrying a path no longer picks the page the app renders.** With no `ORIGIN` set, the request URL was built from the Host value, so `Host: a/__realtime/x?` routed the app to `/__realtime/x` whatever the request line named, past the reserved admin prefix and a proxy's path rules; it is now refused with 400.
+  - **Affects:** Deployments without `ORIGIN` whose pages, `admin()` handler or `authenticate` hook a client can reach with a Host header of its own choosing. Browsers cannot send one; any scripted client can.
+  - **Action:** None. If every request is now answered 400 and a warning names `HOST_HEADER`, `PORT_HEADER` or `PROTOCOL_HEADER`, fix what the proxy writes into that header.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every Host a browser or mainstream HTTP library sends is served as before: an ASCII host name, IPv4 address or bracketed IPv6 address with an optional port. A host name sent as raw UTF-8 rather than its `xn--` spelling, which the URL parser used to convert, is now refused as RFC 9110 has it. The configured proxy headers are held to the same rule, and a port header to digits. An empty or malformed value used to answer 500 on a page and log `runtime.ssr.failed`; it now answers 400 without the event. `createTestServer`'s admin route and the `vite dev` authentication endpoint refuse the same values, and under `vite dev` with `ORIGIN` set the `authenticate` hook's request is now built on that origin, as in production, rather than on the Host header.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -256,6 +262,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **The Host value is held to the authority grammar where a URL is built from
+  it.** `get_origin` (handler/config.js) now returns `originFromHeaders`
+  (utils/origin.js), which refuses a host that is not `host [":" port]` per
+  RFC 3986 (`invalidHost`, utils/request-target.js), a port header that is not
+  digits and a scheme that is not `http` or `https`, throwing an
+  `OriginHeaderError` that names the header and never its value. The SSR lane
+  answers that 400 before the body is read, where the render catch answered
+  500 and logged `runtime.ssr.failed`, and answers 400 when the URL parser
+  refuses what passed (a port past 65535, a malformed `xn--` label); uWS reads
+  past the unread body to the next request. The admin and auth lanes already
+  answered the throw 400. `get_origin` warns once when the refused header is
+  a configured one, naming it and the setting that configured it
+  (`refusedHeaderSetting`), and never for the Host header itself. Built
+  assets, the probes and a render under `ORIGIN` build no URL from the value
+  and do not read it. `bench/43-origin-host-check-cost.mjs` puts the check at
+  about 17 ns per rendered request, 43 ns behind a proxy, against about 2 us
+  for the Request construction alone. `test/host-header-real.test.js` and
+  `test/host-header-proxy-real.test.js` pin the SSR, admin and auth lanes and
+  the configured headers on the built runtime, the latter on a variant of its
+  own, and the `get_origin` unit tests now drive the shipped function instead
+  of a copy of it.
+
+- **The Origin check, the test server and `vite dev` read the Host the same
+  way.** `isOriginAllowed` merges `PORT_HEADER` into the host through the
+  helper `originFromHeaders` uses, and a same-origin comparison refuses a Host
+  that is not an authority rather than let the merge tidy it (`a:80:`) into
+  one; bench/43 puts that at about 50 ns on the roughly 420 ns check an
+  upgrade or auth POST makes once. The `createTestServer` admin mirror and the
+  `vite dev` auth lane apply `invalidHost`, the latter before reading the body
+  and with its Request construction guarded, and under `ORIGIN` the dev auth
+  lane now builds its request on that origin and reads no Host, as production
+  does. It also refuses an absolute-form target, which uWS answers before any
+  route: connect keeps such a target's scheme and host in front of the path
+  it strips, and the scheme would land in the request URL's host.
 
 - **Exact mounts are refused on a resolved spelling.** `registerRoute` records
   every exact path it registers except a WebSocket route's, and a route that

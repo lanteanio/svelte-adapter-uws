@@ -22,6 +22,9 @@ import {
 	isOriginAllowed,
 	isAuthOriginAccepted,
 	describeUnsafeSameOriginConfig,
+	originFromHeaders,
+	OriginHeaderError,
+	refusedHeaderSetting,
 	addressScope,
 	createUpgradeAdmission,
 	createPollCounter,
@@ -392,22 +395,17 @@ describe('completeEnvelope', () => {
 });
 
 // - get_origin (PORT_HEADER double-port fix) -------------------------------
-// This function uses module-level env state in handler.js so we test
-// a parameterized version here.
+// The runtime's get_origin is originFromHeaders over the env-derived header
+// names, so the function under test here is the production one.
 
+/** @param {Record<string, string>} headers @param {{ is_tls: boolean, protocol_header: string, host_header: string, port_header: string }} config */
 function get_origin(headers, { is_tls, protocol_header, host_header, port_header }) {
-	const default_protocol = is_tls ? 'https' : 'http';
-	const protocol = protocol_header
-		? decodeURIComponent(headers[protocol_header] || default_protocol)
-		: default_protocol;
-
-	const host = (host_header && headers[host_header]) || headers['host'];
-	if (!host) throw new Error('Could not determine host.');
-
-	const port = port_header ? headers[port_header] : undefined;
-	const hostWithoutPort = port ? host.replace(/:\d+$/, '') : host;
-
-	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
+	return originFromHeaders(headers, {
+		isTls: is_tls,
+		protocolHeader: protocol_header,
+		hostHeader: host_header,
+		portHeader: port_header
+	});
 }
 
 describe('get_origin', () => {
@@ -460,7 +458,96 @@ describe('get_origin', () => {
 	});
 
 	it('throws when no host header', () => {
-		expect(() => get_origin({}, defaults)).toThrow('Could not determine host');
+		expect(() => get_origin({}, defaults)).toThrow(OriginHeaderError);
+		expect(() => get_origin({ host: '' }, defaults)).toThrow(OriginHeaderError);
+	});
+
+	it('refuses a host that would end the authority early', () => {
+		// Each of these, concatenated with a target, moves the path, the query,
+		// the fragment or the host itself: `http://a/other?` + `/` is `/other`.
+		// One refused character per entry, so each is the only reason its entry
+		// is refused.
+		const BACKSLASH = String.fromCharCode(92);
+		const TAB = String.fromCharCode(9);
+		for (const host of ['a/other', 'a?', 'a#', 'a' + BACKSLASH + 'other', 'user@a', 'a b', 'a' + TAB + 'b', 'a"b', 'a<b', 'a|b', 'a^b', 'a`b', 'a{b', 'a:b', 'a:80:80', '[::1', '::1', '[::1]x', 'a]', 'a%2', 'a%zz', ':80', 'caf' + String.fromCharCode(0xe9) + '.test']) {
+			let caught = null;
+			try { get_origin({ host }, defaults); } catch (err) { caught = err; }
+			expect(caught, JSON.stringify(host)).toBeInstanceOf(OriginHeaderError);
+			expect(caught.header, JSON.stringify(host)).toBe('host');
+			expect(caught.message, 'names the header, never the value').not.toContain(host);
+		}
+	});
+
+	it('accepts every authority spelling RFC 3986 allows', () => {
+		for (const host of ['example.com', 'EXAMPLE.com.', '127.0.0.1:3000', '[::1]', '[::1]:8080', '[::ffff:127.0.0.1]', 'a:', 'a%41', 'sub_domain.example', "a!$&'()*+,;=-._~b"]) {
+			expect(get_origin({ host }, defaults), host).toBe('http://' + host);
+		}
+	});
+
+	it('judges the host value the URL is built from', () => {
+		const proxied = { ...defaults, host_header: 'x-forwarded-host' };
+		expect(get_origin({ host: 'a/other?', 'x-forwarded-host': 'example.com' }, proxied), 'the Host header is not read').toBe('http://example.com');
+		let caught = null;
+		try { get_origin({ host: 'example.com', 'x-forwarded-host': 'a/other?' }, proxied); } catch (err) { caught = err; }
+		expect(caught?.header).toBe('x-forwarded-host');
+	});
+
+	it('refuses a port header that is not a port number', () => {
+		const ported = { ...defaults, port_header: 'x-forwarded-port' };
+		for (const port of ['80/other', '0x50', '1e3', 'Infinity', '-1', ' 80', '80?']) {
+			let caught = null;
+			try { get_origin({ host: 'example.com', 'x-forwarded-port': port }, ported); } catch (err) { caught = err; }
+			expect(caught?.header, port).toBe('x-forwarded-port');
+		}
+		expect(get_origin({ host: 'example.com:', 'x-forwarded-port': '8443' }, ported), 'an empty host port goes too').toBe('http://example.com:8443');
+		expect(get_origin({ host: '[::1]:3000', 'x-forwarded-port': '8443' }, ported)).toBe('http://[::1]:8443');
+		expect(get_origin({ host: '[::1]', 'x-forwarded-port': '8443' }, ported)).toBe('http://[::1]:8443');
+	});
+
+	it('refuses a protocol header that is not http or https, a malformed escape included', () => {
+		const proto = { ...defaults, protocol_header: 'x-forwarded-proto' };
+		for (const value of ['ftp', 'https, https', 'HTTPS', '%E0%A4%A']) {
+			let caught = null;
+			try { get_origin({ host: 'example.com', 'x-forwarded-proto': value }, proto); } catch (err) { caught = err; }
+			expect(caught?.header, value).toBe('x-forwarded-proto');
+		}
+		expect(get_origin({ host: 'example.com', 'x-forwarded-proto': 'https' }, proto)).toBe('https://example.com');
+		expect(get_origin({ host: 'example.com' }, proto), 'absent falls back to the listener').toBe('http://example.com');
+	});
+
+	it('names the setting behind a refused header, and never blames a proxy for the Host header', () => {
+		const source = { isTls: false, protocolHeader: 'x-forwarded-proto', hostHeader: 'x-forwarded-host', portHeader: 'x-forwarded-port' };
+		expect(refusedHeaderSetting('x-forwarded-proto', source, '')).toBe('PROTOCOL_HEADER');
+		expect(refusedHeaderSetting('x-forwarded-host', source, '')).toBe('HOST_HEADER');
+		expect(refusedHeaderSetting('x-forwarded-port', source, '')).toBe('PORT_HEADER');
+		expect(refusedHeaderSetting('x-forwarded-host', source, 'MYAPP_'), 'spelled as the operator sets it').toBe('MYAPP_HOST_HEADER');
+		expect(refusedHeaderSetting('host', source, '')).toBe(null);
+		// The README's nginx recipe sets HOST_HEADER=host; a refused Host is
+		// still the client's.
+		expect(refusedHeaderSetting('host', { ...source, hostHeader: 'host' }, '')).toBe(null);
+		expect(refusedHeaderSetting('x-other', source, '')).toBe(null);
+		// Every refusal originFromHeaders can throw maps back to its setting.
+		for (const [headers, setting] of [
+			[{ host: 'a', 'x-forwarded-proto': 'ftp' }, 'PROTOCOL_HEADER'],
+			[{ host: 'a', 'x-forwarded-host': 'a/b' }, 'HOST_HEADER'],
+			[{ host: 'a', 'x-forwarded-port': 'x' }, 'PORT_HEADER'],
+			[{ host: 'a/b' }, null]
+		]) {
+			let caught = null;
+			try { originFromHeaders(headers, source); } catch (err) { caught = err; }
+			expect(refusedHeaderSetting(caught.header, source, ''), JSON.stringify(headers)).toBe(setting);
+		}
+	});
+
+	it('builds an origin whose authority is exactly the host it was given', () => {
+		// The property the checks exist for: whatever passes them, the URL parser
+		// reads the whole value as the authority and nothing of it as a path.
+		for (const host of ['example.com', 'a:', 'a%41', "a!$&'()*+,;=-._~b", '[::1]:8080']) {
+			const url = new URL(get_origin({ host }, defaults) + '/routed?q=1');
+			expect(url.pathname, host).toBe('/routed');
+			expect(url.search, host).toBe('?q=1');
+			expect(url.username + url.password, host).toBe('');
+		}
 	});
 });
 
@@ -2520,6 +2607,38 @@ describe('isOriginAllowed', () => {
 				const headers = { host: 'example.com', 'x-forwarded-port': '3000' };
 				expect(isOriginAllowed('http://example.com:3000', headers, ctx)).toBe(true);
 				expect(isOriginAllowed('http://example.com', headers, ctx)).toBe(false);
+			});
+
+			it('merges PORT_HEADER into the host as the request origin does', () => {
+				// With PORT_HEADER set, the Origin check and the origin the request
+				// URL is built on merge the port alike, the Host header's own empty
+				// port included.
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					portHeader: 'x-forwarded-port',
+					isTls: true
+				};
+				for (const host of ['example.com', 'example.com:', 'example.com:3000']) {
+					const headers = { host, 'x-forwarded-port': '8443' };
+					const origin = originFromHeaders(headers, { isTls: true, protocolHeader: '', hostHeader: '', portHeader: 'x-forwarded-port' });
+					expect(origin, host).toBe('https://example.com:8443');
+					expect(isOriginAllowed(origin, headers, ctx), host).toBe(true);
+				}
+			});
+
+			it('refuses a Host that is not an authority, however the port merge would tidy it', () => {
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					portHeader: 'x-forwarded-port',
+					isTls: true
+				};
+				// The merge and the default-port strip turn `a:80:` into `a:80`, and
+				// `a:443:` over plain http into `a:443`.
+				expect(isOriginAllowed('https://a:80', { host: 'a:80:', 'x-forwarded-port': '443' }, ctx)).toBe(false);
+				expect(isOriginAllowed('http://a:443', { host: 'a:443:', 'x-forwarded-port': '80' }, { ...ctx, isTls: false })).toBe(false);
+				expect(isOriginAllowed('https://a', { host: 'a:', 'x-forwarded-port': '443' }, ctx), 'an empty port is an authority').toBe(true);
 			});
 
 			it('falls back to is_tls default when PROTOCOL_HEADER is set but unset', () => {

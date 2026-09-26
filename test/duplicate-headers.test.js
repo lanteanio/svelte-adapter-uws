@@ -196,12 +196,9 @@ describeUWS('a repeated request header line at the built runtime', () => {
 			//
 			// This one pins the OUTCOME, not the guard: a Host-less request is
 			// refused by uWS's own parser before the route runs - measured, the
-			// status is 400 with the guard removed too, and the SSR path (which
-			// answers 500 when the origin builder throws) says 400 here as well.
-			// The reachable trigger is a client-supplied PROTOCOL_HEADER /
-			// PORT_HEADER value, which needs a deployment configured for one; the
-			// guard is here regardless, because the route must not be the one
-			// place where a throw has nowhere to go.
+			// status is 400 with the guard removed too, and the SSR path says 400
+			// here as well. The guard itself is driven by a Host value the origin
+			// builder refuses, in host-header-real.test.js.
 			const { status } = await rawRequest(server.port, [
 				'POST /__ws/auth HTTP/1.1',
 				'Content-Length: 0'

@@ -169,6 +169,19 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Byte-identical to `hookcrash`, in its own output directory so its own
+	// module, for the reason given at `addrhdr` below: its suite boots with
+	// HOST_HEADER, PORT_HEADER and PROTOCOL_HEADER set, which the runtime reads at
+	// module eval, and the suites booting `hookcrash` need them absent.
+	hookcrashproxy: {
+		out: 'build-hook-crash-proxy',
+		handler: './src/hooks.ws.hookcrash.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// An `attribution` export whose behavior is selected per connection through
 	// upgrade-header-derived userData: healthy ids, an unattributed default, an
 	// invalid id, and a throwing resolver. The refusal (close 1008 before the

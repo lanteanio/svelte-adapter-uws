@@ -1062,7 +1062,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// upgrade-admission.js loses the string permit key, and handler.js promotes the
 	// carried values from the Symbols. Key names only; no bytes are copied or
 	// written differently.
-	ingress: '45ea563e8638647e6ecaef53fe4c9a900c885eade6ca860d5b4c9a6ebc9da564',
+	//
+	// Re-pinned for the Host check. utils/origin.js gains originFromHeaders and
+	// OriginHeaderError, which build the request origin from header values and
+	// refuse a host, port or scheme that cannot be part of one, and
+	// refusedHeaderSetting, which names the setting behind a refused header; it
+	// imports invalidHost, a regex test of the host value, from
+	// utils/request-target.js. isOriginAllowed merges PORT_HEADER through the same
+	// withPort helper and refuses a Host that is not an authority. In the platform
+	// graph handler/config.js's get_origin also calls originFromHeaders and warns
+	// once about a refused proxy header. Header strings are read and compared
+	// only; no bytes are copied or written differently.
+	ingress: 'cd312f042fde77b2bd2a94f36a896b2303f0bf2e234c00c16266290130eddfa8',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1997,7 +2008,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// upgrade-admission.js loses the string permit key, and handler.js promotes the
 	// carried values from the Symbols. Key names only; no bytes are copied or
 	// written differently.
-	platform: '75df5890fb9656b7d12e30ab1613d93263c4ff0e162f57996e77bddf59e6fbda',
+	//
+	// Re-pinned for the Host check. utils/origin.js gains originFromHeaders and
+	// OriginHeaderError, which build the request origin from header values and
+	// refuse a host, port or scheme that cannot be part of one, and
+	// refusedHeaderSetting, which names the setting behind a refused header; it
+	// imports invalidHost, a regex test of the host value, from
+	// utils/request-target.js. isOriginAllowed merges PORT_HEADER through the same
+	// withPort helper and refuses a Host that is not an authority. In the platform
+	// graph handler/config.js's get_origin also calls originFromHeaders and warns
+	// once about a refused proxy header. Header strings are read and compared
+	// only; no bytes are copied or written differently.
+	platform: 'dc5c2d60b5efe0c4dff003a21ce6581cbe05167cf6d5ff23d6b7ecfc105c6791',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2377,7 +2399,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// upgrade-admission.js loses the string permit key, and handler.js promotes the
 	// carried values from the Symbols. Key names only; no bytes are copied or
 	// written differently.
-	'wire-fanout': 'cc657606234734429731051f54621b86d7e74f55ffd63acae47f20cc71282c16',
+	//
+	// Re-pinned for the Host check. utils/origin.js gains originFromHeaders and
+	// OriginHeaderError, which build the request origin from header values and
+	// refuse a host, port or scheme that cannot be part of one, and
+	// refusedHeaderSetting, which names the setting behind a refused header; it
+	// imports invalidHost, a regex test of the host value, from
+	// utils/request-target.js. isOriginAllowed merges PORT_HEADER through the same
+	// withPort helper and refuses a Host that is not an authority. In the platform
+	// graph handler/config.js's get_origin also calls originFromHeaders and warns
+	// once about a refused proxy header. Header strings are read and compared
+	// only; no bytes are copied or written differently.
+	'wire-fanout': '87e1f225a0b84d0ff0027f2c72403b045bd383e4563e041182bede2f40070678',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
