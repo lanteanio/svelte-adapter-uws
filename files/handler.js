@@ -43,6 +43,16 @@ const METHODS = /** @type {Record<string, string>} */ ({
 	delete: 'DELETE', patch: 'PATCH', options: 'OPTIONS'
 });
 
+// The fetch specification forbids exactly these three methods, so `new Request()`
+// throws a TypeError for them, which surfaced as a 500 plus an SSR error in the
+// log for every probe. They can never reach an application route, so they are
+// refused with the status RFC 9110 requires. Checked only for a method METHODS
+// does not carry, so no supported method pays for it.
+const FORBIDDEN_METHODS = new Set(['connect', 'trace', 'track']);
+
+// RFC 9110: a 405 MUST carry Allow. These are the methods METHODS carries.
+const ALLOW_HEADER = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
+
 // - Error response helpers ---------------------------------------------------
 
 /** @param {import('uWebSockets.js').HttpResponse} res */
@@ -51,6 +61,16 @@ function send400(res) {
 		res.writeStatus('400 Bad Request');
 		res.writeHeader('content-type', 'text/plain');
 		res.end('Bad Request');
+	});
+}
+
+/** @param {import('uWebSockets.js').HttpResponse} res */
+function send405(res) {
+	res.cork(() => {
+		res.writeStatus('405 Method Not Allowed');
+		res.writeHeader('allow', ALLOW_HEADER);
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Method Not Allowed');
 	});
 }
 
@@ -2516,7 +2536,9 @@ function handleRequest(res, req) {
 
 	// Build full URL only for SSR - static files never reach here
 	const query = req.getQuery();
-	const METHOD = METHODS[method] || method.toUpperCase();
+	const mapped = METHODS[method];
+	if (mapped === undefined && FORBIDDEN_METHODS.has(method)) return send405(res);
+	const METHOD = mapped || method.toUpperCase();
 
 	// === PRERENDERED CHECK ===
 	// Lightweight: only 4 header reads, no full collection, no remoteAddress decode

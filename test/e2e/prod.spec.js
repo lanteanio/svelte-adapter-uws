@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import http from 'node:http';
+import net from 'node:net';
 import WebSocket from 'ws';
 import { startBrowserCoverage, stopBrowserCoverage } from './browser-coverage.js';
 import { PROD_PORT } from './ports.js';
@@ -81,6 +83,54 @@ test.describe('SSR and static files (production)', () => {
 	test('health check endpoint', async ({ request }) => {
 		const res = await request.get('/healthz');
 		expect(res.status()).toBe(200);
+	});
+
+	// Backpressure is a socket-buffer event, not a client-speed one, and the
+	// uWebSockets.js build 0.5.8 pinned lost the writable wakeup after the first
+	// one: the writer waited out its drain deadline and closed the socket on a
+	// body cut at a buffer boundary. A cookie takes the credentialed lane, which
+	// streams rather than buffers. 16 MiB read with a pause per data event
+	// drives the writer through backpressure many times on loopback.
+	test('delivers a streamed body whole through backpressure', async () => {
+		test.setTimeout(60000);
+		const result = await new Promise((resolve, reject) => {
+			const req = http.request(`${BASE_URL}/stream-big?mb=16`, { headers: { cookie: 'a=1' } }, (res) => {
+				let bytes = 0;
+				res.on('data', (chunk) => {
+					bytes += chunk.length;
+					res.pause();
+					setTimeout(() => res.resume(), 5);
+				});
+				res.on('end', () => resolve({ status: res.statusCode, bytes, complete: res.complete }));
+				res.on('aborted', () => resolve({ status: res.statusCode, bytes, complete: false }));
+				res.on('error', () => resolve({ status: res.statusCode, bytes, complete: false }));
+			});
+			req.on('error', reject);
+			req.end();
+		});
+		expect(result.status).toBe(200);
+		expect(result.complete).toBe(true);
+		expect(result.bytes).toBe(16 * 1024 * 1024);
+	});
+
+	// `new Request()` throws for these three, which answered 500 with an SSR
+	// error in the log. Raw socket, because HTTP clients refuse to send them.
+	// uWS answers a target that is not a path itself, so CONNECT goes to `/`.
+	test('refuses TRACE, TRACK and CONNECT with 405 and Allow', async () => {
+		for (const method of ['TRACE', 'TRACK', 'CONNECT']) {
+			const head = await new Promise((resolve) => {
+				let buf = '';
+				const sock = net.connect(PORT, '127.0.0.1', () => {
+					sock.write(`${method} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+				});
+				sock.setTimeout(5000, () => sock.destroy());
+				sock.on('data', (d) => { buf += d.toString('latin1'); });
+				sock.on('close', () => resolve(buf.slice(0, buf.indexOf('\r\n\r\n') + 1)));
+				sock.on('error', () => {});
+			});
+			expect(head.split('\r\n')[0], method).toMatch(/^HTTP\/1\.1 405/);
+			expect(head.toLowerCase(), method).toContain('allow: get, head, post, put, patch, delete, options');
+		}
 	});
 });
 

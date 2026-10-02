@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "publishConfig": {
     "tag": "latest"
   },
@@ -172,6 +172,6 @@
     "ws": "^8.19.0"
   },
   "optionalDependencies": {
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.67.0"
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"
   }
 }

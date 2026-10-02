@@ -102,7 +102,7 @@ npm install
 
 ```bash
 npm install svelte-adapter-uws
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install uNetworking/uWebSockets.js#v20.69.0
 ```
 
 > **Note:** uWebSockets.js is a native C++ addon installed directly from GitHub, not from npm. It may not compile on all platforms. Check the [uWebSockets.js README](https://github.com/uNetworking/uWebSockets.js) if you have issues.
@@ -3773,7 +3773,7 @@ uWebSockets.js is a native C++ addon. It's installed from GitHub, not npm, and n
 
 ```bash
 # Make sure you're using the right install command (no uWebSockets.js@ prefix)
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install uNetworking/uWebSockets.js#v20.69.0
 ```
 
 **On Windows:** Make sure you have the Visual C++ Build Tools installed. You can get them from the [Visual Studio Installer](https://visualstudio.microsoft.com/downloads/) (select "Desktop development with C++").

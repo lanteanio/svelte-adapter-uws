@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-10-02
+
+### Fixed
+
+- **A streamed response is no longer cut off after the first backpressure event: `uWebSockets.js` pinned to v20.69.0 (was v20.67.0).** Under v20.67.0 the chunk writer's writable wakeup was lost after the first time the socket buffer filled, so it waited out its drain deadline and closed the socket on a body cut at a buffer boundary. Backpressure is a socket-buffer event, not a slow-client one: on a real link any streamed body past a few hundred kilobytes reaches it at any client speed. A request carrying a cookie or an `Authorization` header takes the streaming write, so downloads and exports for logged-in users were the ones cut. v20.69.0 carries the upstream fix and is the build the 0.6 line already uses; the adapter's write path is unchanged. Upgrading the adapter moves the pin; an app that installs `uWebSockets.js` itself should move to `uNetworking/uWebSockets.js#v20.69.0` too. The install hints in the README and in the "could not load uWebSockets.js" errors name that version now (they still named v20.60.0). `test/e2e/prod.spec.js` streams 16 MiB through the built server to a slowly reading client and requires every byte; it fails on v20.67.0.
+
+- **`TRACE`, `TRACK` and `CONNECT` are answered `405 Method Not Allowed` with an `Allow` header instead of `500`.** The fetch specification forbids these methods, so building the request for SvelteKit threw, and each probe answered 500 and logged an SSR error. They are now refused before the request is built. Every other method is handled as before. Pinned in `test/e2e/prod.spec.js` over a raw socket.
+
 ## [0.5.8] - 2026-05-23
 
 ### Fixed

@@ -75,7 +75,7 @@ export default function (opts = {}) {
 			} catch {
 				throw new Error(
 					'Could not load uWebSockets.js. Make sure it is installed:\n' +
-					'  npm install uNetworking/uWebSockets.js#v20.60.0\n\n' +
+					'  npm install uNetworking/uWebSockets.js#v20.69.0\n\n' +
 					'It is a native addon installed from GitHub (not npm) and may fail ' +
 					'on some platforms. Check the uWebSockets.js README for details.'
 				);

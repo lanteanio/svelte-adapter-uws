@@ -130,7 +130,7 @@ export async function createTestServer(options = {}) {
 	} catch {
 		throw new Error(
 			'createTestServer requires uWebSockets.js to be installed.\n' +
-			'  npm install uNetworking/uWebSockets.js#v20.60.0'
+			'  npm install uNetworking/uWebSockets.js#v20.69.0'
 		);
 	}
 
