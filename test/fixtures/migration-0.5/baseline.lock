@@ -1,6 +1,6 @@
 format=adapter-migration-baseline-v1
 adapter.name=svelte-adapter-uws
-adapter.version=0.5.8
-adapter.integrity=sha512-XG1DLduJDO+p6cK49NFd0ItJTuRXRVXhtukBNGS3ikW7NwUV2OIF+qhG0piNBP+vAVyvMfLvWM7sPVttFfBMjg==
+adapter.version=0.5.9
+adapter.integrity=sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw==
 node=>=22.0.0
-uwebsockets=github:uNetworking/uWebSockets.js#v20.67.0
+uwebsockets=github:uNetworking/uWebSockets.js#v20.69.0

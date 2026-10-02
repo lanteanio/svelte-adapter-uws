@@ -138,9 +138,9 @@ describe("ecosystem compatibility manifest", () => {
 		]);
 		expect(rows.filter((row) => row.current === "true")).toHaveLength(1);
 		expect(rows.find((row) => row.channel === "stable")).toMatchObject({
-			adapter_version: "0.5.8",
-			provenance: "npm:svelte-adapter-uws@0.5.8",
-			uwebsockets: nativeSpec("v20.67.0"),
+			adapter_version: "0.5.9",
+			provenance: "npm:svelte-adapter-uws@0.5.9",
+			uwebsockets: nativeSpec("v20.69.0"),
 		});
 	});
 
@@ -475,7 +475,7 @@ describe("ecosystem compatibility manifest", () => {
 	it("keeps published stable facts separate from the current prerelease worktree", () => {
 		const stable = rows.find((row) => row.channel === "stable");
 		const current = rows.find((row) => row.current === "true");
-		expect(stable.uwebsockets).toBe(nativeSpec("v20.67.0"));
+		expect(stable.uwebsockets).toBe(nativeSpec("v20.69.0"));
 		expect(current.uwebsockets).toBe(
 			pkg.optionalDependencies["uWebSockets.js"],
 		);
@@ -497,8 +497,8 @@ describe("ecosystem compatibility manifest", () => {
 			row.channel === "stable"
 				? {
 						...row,
-						adapter_version: "0.5.9",
-						provenance: "npm:svelte-adapter-uws@0.5.9",
+						adapter_version: "0.5.10",
+						provenance: "npm:svelte-adapter-uws@0.5.10",
 					}
 				: row,
 		);
@@ -727,7 +727,7 @@ describe("ecosystem compatibility manifest", () => {
 			renderMigrationCompatibility(rows),
 		);
 		expect(migration).toContain("archived [0.4.x to 0.5.x guide]");
-		expect(migration).toContain("pin `svelte-adapter-uws@0.5.8`");
+		expect(migration).toContain("pin `svelte-adapter-uws@0.5.9`");
 		expect(migration).toContain("active [0.5.x to 0.6.x guide]");
 		expect(migration).toContain(
 			"`@next` currently follows the `0.6.0-next` prerelease line",
@@ -1367,7 +1367,7 @@ describe("ecosystem compatibility manifest", () => {
 		}
 
 		// Guide-side drift against the manifest fails the checker.
-		const driftedGuide = guide.replace("`v20.67.0`", "`v20.99.0`");
+		const driftedGuide = guide.replace("`v20.69.0`", "`v20.99.0`");
 		expect(driftedGuide).not.toBe(guide);
 		expect(
 			validatePublishedCompatibilityDocuments(
@@ -1376,7 +1376,7 @@ describe("ecosystem compatibility manifest", () => {
 			),
 		).toContain(
 			MIGRATION_GUIDE_RELATIVE_PATH +
-				" tuple table Rollback baseline native addon cell disagrees with docs/compatibility.v1.csv (expected v20.67.0)",
+				" tuple table Rollback baseline native addon cell disagrees with docs/compatibility.v1.csv (expected v20.69.0)",
 		);
 
 		// Manifest-side drift against the unchanged guide fails too.
@@ -1395,7 +1395,7 @@ describe("ecosystem compatibility manifest", () => {
 
 		// A superstring or a second version in a bound cell is drift, not a
 		// substring match.
-		const superstring = guide.replace("exact `0.5.8`", "exact `0.5.80`");
+		const superstring = guide.replace("exact `0.5.9`", "exact `0.5.90`");
 		expect(
 			validatePublishedCompatibilityDocuments(
 				{ [MIGRATION_GUIDE_RELATIVE_PATH]: superstring },
@@ -1403,7 +1403,7 @@ describe("ecosystem compatibility manifest", () => {
 			),
 		).toContain(
 			MIGRATION_GUIDE_RELATIVE_PATH +
-				" tuple table Rollback baseline adapter cell disagrees with docs/compatibility.v1.csv (expected 0.5.8)",
+				" tuple table Rollback baseline adapter cell disagrees with docs/compatibility.v1.csv (expected 0.5.9)",
 		);
 
 		// Renaming a bound row away does not escape the binding.

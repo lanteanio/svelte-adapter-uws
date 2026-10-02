@@ -3,7 +3,7 @@
 // server.mjs` starts it standalone after an install in this directory; the
 // migration rehearsal imports boot() and drives the same server with real
 // WebSocket clients. Resolution is deliberately left to this package's own
-// node_modules, so whatever version the install landed - the locked 0.5.8
+// node_modules, so whatever version the install landed - the locked 0.5.9
 // baseline, or the packed candidate after the documented migration edits -
 // is the adapter that runs.
 import { presence } from './hooks.ws.js';

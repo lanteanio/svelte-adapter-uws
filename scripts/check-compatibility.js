@@ -78,15 +78,14 @@ const REQUIRED_CHANNELS = new Map([
 	["prerelease", "next"],
 ]);
 const PUBLISHED_BASELINE_DIGESTS = new Map([
-	// Verified against npm metadata for immutable svelte-adapter-uws@0.5.8.
-	// Recomputed for the additive train columns: the pre-existing fields are
-	// byte-identical (their old-header digest still equals
-	// b1a9adc641c46d3227611e8a28f50b9275b78f170f94cc47a1da1f1a2e1581c4), and
-	// the new fields are train 0.5 with the six pre-contract release facts
-	// empty.
+	// Verified against npm metadata for immutable svelte-adapter-uws@0.5.9
+	// (integrity sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/
+	// FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw==, published 2026-10-02T19:34:04.057Z on
+	// latest). Same columns as the 0.5.8 pin it replaces: train 0.5 with the
+	// six pre-contract release facts empty.
 	[
-		"npm:svelte-adapter-uws@0.5.8",
-		"9958c654a7ecd1fe2836bec7273efa1b6faeee3e0b92a4f3ae052ebdee8734d5",
+		"npm:svelte-adapter-uws@0.5.9",
+		"fa41f354304e06bda3e4cf8a5fd0c306227bcd02ce54e3356e1f243fe0360f50",
 	],
 ]);
 const COMPATIBILITY_GATE_COMMAND = "node scripts/check-compatibility.js";

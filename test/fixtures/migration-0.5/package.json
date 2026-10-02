@@ -4,6 +4,6 @@
 	"private": true,
 	"type": "module",
 	"dependencies": {
-		"svelte-adapter-uws": "0.5.8"
+		"svelte-adapter-uws": "0.5.9"
 	}
 }

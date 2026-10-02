@@ -86,9 +86,13 @@ describe('documentation entry-surface contract', () => {
 		// is not under test so a control case can still assert no errors at all.
 		const unsized = { ...manifest, readmeMaxLines: Number.MAX_SAFE_INTEGER };
 		expect(nativeRefs).toContain('v20.69.0');
-		expect(nativeRefs).toContain('v20.67.0');
 		expect(governedNativeRefs(pkg)).toContain('v20.69.0');
-		for (const bare of ['20.69', '20.69.0', '20.69.1', '20.67']) {
+		// The stable row's pin is governed on its own, not only through the
+		// package: give it a ref the package does not carry.
+		const olderStable = compatibilityCsv.replace('.js#v20.69.0', '.js#v20.67.0');
+		expect(olderStable).not.toBe(compatibilityCsv);
+		expect(governedNativeRefs(pkg, olderStable)).toContain('v20.67.0');
+		for (const bare of ['20.69', '20.69.0', '20.69.1']) {
 			expect(
 				validateReadme(readme + '\nBuilt against ' + bare + ' binaries.\n', unsized, nativeRefs)
 			).toContain('native compatibility fact outside generated compatibility block: ' + bare);

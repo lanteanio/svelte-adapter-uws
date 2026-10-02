@@ -2295,7 +2295,7 @@ describe("release lineage contract", () => {
 			releases,
 			lifecycles,
 		);
-		expect(current.get("latest")).toBe("0.5.8");
+		expect(current.get("latest")).toBe("0.5.9");
 		expect(current.get("next")).toBe("0.6.0-next.95");
 	});
 });

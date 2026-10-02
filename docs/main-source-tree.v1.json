@@ -1,6 +1,6 @@
 {
 	"comment": "File list of the published stable tree (origin/main), consumed by scripts/check-links.js to validate same-repo blob/main source links without network or a full clone. Regenerate after a stable promotion: node scripts/check-links.js --write-main-tree",
-	"commit": "d34d72a5fa7e64b4df36eee5db8d31844086533d",
+	"commit": "e4e3d4b7aea7dca62d6e3a88b0e8dc32154183db",
 	"paths": [
 		".gitignore",
 		"CHANGELOG.md",
@@ -119,6 +119,7 @@
 		"test/fixture/src/hooks.ws.js",
 		"test/fixture/src/routes/+page.server.js",
 		"test/fixture/src/routes/+page.svelte",
+		"test/fixture/src/routes/stream-big/+server.js",
 		"test/fixture/static/test.txt",
 		"test/fixture/svelte.config.js",
 		"test/fixture/vite.config.js",
