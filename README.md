@@ -11,7 +11,7 @@ choose the authentication and topic-authorization policy before deployment.
 **Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](https://svelte-realtime.dev/) | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.
 
 [Contributing](./CONTRIBUTING.md) - clone-to-green, source map, change recipes, and required verification.
-[Architecture](./docs/architecture.md) - ecosystem boundaries, deployment topologies, failure ownership, and accepted decisions.
+[Architecture](./docs/architecture.md) - ecosystem boundaries, deployment topologies, failure ownership, memory pressure, and release coupling.
 
 ## What you get
 
@@ -30,14 +30,13 @@ the versioned [0.4.x to 0.5.x](./docs/migrations/0.4-to-0.5.md) or
 deployments should follow the ordered [ecosystem sequence](./docs/migrations/ecosystem-0.5-to-0.6.md).
 
 **Documentation:** [documentation site](https://svelte-realtime.dev/) |
-[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) | [roadmap](./ROADMAP.md) |
+[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) |
 [observability contract](./docs/observability.md) |
 [privacy integration contract](./docs/privacy-integration.md) |
 [operations pack v1](./docs/operations/v1/README.md) |
 [capacity kit v1](./docs/capacity/v1/README.md) |
 [translation contract](./docs/translating.md) |
 [compatibility manifest](./docs/compatibility.v1.csv) |
-[claim register](./docs/claim-register.md) |
 [protocol conformance](./docs/protocol-conformance.md) |
 [protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
 [current release](./docs/releases/0.6.0-next.96.md) |
@@ -1295,9 +1294,7 @@ rebinding, and declare the exact translator prefix on a NAT64 network whose
 prefix is not safely inferable.
 
 **Verified:** The executable address, DNS, allowlist, NAT64, 6to4, ISATAP, and
-metadata corpus is in [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/safe-url.test.js); the
-bounded public statement is registered as
-[`ADAPTER-SEC-SSRF`](./docs/claim-register.md#adapter-sec-ssrf).
+metadata corpus is in [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/safe-url.test.js).
 
 ### Verifying a received webhook (`svelte-adapter-uws/plugins/webhooks`)
 
@@ -1349,8 +1346,7 @@ the accepted window matters.
 
 **Verified:** Byte-container, rotation, freshness, malformed-input, and sender
 round-trip cases are executable in
-[`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/webhooks-delivery.test.js); see
-[`ADAPTER-SEC-WEBHOOK`](./docs/claim-register.md#adapter-sec-webhook).
+[`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/webhooks-delivery.test.js).
 
 ### Sending a webhook (`deliverWebhook` and the delivery controls)
 
@@ -2296,8 +2292,8 @@ caller-supplied sequence numbers before delivery.
 positive sequence and its fan-out through one external authority with
 `relay:false`.
 
-**Verified:** Unit and real clustered fault tests are mapped by
-[`ADAPTER-CORRECT-SEQUENCE`](./docs/claim-register.md#adapter-correct-sequence).
+**Verified:** Run `npm exec vitest -- run test/cluster-sequence-policy.test.js test/cluster-sequence-policy-real.test.js`;
+the second suite boots real one-worker and two-worker runtimes.
 
 ```js
 // Skip seq for per-user cursor topics: counter map would grow with users
@@ -2843,9 +2839,8 @@ authoritative positive sequence with `relay:false`; every interested socket
 must advertise `batch` and share the same event slice for the shared-frame fast
 path.
 
-**Verified:** Focused unit, relay-ring, simulator, and real two-server parity
-tests are mapped by
-[`ADAPTER-CORRECT-BATCH`](./docs/claim-register.md#adapter-correct-batch).
+**Verified:** Run `npm exec vitest -- run test/publish-batched.test.js test/relay-ring.test.js test/sim-multiworker.test.js test/api-docs-contract.test.js`;
+the last suite checks the documented relay contract across two bridged test servers.
 
 #### Performance evidence
 
@@ -2855,15 +2850,14 @@ single-topic shape delivered 1.861M events/s batched versus 323.8K/s through a
 1.386M/s versus 680.7K/s (2.04x). The three-event disjoint-topic shape differed
 by 0.16%, inside the run-to-run spread.
 
-**Conditions:** Five alternating rounds on the current development worktree,
+**Conditions:** Five alternating rounds on a development worktree,
 Node 24.13.1, Windows 10.0.26200, AMD Ryzen 9 9950X3D. These are synthetic local
 subscribers; mixed views and disjoint topics exercise the fallback and do not
 promise the shared-frame gain.
 
 **Reproduce:** Run `node bench/27-publish-batched-ab.mjs`; command ownership,
 output fields, and interpretation limits are in the repository-only
-[benchmark index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md#complete-profile-catalog)
-and [`ADAPTER-PERF-BATCH`](./docs/claim-register.md#adapter-perf-batch).
+[benchmark index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md#complete-profile-catalog).
 
 ### `platform.requestTopic(topic, event, data, options?)`
 
@@ -2911,8 +2905,8 @@ refuse to run there rather than sequence rooms nobody receives. Alternatively
 put an external authoritative room sequencer and fan-out ahead of this
 primitive.
 
-**Verified:** Unit and real clustered topology faults are mapped by
-[`ADAPTER-CORRECT-GAME`](./docs/claim-register.md#adapter-correct-game).
+**Verified:** Run `npm exec vitest -- run test/game-cluster-policy.test.js test/game-cluster-policy-real.test.js`;
+the second suite boots the refused multi-home and the allowed single-home topologies.
 
 ### `platform.requestId`
 
@@ -3974,13 +3968,12 @@ but 5.4% larger with dedicated context takeover, so no blanket reduction is
 claimed for every presence frame.
 
 **Conditions:** Live local uWS plus a `ws` client negotiating
-permessage-deflate; TCP bytes per frame, the runner's fixed roster corpus, and
-the current measurement session. Proxy, TLS, payload, and compression history
-can change the result.
+permessage-deflate; TCP bytes per frame and the runner's fixed roster corpus, on
+Node 24.13.1, Windows 10.0.26200, and an AMD Ryzen 9 9950X3D. Proxy, TLS,
+payload, and compression history can change the result.
 
 **Reproduce:** Run `node bench/ws-compression-ab.mjs` and preserve every mode,
-including rows where binary is larger. See
-[`ADAPTER-PERF-PRESENCE`](./docs/claim-register.md#adapter-perf-presence).
+including rows where binary is larger.
 
 Use it on the client:
 
@@ -4500,15 +4493,15 @@ The binary wire forms, negotiated per connection by capability:
 86.0% smaller and decoded 18.2x faster than JSON. With realistic clustered
 keys, the warm short-id frame was 88.7% smaller and decoded 14.6x faster.
 
-**Conditions:** Warmed CPU-only microbenchmark, seven rounds, fixed entry
-counts, random numeric positions, decode plus a complete result walk. It
+**Conditions:** Warmed CPU-only microbenchmark sampled on 2026-08-02 with Node
+24.13.1, Windows 10.0.26200, and an AMD Ryzen 9 9950X3D; seven rounds, fixed
+entry counts, random numeric positions, decode plus a complete result walk. It
 excludes sockets, compression, rendering, and dictionary warm-up.
 
 **Reproduce:** Run `node bench/micro-wire-decode.mjs`; cite the exact key corpus
-and schema row. See
-[`ADAPTER-PERF-CURSOR`](./docs/claim-register.md#adapter-perf-cursor).
+and schema row.
 
-- **Capability-gated wire selection.** **Guarantee:** From one publish, the server sends the dictionary form to a connection that advertised `cursor.protocol:3` in its `hello` frame, the full-string form to one that advertised only `cursor.protocol:2`, and the JSON envelope to one that advertised neither; the frame's 1-byte schema version identifies the form, and a frame with an unknown schema version is dropped rather than mis-decoded. **Requires:** The capability handshake on connect; a payload the codec declines rides the JSON fallback. This binds wire-form selection, not application semantics across releases. **Verified:** Run `npm exec vitest -- run test/wire-mode.test.js test/wire-dict.test.js test/wire-codec.test.js`; registered as [`ADAPTER-CORRECT-CURSOR-WIRE`](./docs/claim-register.md#adapter-correct-cursor-wire).
+- **Capability-gated wire selection.** **Guarantee:** From one publish, the server sends the dictionary form to a connection that advertised `cursor.protocol:3` in its `hello` frame, the full-string form to one that advertised only `cursor.protocol:2`, and the JSON envelope to one that advertised neither; the frame's 1-byte schema version identifies the form, and a frame with an unknown schema version is dropped rather than mis-decoded. **Requires:** The capability handshake on connect; a payload the codec declines rides the JSON fallback. This binds wire-form selection, not application semantics across releases. **Verified:** Run `npm exec vitest -- run test/wire-mode.test.js test/wire-dict.test.js test/wire-codec.test.js`.
 - **`binary: false` to disable, `dictionary: false` to keep the full-string wire.** `createCursor({ binary: false })` forces JSON for every client (e.g. to keep DevTools' WS inspector readable). `createCursor({ dictionary: false })` keeps binary but uses the full-string form for everyone, encoded once and fanned out to all subscribers. The dictionary is per-connection stateful, so each capable subscriber's frame is encoded independently; the full-string form encodes once but sends larger warm frames. Use `node bench/encode-crossover.mjs` with your subscriber count and key shape to choose between those CPU and byte costs. The wire format is the server's decision; the library reads no URL parameter and a client cannot force its own connection back to JSON.
 - **Positions are `float32`, keys are strings.** Fractional positions (e.g. `clientX - getBoundingClientRect().left`) are carried losslessly enough for cursors (sub-0.01 px at screen scale). Cursor `data` that is not exactly `{ x, y }` numeric - extra fields, non-numeric values - transparently falls back to JSON for that frame, so richer cursor payloads keep working.
 
@@ -5747,12 +5740,11 @@ assuming `1024`; container, service-manager, login-shell, and host limits can
 differ. One established WebSocket normally consumes one descriptor, but the
 application needs headroom for every other descriptor it owns.
 
-**Verified:** The adapter warns when the observed soft limit is below `8192` and
-exports `open_fds` plus `fd_soft_limit` when metrics are configured. The
-conditional claim is registered as
-[`ADAPTER-OPS-FD`](./docs/claim-register.md#adapter-ops-fd).
+**Verified:** Run `npm exec vitest -- run test/fd-limit.test.js test/metrics-snapshot.test.js`;
+the first pins the warning's content and its `8192` floor, the second how the
+`open_fds` and `fd_soft_limit` gauges merge across workers.
 
-The server checks this at boot: when the soft limit is below 8192 it logs a one-line warning with the remediation above, so a low-limit deployment is caught before the first connection storm instead of during it. With the [`metrics`](#backpressure-and-connection-limits) option configured, the `open_fds` and `fd_soft_limit` gauges chart the live headroom.
+The server checks this at boot: when the soft limit is below 8192 it logs a warning with the remediation above, so a low-limit deployment is caught before the first connection storm instead of during it. With the [`metrics`](#backpressure-and-connection-limits) option configured, the `open_fds` and `fd_soft_limit` gauges chart the live headroom.
 
 For a deeper walkthrough, see [Millions of active WebSockets with Node.js](https://unetworkingab.medium.com/millions-of-active-websockets-with-node-js-7dc575746a01) from the uWebSockets.js authors.
 
@@ -5823,9 +5815,7 @@ uWebSockets.js is a C++ HTTP and WebSocket server compiled to a native V8
 addon. This repository compares specific adapter, Node HTTP, `ws`, and
 `socket.io` fixtures; it does not claim a universal server ranking. The
 repository-only [benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md)
-maps every retained measurement to its exact command and interpretation limit,
-and the [claim register](./docs/claim-register.md) records what each number does
-and does not establish.
+maps every retained measurement to its exact command and interpretation limit.
 
 ### HTTP: adapter-uws vs adapter-node
 
@@ -5843,8 +5833,7 @@ baseline), npm 11.8.0, Windows 10.0.26200, AMD Ryzen 9 9950X3D. This is a
 synthetic loopback saturation profile, not application or Internet latency.
 
 **Reproduce:** Run `node bench/run-compare.mjs` from a clean install and retain
-its complete stdout. Compare only matched runs on one idle host. See
-[`ADAPTER-PERF-HTTP`](./docs/claim-register.md#adapter-perf-http).
+its complete stdout. Compare only matched runs on one idle host.
 
 ### WebSocket: uWS vs socket.io vs ws
 
@@ -5865,8 +5854,7 @@ delivery in every row; these are saturated delivered-rate observations, not a
 lossless capacity promise.
 
 **Reproduce:** Run `node bench/run-compare.mjs` and interpret delivered rate
-together with fan-out. See
-[`ADAPTER-PERF-WS`](./docs/claim-register.md#adapter-perf-ws).
+together with fan-out.
 
 ### Where the overhead goes
 
@@ -5922,13 +5910,12 @@ the no-dedup fixture averaged 200 render calls and the dedup fixture averaged
 1.7, a 120x reduction in render calls.
 
 **Conditions:** Anonymous same-key concurrent GET requests, no personalization
-headers, bufferable response, local Node 24.13.1 development worktree. Render
-calls are a deterministic work count; the ratio is not an end-user latency or
-memory measurement.
+headers, bufferable response; sampled on 2026-08-02 with Node 24.13.1, Windows
+10.0.26200, and an AMD Ryzen 9 9950X3D. Render calls are a deterministic work
+count; the ratio is not an end-user latency or memory measurement.
 
-**Reproduce:** Run `node bench/run-dedup.mjs`; the applicability limits and
-correctness gates are registered under
-[`ADAPTER-PERF-DEDUP`](./docs/claim-register.md#adapter-perf-dedup).
+**Reproduce:** Run `node bench/run-dedup.mjs`; keep the request count, delay,
+round count, and full output with the result.
 
 ### The bottom line
 
@@ -6811,9 +6798,8 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 
 The [ecosystem architecture](./docs/architecture.md) defines which package owns
 transport, application dispatch, distributed infrastructure, authorization,
-persistence, failure recovery, and release ordering. Use its
-[decision index](./docs/decisions/README.md) when a change crosses repository
-boundaries.
+persistence, failure recovery, and release ordering. Read it when a change
+crosses repository boundaries.
 
 ## License
 

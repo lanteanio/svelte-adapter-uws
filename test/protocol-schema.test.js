@@ -31,10 +31,10 @@ const expectedTransportStatus = [
 	'JavaScript adapter; no capability of this protocol requires sections 14 or 15',
 	'to be available. Those sections define how this same wire binds to',
 	'WebTransport for a runtime that implements them. Whether and when any package',
-	'ships such a lane is a roadmap decision recorded with that package, not a',
-	'statement of this contract. A native runtime may implement those bindings',
-	'independently - section 14 as frozen, section 15 at its own wire status (see',
-	'Meta) - and that does not create a JavaScript server or client deliverable.'
+	"ships such a lane is that package's own decision, not a statement of this",
+	'contract. A native runtime may implement those bindings independently -',
+	'section 14 as frozen, section 15 at its own wire status (see Meta) - and that',
+	'does not create a JavaScript server or client deliverable.'
 ].join('\n');
 // Every shipped source, not just the entry file: a WebTransport lane could
 // land in client-runtime.js, a plugin client, or a new module the entry
@@ -202,8 +202,8 @@ describe('binary 0x03 vector decodes to the documented layout', () => {
 });
 
 describe('WebTransport reliable-stream carriage', () => {
-	// The preamble states transport FACTS; package scheduling belongs to the
-	// roadmap, and normative wire text must not freeze a product decision.
+	// The preamble states transport FACTS; package scheduling belongs to each
+	// package, and normative wire text must not freeze a product decision.
 	it('pins the transport status once and keeps scheduling policy off the wire text', () => {
 		expect(protocol.indexOf(expectedTransportStatus)).toBeGreaterThan(-1);
 		expect(protocol.indexOf(expectedTransportStatus))

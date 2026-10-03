@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gt as semverGreater, valid as validSemver } from 'semver';
@@ -285,8 +285,8 @@ export function renderReleasePage(source) {
 	const entries = validateReleaseSummary(source);
 	// The engineering-detail links pin this release's own version-heading
 	// anchor. A `#added` style anchor always resolves to the FIRST `### Added`
-	// in CHANGELOG.md - the newest release - so an archived page using it
-	// would silently point at the wrong release.
+	// in CHANGELOG.md - the newest release - so a page read after a newer
+	// release lands would silently point at the wrong release.
 	const anchor = releaseAnchor(newest);
 	const lines = [
 		`# svelte-adapter-uws ${newest.version}`,
@@ -332,9 +332,8 @@ function readReleasePages() {
 /**
  * Every page in docs/releases must name a dated CHANGELOG release, that
  * release's version-heading anchor must exist in CHANGELOG.md, and every
- * CHANGELOG detail link on the page must pin that anchor. This holds for the
- * whole archive, not only the newest page, so an old page cannot silently
- * drift to pointing at a newer release's sections.
+ * CHANGELOG detail link on the page must pin that anchor, so a page read after
+ * a newer release lands still points at its own release's sections.
  */
 export function validateReleasePages(source, pages = readReleasePages()) {
 	const releases = datedReleases(source);
@@ -355,12 +354,61 @@ export function validateReleasePages(source, pages = readReleasePages()) {
 			if (match[1] !== anchor) {
 				throw new Error(
 					`docs/releases/${name} links to ../../CHANGELOG.md#${match[1]}; ` +
-					`archived detail links must pin the release's own anchor #${anchor}`
+					`release page detail links must pin the release's own anchor #${anchor}`
 				);
 			}
 		}
 	}
 	return { pages: pages.size, links };
+}
+
+/**
+ * Pages in docs/releases that belong to an earlier dated CHANGELOG release.
+ * The directory holds only the current page: an older release's summary stays
+ * in CHANGELOG.md, and a copy here would be one more file to keep true. A name
+ * that matches no dated release (an index, a draft, a typo) is not an earlier
+ * page: nothing deletes it, and the check refuses it.
+ */
+export function staleReleasePages(source, names = readReleasePages().keys()) {
+	const present = new Set(names);
+	return datedReleases(source)
+		.slice(1)
+		.map((release) => release.version + '.md')
+		.filter((name) => present.has(name))
+		.sort();
+}
+
+/**
+ * Entries in docs/releases that are not markdown page files: other files,
+ * directories, links. The directory ships in the package and holds release
+ * pages only, so anything else is refused rather than published unnoticed.
+ * macOS's `.DS_Store` is the exception: npm never packs it.
+ * Takes `readdirSync(..., { withFileTypes: true })` entries.
+ */
+export function strayReleaseEntries(entries) {
+	return [...entries]
+		.filter((entry) => entry.name !== '.DS_Store')
+		.filter((entry) => !entry.isFile() || !entry.name.endsWith('.md'))
+		.map((entry) => entry.name)
+		.sort();
+}
+
+/**
+ * Delete the earlier releases' pages from `directory` and return their names.
+ * Each path is built from a CHANGELOG version that releasePagePath accepts as a
+ * plain SemVer and is checked to stay inside the directory before it is removed.
+ */
+export function pruneReleasePages(source, directory = fileURLToPath(RELEASES_ROOT)) {
+	const base = resolve(directory);
+	const removed = [];
+	for (const name of staleReleasePages(source, existsSync(base) ? readdirSync(base) : [])) {
+		releasePagePath(name.slice(0, -'.md'.length));
+		const target = resolve(base, name);
+		if (dirname(target) !== base) throw new Error('release page path leaves docs/releases: ' + name);
+		unlinkSync(target);
+		removed.push(name);
+	}
+	return removed;
 }
 
 function readRouteDocuments() {
@@ -390,20 +438,35 @@ export function validateReleaseRouteLinks(source, documents = readRouteDocuments
 function main() {
 	const source = readFileSync(new URL('CHANGELOG.md', ROOT), 'utf8');
 	const entries = validateReleaseSummary(source);
+	// Refused before anything is written or removed, so neither mode trips over
+	// a directory or a stray file in docs/releases.
+	const releasesPath = fileURLToPath(RELEASES_ROOT);
+	const strays = strayReleaseEntries(existsSync(releasesPath) ? readdirSync(releasesPath, { withFileTypes: true }) : []);
+	if (strays.length > 0) {
+		throw new Error('docs/releases holds ' + strays.join(', ') + ', which is not a release page; remove it');
+	}
 	let { relative, target } = releasePageTarget(source);
 	const expected = renderReleasePage(source);
 	if (process.argv.includes('--write')) {
 		mkdirSync(RELEASES_ROOT, { recursive: true });
 		({ relative, target } = releasePageTarget(source));
 		writeFileSync(target, expected);
+		for (const name of pruneReleasePages(source)) console.log('check-release-notes: removed docs/releases/' + name);
 	} else if (!existsSync(target) || readFileSync(target, 'utf8').replace(/\r\n/g, '\n') !== expected) {
 		throw new Error(`${relative} is missing or stale; run node scripts/check-release-notes.js --write`);
 	}
-	const archive = validateReleasePages(source);
+	const stale = staleReleasePages(source);
+	if (stale.length > 0) {
+		throw new Error(
+			'docs/releases still holds the earlier release page(s) ' + stale.join(', ') + '; ' +
+			'run node scripts/check-release-notes.js --write, which removes them'
+		);
+	}
+	const checked = validateReleasePages(source);
 	const routeLink = validateReleaseRouteLinks(source);
 	console.log(
 		`check-release-notes: ${entries.length} consumer entries are action-first and bounded; ` +
-		`${relative} matches; ${archive.pages} release page(s) pin ${archive.links} version anchor(s); ` +
+		`${relative} matches; ${checked.pages} release page(s) pin ${checked.links} version anchor(s); ` +
 		`README.md and MIGRATION.md route ${routeLink}`
 	);
 }

@@ -1,12 +1,16 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { inc } from 'semver';
 import { describe, expect, it } from 'vitest';
 import { anchorsOf, packageFiles, slugify } from '../scripts/check-links.js';
 import {
 	newestReleaseVersion,
+	pruneReleasePages,
 	releasePagePath,
 	releasePageTarget,
 	renderReleasePage,
+	staleReleasePages,
 	validateReleasePages,
 	validateReleaseRouteLinks,
 	validateReleaseSummary
@@ -20,6 +24,8 @@ import {
 const CHANGELOG = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
 	.replace(/\r\n/g, '\n');
 const NEWEST_VERSION = newestReleaseVersion(CHANGELOG);
+// The dated release just before the current one.
+const EARLIER_VERSION = [...CHANGELOG.matchAll(/^## \[([^\]]+)\] - \d{4}-\d{2}-\d{2}$/gm)][1][1];
 const RELEASE_PAGE = readFileSync(new URL('../' + releasePagePath(CHANGELOG), import.meta.url), 'utf8');
 
 /** The newest release block: its own heading down to the next dated heading. */
@@ -208,14 +214,35 @@ describe('consumer release summary', () => {
 		expect(RELEASE_PAGE.replace(/\r\n/g, '\n')).toContain(`](../../CHANGELOG.md#${anchor})`);
 	});
 
-	it('validates every archived release page against its own version anchor', () => {
-		const archive = validateReleasePages(CHANGELOG);
-		expect(archive.pages).toBeGreaterThanOrEqual(1);
-		expect(archive.links).toBeGreaterThanOrEqual(1);
+	it('validates the release page against its own version anchor', () => {
+		const pages = validateReleasePages(CHANGELOG);
+		expect(pages.pages).toBe(1);
+		expect(pages.links).toBeGreaterThanOrEqual(1);
 		const fileFirst = new Map([[NEWEST_VERSION + '.md', 'See [detail](../../CHANGELOG.md#added).']]);
 		expect(() => validateReleasePages(CHANGELOG, fileFirst)).toThrow(/must pin the release's own anchor/);
 		const orphan = new Map([['9.9.9.md', 'orphan page']]);
 		expect(() => validateReleasePages(CHANGELOG, orphan)).toThrow(/does not match any dated CHANGELOG release/);
+	});
+
+	it('names only the pages of earlier dated releases as stale', () => {
+		expect(staleReleasePages(CHANGELOG)).toEqual([]);
+		const current = NEWEST_VERSION + '.md';
+		const earlier = EARLIER_VERSION + '.md';
+		expect(staleReleasePages(CHANGELOG, [current, earlier, 'README.md', '9.9.9.md', 'index.json'])).toEqual([earlier]);
+		expect(staleReleasePages(CHANGELOG, [current])).toEqual([]);
+	});
+
+	it('removes only the pages of earlier releases when writing', () => {
+		const directory = mkdtempSync(join(tmpdir(), 'release-pages-'));
+		try {
+			const kept = [NEWEST_VERSION + '.md', 'README.md', '9.9.9.md', 'notes.txt'];
+			for (const name of [...kept, EARLIER_VERSION + '.md']) writeFileSync(join(directory, name), 'page');
+			expect(pruneReleasePages(CHANGELOG, directory)).toEqual([EARLIER_VERSION + '.md']);
+			expect(readdirSync(directory).sort()).toEqual([...kept].sort());
+			expect(pruneReleasePages(CHANGELOG, directory)).toEqual([]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it('requires README.md and MIGRATION.md to carry the current-release link', () => {

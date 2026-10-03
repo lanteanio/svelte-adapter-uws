@@ -27,10 +27,10 @@ WebSocket/WSS is the permanent default and complete transport for the
 JavaScript adapter; no capability of this protocol requires sections 14 or 15
 to be available. Those sections define how this same wire binds to
 WebTransport for a runtime that implements them. Whether and when any package
-ships such a lane is a roadmap decision recorded with that package, not a
-statement of this contract. A native runtime may implement those bindings
-independently - section 14 as frozen, section 15 at its own wire status (see
-Meta) - and that does not create a JavaScript server or client deliverable.
+ships such a lane is that package's own decision, not a statement of this
+contract. A native runtime may implement those bindings independently -
+section 14 as frozen, section 15 at its own wire status (see Meta) - and that
+does not create a JavaScript server or client deliverable.
 
 The reference implementation is [src/client.js](./src/client.js) (client) and
 [src/runtime/wire.js](./src/runtime/wire.js) plus
@@ -1952,10 +1952,6 @@ the transport itself also closes.
 ---
 
 ## Appendix D. Design rationale (why the wire is shaped this way)
-
-This appendix is the wire-specific decision record. The cross-package index
-routes protocol evolution through
-[Protocol compatibility](./docs/decisions/protocol-compatibility.md).
 
 These non-choices are deliberate and are recorded so they are not relitigated:
 

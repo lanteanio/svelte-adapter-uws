@@ -60,15 +60,19 @@ bullet is split into focused bullets rather than raising the bound.
 The generated `docs/releases/<version>.md` page links engineering detail to the
 release's own version-heading anchor in `CHANGELOG.md` (for example
 `## [0.6.0-next.91] - 2026-08-10` produces `#060-next91---2026-08-10`), never
-to the file-first `#added` style anchors, which always resolve to the newest
-release and would silently misroute archived pages. Every page in
-`docs/releases/`, not only the newest, must pin its own version anchor, and
+to the file-first `#added` style anchors, which resolve to whichever release is
+newest when the page is read. `docs/releases/` holds only the current page:
+`--write` writes it and removes the page of any earlier dated release, whose
+summary stays in `CHANGELOG.md`. Anything else there - a page that names no
+dated release, another file, a directory - fails the check and is never
+removed; only macOS's `.DS_Store`, which npm never packs, is ignored.
 `README.md` and `MIGRATION.md` must both carry the current
-`./docs/releases/<version>.md` link. `node scripts/check-release-notes.js` is
-the preflight gate for marker placement, field order, lead length, one-sentence
-outcomes, per-section coverage, the bullet bound, version-pinned detail anchors
-across the whole archive, and the current-release links; regenerate the page
-with `node scripts/check-release-notes.js --write`.
+`./docs/releases/<version>.md` link.
+`node scripts/check-release-notes.js` is the preflight gate for marker
+placement, field order, lead length, one-sentence outcomes, per-section
+coverage, the bullet bound, version-pinned detail anchors, a release directory
+holding only the current page, and the current-release links; regenerate the
+page with `node scripts/check-release-notes.js --write`.
 
 ## Release identity and immutable tags
 
@@ -212,10 +216,33 @@ the exact-version consumer passes.
 ## Stable promotion
 
 Stable versions come from `main` and use `latest`. Promotion is an evidence
-decision before it is a procedure: the exit contract in
-[`ROADMAP.md`](../ROADMAP.md) must be satisfied, each item demonstrated at
-promotion time, before step 1 begins. The steps below are the mechanics of a
-promotion the evidence already justifies.
+decision before it is a procedure: every item of the exit contract below must
+be demonstrated at promotion time, before step 1 begins.
+
+- **The verification contract is green where it gates.** The complete check
+  chain and test suite pass on the platforms the repository gates,
+  including the packed-tarball consumer suites.
+- **The train row is current and bound.** The compatibility manifest's
+  prerelease row carries the exact qualified sibling versions and
+  qualification heads, those heads equal the cross-repo gate's pins, and
+  that gate is green at those pins.
+- **The wire protocol is frozen.** The manifest's recorded revision equals
+  the revision parsed from `protocol.schema.json`, with no incompatible
+  schema change pending.
+- **The error reference is complete.** Every registry entry is driven from
+  the condition it claims or carries a recorded unreachability reason.
+- **The documentation describes what ships.** README, MIGRATION, and the
+  docs tree claim no capability above or below the promoted bytes, and the
+  migration guide's surface marker is current.
+- **No reachable open defect.** No known defect on the prerelease line is
+  reachable through a documented surface without a documented workaround.
+- **The ledger is reconciled.** Every published identity of the line is
+  recorded in the release manifest before the promotion row joins it.
+
+An item that cannot be demonstrated blocks promotion; the answer is to
+produce the evidence or fix the gap, never to shrink the list in the same
+change that claims it. The steps below are the mechanics of a promotion the
+evidence already justifies.
 
 1. Start from the reviewed prerelease lineage. Reconcile the final changelog and
    migration guidance; remove prerelease-only version suffixes in a dedicated

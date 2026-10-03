@@ -24,7 +24,6 @@ const manifestPath = join(root, "docs", "compatibility.v1.csv");
 const packagePath = join(root, "package.json");
 const readmePath = join(root, "README.md");
 const migrationPath = join(root, "MIGRATION.md");
-const claimRegisterPath = join(root, "docs", "claim-register.md");
 
 export const COMPATIBILITY_START = "<!-- compatibility:start -->";
 export const COMPATIBILITY_END = "<!-- compatibility:end -->";
@@ -2031,10 +2030,10 @@ function readWorkspaceSibling(name) {
  * still agree with the manifest.
  *
  * The generated block is regenerated on every bump, so it cannot drift - but
- * the same versions were also typed into surrounding prose, a release link and
- * the claim register, where nothing checked them. Only one prose fact (the Node
- * range) was bound, so a `-next.N` bump silently left four stale mentions
- * pointing at a candidate that no longer exists.
+ * the same versions were also typed into surrounding prose and a release link,
+ * where nothing checked them. Only one prose fact (the Node range) was bound,
+ * so a `-next.N` bump silently left stale mentions pointing at a candidate
+ * that no longer exists.
  *
  * Series like `0.5.x` are deliberately not matched: those name a line, not a
  * release, and are correct across bumps.
@@ -2117,7 +2116,6 @@ function main() {
 		...validateUnownedVersionLiterals(
 			[
 				{ path: "README.md", text: withoutBlock(readme) },
-				{ path: "docs/claim-register.md", text: readFileSync(claimRegisterPath, "utf8") },
 			],
 			rows,
 		),

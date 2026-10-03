@@ -1,7 +1,6 @@
 // The root carries only files a tool or platform reads from the root. Everything
 // else is a contract, and contracts live under docs/ so the root cannot collect
-// them by default. Six root documents appeared in one batch before this guard
-// existed; the canonicality decision now states the rule and this proves it.
+// them by default.
 
 import { describe, expect, it } from 'vitest';
 import { readdirSync } from 'node:fs';
@@ -11,15 +10,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // README, CHANGELOG, CONTRIBUTING and SECURITY are read from the root by npm and
-// GitHub. MIGRATION, PROTOCOL, and ROADMAP are the package contracts a
-// consumer is told to open by name.
+// GitHub. MIGRATION and PROTOCOL are the package contracts a consumer is told
+// to open by name.
 const ALLOWED_ROOT_MARKDOWN = [
 	'CHANGELOG.md',
 	'CONTRIBUTING.md',
 	'MIGRATION.md',
 	'PROTOCOL.md',
 	'README.md',
-	'ROADMAP.md',
 	'SECURITY.md'
 ];
 
@@ -32,8 +30,7 @@ describe('root document placement', () => {
 		expect(
 			found,
 			'a new root .md means a contract landed in the root. Put it under docs/ in ' +
-			'lowercase kebab-case, or add it here with the convention that reads it from the root. ' +
-			'See docs/decisions/documentation-canonicality.md.'
+			'lowercase kebab-case, or add it here with the convention that reads it from the root.'
 		).toEqual(ALLOWED_ROOT_MARKDOWN);
 	});
 

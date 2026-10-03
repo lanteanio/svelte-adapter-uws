@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { documentationFiles, packageFiles } from '../scripts/check-links.js';
 
@@ -9,50 +9,27 @@ import { documentationFiles, packageFiles } from '../scripts/check-links.js';
 const read = (relative) =>
 	readFileSync(new URL('../' + relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const architecture = read('docs/architecture.md');
-const index = read('docs/decisions/README.md');
+const prose = architecture.replace(/\s+/g, ' ');
 const readme = read('README.md');
 const officialLinks = '**Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](https://svelte-realtime.dev/) | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.';
-const decisions = [
-	'protocol-compatibility',
-	'native-runtime-baseline',
-	'cluster-fanout-boundaries',
-	'persistence-boundary',
-	'release-coupling',
-	'memory-pressure-signal',
-	'documentation-canonicality'
-];
 
 describe('ecosystem architecture documentation', () => {
 	it('declares the official domain trust boundary at both public entry points', () => {
-		const policy = architecture.replace(/\s+/g, ' ');
 		expect(readme).toContain(officialLinks);
 		expect(architecture).toContain(officialLinks);
 		expect(architecture).toContain('Existing runtime\nslugs are preserved indefinitely');
 		expect(architecture).toContain('is an identity and security migration');
-		expect(policy).toContain(
+		expect(prose).toContain(
 			'Runtime `https://svti.me/<slug>` URLs are permanent compatibility surfaces that redirect to reviewed pages on the documentation site'
 		);
-		expect(policy).toContain(
+		expect(prose).toContain(
 			'Redirect destinations must carry the svelte-realtime family breadcrumb and routes back to the official owner, documentation, and demo.'
 		);
 	});
 
-	it('ships the architecture contract and every indexed decision', () => {
-		const shipped = new Set(packageFiles());
-		const checked = new Set(documentationFiles());
-		const decisionFiles = readdirSync(new URL('../docs/decisions/', import.meta.url))
-			.filter((file) => file.endsWith('.md') && file !== 'README.md')
-			.sort();
-		expect(decisionFiles).toEqual(decisions.map((decision) => decision + '.md').sort());
-		expect(shipped).toContain('docs/architecture.md');
-		expect(checked).toContain('docs/architecture.md');
-		for (const decision of decisions) {
-			const relative = 'docs/decisions/' + decision + '.md';
-			expect(shipped).toContain(relative);
-			expect(checked).toContain(relative);
-			expect(index).toContain('](./' + decision + '.md)');
-			expect(architecture).toContain('](./decisions/' + decision + '.md)');
-		}
+	it('ships the architecture contract', () => {
+		expect(new Set(packageFiles())).toContain('docs/architecture.md');
+		expect(new Set(documentationFiles())).toContain('docs/architecture.md');
 	});
 
 	it('keeps the complete contract reachable from both README routes', () => {
@@ -61,7 +38,6 @@ describe('ecosystem architecture documentation', () => {
 		);
 		expect(readme).toContain('[Architecture](./docs/architecture.md)');
 		expect(readme).toContain('[ecosystem architecture](./docs/architecture.md)');
-		expect(readme).toContain('[decision index](./docs/decisions/README.md)');
 		expect(readme).toContain('[privacy integration contract](./docs/privacy-integration.md)');
 		expect(rows).toContain(
 			'|`ecosystem-contract`|Versioned package boundaries and accepted architecture decisions|`docs/architecture.md`|'
@@ -87,9 +63,9 @@ describe('ecosystem architecture documentation', () => {
 			'## Contract authorities',
 			'## Deployment topologies',
 			'## Persistence boundary',
+			'## Memory-pressure signal',
 			'## Failure ownership',
-			'## Release coupling',
-			'## Accepted decisions'
+			'## Release coupling'
 		]) {
 			expect(architecture).toContain(heading);
 		}
@@ -111,13 +87,11 @@ describe('ecosystem architecture documentation', () => {
 		expect(architecture).toContain('Client-named subscriptions are open by default');
 		expect(architecture).toContain('`TOPIC_WS_COUNTS_WARN_THRESHOLD` warns at its threshold');
 		expect(architecture).toContain('Without a configured breaker');
-		const persistence = read('docs/decisions/persistence-boundary.md');
-		expect(persistence).toContain('A warn-only threshold is not a memory bound');
-		expect(persistence).toContain('A circuit breaker is optional');
+		expect(prose).toContain('A warn-only threshold is not a memory bound');
+		expect(prose).toContain('A circuit breaker is optional');
 	});
 
 	it('rejects inverse responsibility and guarantee claims', () => {
-		const corpus = [architecture, ...decisions.map((decision) => read('docs/decisions/' + decision + '.md'))].join('\n');
 		for (const contradiction of [
 			/authenticated by default/i,
 			/subscriptions are closed by default/i,
@@ -126,22 +100,30 @@ describe('ecosystem architecture documentation', () => {
 			/(?:automatically|always) fall(?:s)? back to local state/i,
 			/compatibility\.v1\.csv owns exact (?:git|artifact|digest|registry)/i
 		]) {
-			expect(corpus).not.toMatch(contradiction);
+			expect(architecture).not.toMatch(contradiction);
 		}
 	});
 
 	it('routes exact release evidence to the release procedure and manifest', () => {
-		const release = read('docs/decisions/release-coupling.md');
-		expect(release).toContain('[`releasing.md`](../releasing.md)');
-		expect(release).toContain('[release manifest](../release-manifest.md)');
-		expect(release).toContain('records supported package release lines and the adapter/native tuple');
+		expect(architecture).toContain('[`releasing.md`](./releasing.md)');
+		expect(architecture).toContain('[release manifest](./release-manifest.md)');
+		expect(prose).toContain('Use the [compatibility manifest](./compatibility.v1.csv) for supported release lines and the native tuple');
+		expect(architecture).toContain('[coordinated release runbook](./operations/v1/coordinated-release.md)');
 	});
 
-	it('routes wire rationale through the protocol-owned decision', () => {
-		const protocol = read('PROTOCOL.md');
-		expect(protocol).toContain('](./docs/decisions/protocol-compatibility.md)');
-		expect(read('docs/decisions/protocol-compatibility.md')).toContain(
-			'[`PROTOCOL.md`](../../PROTOCOL.md)'
-		);
+	it('states the family memory-pressure contract', () => {
+		expect(prose).toContain('the distance to the nearest memory wall: the worse of two arms');
+		expect(prose).toContain('An engine that reports no ceiling contributes nothing on this arm.');
+		expect(prose).toContain('The container arm compares the resident set with the cgroup memory limit (v2 `memory.max`, v1 `memory.limit_in_bytes`)');
+		expect(prose).toContain('The reading is a 0..1 saturation');
+		expect(prose).toContain('one reading feeds the `MEMORY` reason, which outranks every other pressure reason, the `value` fold, the `heap_used_ratio` gauge and send-gate window sizing');
+		expect(prose).toContain('A process with no discoverable wall on either arm reads 0');
+		expect(prose).toContain('`memoryHeapUsedRatio` option name and its 0.85 default are shared across the family');
+		expect(prose).toContain('Arena fullness (`heapUsed/heapTotal`) is not part of the contract on any engine.');
+	});
+
+	it('routes wire rationale to the protocol', () => {
+		expect(prose).toContain('Wire-level rationale stays with the wire: [`PROTOCOL.md`](../PROTOCOL.md)');
+		expect(read('PROTOCOL.md')).toContain('## Appendix D. Design rationale');
 	});
 });

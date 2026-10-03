@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Section 15 stays provisional until its wire-status line reads frozen, so the change lands inside revision 1. A zero-length record that used to be a `PROTOCOL_ERROR` is now an empty message, `kind` `0x02` is now a close record, a well-formed record whose inner message is malformed no longer resets the lane and is dropped, denied or passed through as on WebSocket, and bytes the stack holds unsent now count against the pending bound. An endpoint may also cap its pending records at no fewer than 65,536, a server must bound bytes sent but not yet acknowledged at no less than 1 MiB, a receiver limit is never below 125 bytes, a server may refuse a stream that arrived before it sent its successful response, and `NO_ERROR` (`0x00`) joins the stream errors.
   - **Detail:** [Changed engineering detail](#changed).
+- **Changed: the package no longer carries its roadmap, claim register or decision records.** `ROADMAP.md`, `docs/claim-register.md`, `docs/decisions/`, `docs/desync-coverage.md` and the release pages of earlier prereleases leave the repository and the npm package, so a link that follows the newest version or the dev branch to one of them ends at a missing file.
+  - **Affects:** Readers, sites and tools that link to those files in the package or the repository.
+  - **Action:** Link the exit contract in `docs/releasing.md`, the boundaries and memory-pressure rules in `docs/architecture.md`, `PROTOCOL.md` for wire compatibility, a release's `CHANGELOG.md` heading for its notes, or the claim's own README section; version-pinned links keep working.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
@@ -366,6 +372,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/close-frame.test.js` pins the rule; `test/close-frame-real.test.js`
   drives each shape through a real client on all three surfaces and fails on
   each of them with its half of the change removed.
+
+- **The roadmap, claim register, decision records, desync coverage matrix and
+  the release pages of earlier prereleases leave the repository and the npm
+  package.** `ROADMAP.md`, `docs/claim-register.md`, `docs/decisions/`,
+  `docs/desync-coverage.md` and `docs/releases/0.6.0-next.91.md` to `.95.md`
+  are gone. The stable-promotion exit contract now sits in `docs/releasing.md`
+  in front of the steps that depend on it, the persistence, release-coupling
+  and family memory-pressure rules are stated in `docs/architecture.md`, and
+  each README Measured or Guarantee block names the suite or bench behind it;
+  every Measured block states the date, runtime and host it ran on, or the
+  table it shares them with. Nothing else the removed files held is carried
+  over. `docs/releases/` keeps only the current release page:
+  `node scripts/check-release-notes.js --write` removes the pages of earlier
+  releases, the check refuses anything else there except `.DS_Store`, and
+  every summary stays in this file. Pinned by `test/readme-claims.test.js`,
+  `test/release-pages-cli.test.js` and the memory-pressure case of
+  `test/architecture-docs.test.js`.
 
 ### Fixed
 
@@ -2428,14 +2451,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this stops the microbench rows from hiding failure.
 
 - **The family memory-pressure contract is an accepted decision.**
-  [docs/decisions/memory-pressure-signal.md](./docs/decisions/memory-pressure-signal.md)
-  defines the engine-portable basis both family adapters implement: the
-  nearest-wall worst-of, its degradation rules (an engine without a reported
-  allocation ceiling contributes no engine arm; no discoverable wall on
-  either arm reads 0, never a false alarm - arena fullness is not part of
-  the contract on any engine), and the shared `memoryHeapUsedRatio` name
-  with its 0.85 default. The sibling adapter adopts the contract on its own
-  runtime primitives.
+  `docs/decisions/memory-pressure-signal.md` defines the engine-portable
+  basis both family adapters implement: the nearest-wall worst-of, its
+  degradation rules (an engine without a reported allocation ceiling
+  contributes no engine arm; no discoverable wall on either arm reads 0,
+  never a false alarm - arena fullness is not part of the contract on any
+  engine), and the shared `memoryHeapUsedRatio` name with its 0.85 default.
+  The sibling adapter adopts the contract on its own runtime primitives.
 
 - **The per-topic byte-rate stat documents its unit.** `topicPublishBytesPerSec`
   and the `bytesPerSec` field it gates always measured UTF-16 code units of

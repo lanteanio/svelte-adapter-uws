@@ -19,14 +19,13 @@ const DOCS_SITE = 'https://svelte-realtime.dev/';
 const OFFICIAL_LINKS = '**Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](' + DOCS_SITE + ') | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.';
 const EXPECTED_MAP_SOURCE = [
 	'**Documentation:** [documentation site](' + DOCS_SITE + ') |',
-	'[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) | [roadmap](./ROADMAP.md) |',
+	'[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) |',
 	'[observability contract](./docs/observability.md) |',
 	'[privacy integration contract](./docs/privacy-integration.md) |',
 	'[operations pack v1](./docs/operations/v1/README.md) |',
 	'[capacity kit v1](./docs/capacity/v1/README.md) |',
 	'[translation contract](./docs/translating.md) |',
 	'[compatibility manifest](./docs/compatibility.v1.csv) |',
-	'[claim register](./docs/claim-register.md) |',
 	'[protocol conformance](./docs/protocol-conformance.md) |',
 	'[protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |',
 	'[current release](' + CURRENT_RELEASE + ') |',
@@ -35,7 +34,7 @@ const EXPECTED_MAP_SOURCE = [
 const OWNERSHIP_HEADING = '**Documentation ownership (`docs-ownership-v1`):**';
 const OWNERSHIP_HEADER_CELLS = ['Ownership key', 'Documentation surface', 'Canonical owner'];
 const EXPECTED_TOP_CONTRACT = EXPECTED_MAP_SOURCE + '\n\n' + OWNERSHIP_HEADING;
-const EXPECTED_MAP_TEXT = 'Documentation: documentation site | migration guide | wire protocol | roadmap | observability contract | privacy integration contract | operations pack v1 | capacity kit v1 | translation contract | compatibility manifest | claim register | protocol conformance | protocol schema | test vectors | current release | release history';
+const EXPECTED_MAP_TEXT = 'Documentation: documentation site | migration guide | wire protocol | observability contract | privacy integration contract | operations pack v1 | capacity kit v1 | translation contract | compatibility manifest | protocol conformance | protocol schema | test vectors | current release | release history';
 const EXPECTED_RELATED_MARKDOWN = '- [svelte-realtime.dev](' + DOCS_SITE + ') - Canonical long-form ecosystem guides, searchable reference, and hosted deployment walkthroughs.';
 const EXPECTED_RELATED_TEXT = 'svelte-realtime.dev - Canonical long-form ecosystem guides, searchable reference, and hosted deployment walkthroughs.';
 // All six declared owners. The local operations pack owns the versioned

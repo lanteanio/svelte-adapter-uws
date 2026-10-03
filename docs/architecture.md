@@ -113,12 +113,16 @@ whole system.
 | Published adapter identities and candidate evidence | [`release-manifest.md`](./release-manifest.md) and [`releasing.md`](./releasing.md) |
 | Adapter observability names and aggregation | [`observability.md`](./observability.md) |
 | Tenancy: namespace, budget, and attribution ownership | [`docs/tenancy.md`](./tenancy.md) |
-| Cross-package responsibility decisions | This document and [the decision index](./decisions/README.md) |
+| Cross-package responsibility decisions | This document |
 | Tutorials, how-to guides, explanations, and searchable reference | [`svelte-realtime.dev`](https://svelte-realtime.dev/) |
 
 The core schema deliberately covers core-owned frames, not every frame a
 higher layer may pass through. Realtime ships its companion schema for its RPC,
 stream, and revision frames.
+
+Wire-level rationale stays with the wire: [`PROTOCOL.md`](../PROTOCOL.md)
+holds the compatibility rules, guarantees, conformance classes, and the
+design-rationale appendix.
 
 ## Deployment topologies
 
@@ -151,15 +155,43 @@ The adapter and realtime ship bounded in-memory defaults where eviction or
 rejection preserves correctness, and explicitly named warn-only registries
 where eviction would corrupt routing. For example, realtime's
 `TOPIC_WS_COUNTS_WARN_THRESHOLD` warns at its threshold but the map may keep
-growing so unsubscribe routing remains correct. These local defaults are not
-durable and are not silently promoted to distributed guarantees.
+growing so unsubscribe routing remains correct. A warn-only threshold is not a
+memory bound. These local defaults are not durable and are not silently
+promoted to distributed guarantees.
 
 Extensions own their Redis/Postgres key layouts, tables, migrations, cleanup,
 and backend failure behavior. The application owns business tables and the
 decision to fail closed, degrade to local-only behavior, or stop accepting
-writes when an infrastructure guarantee is unavailable. A circuit breaker
-bounds backend failure latency; it does not prove that missed cross-instance
-events or writes were reconstructed.
+writes when an infrastructure guarantee is unavailable. A circuit breaker is
+optional and is passed to the extension that should use it. It bounds backend
+failure latency; it does not prove that missed cross-instance events or writes
+were reconstructed.
+
+## Memory-pressure signal
+
+Every adapter in the family reports memory pressure as the distance to the
+nearest memory wall: the worse of two arms, each measured with the quantity its
+wall kills on.
+
+- The engine arm compares `heapUsed` with the engine's reported allocation
+  ceiling (V8: `v8.getHeapStatistics().heap_size_limit`). An engine that
+  reports no ceiling contributes nothing on this arm.
+- The container arm compares the resident set with the cgroup memory limit
+  (v2 `memory.max`, v1 `memory.limit_in_bytes`), found at the cgroup root and
+  along the process's own group path; `max` and the v1 unlimited sentinel mean
+  no wall.
+
+The reading is a 0..1 saturation that approaches 1 as the nearest out-of-memory
+death approaches. A process with no discoverable wall on either arm reads 0:
+the signal degrades to silence, never to a false alarm, and PSI memory pressure
+and `resident_memory_bytes` still show native growth there. The
+`memoryHeapUsedRatio` option name and its 0.85 default are shared across the
+family, the threshold can be disabled with `false` like every pressure
+threshold, and one reading feeds the `MEMORY` reason, which outranks every
+other pressure reason, the `value` fold, the `heap_used_ratio` gauge and
+send-gate window sizing. Arena fullness (`heapUsed/heapTotal`) is not part of
+the contract on any engine. This adapter implements it in
+`src/runtime/utils/memory-wall.js`.
 
 ## Failure ownership
 
@@ -191,7 +223,9 @@ digests, and registry identities belong to the release workflow and
 [release manifest](./release-manifest.md). Follow the
 [ordered ecosystem migration](./migrations/ecosystem-0.5-to-0.6.md). On
 rollback, restore dependants before dependencies unless the whole tuple is
-replaced atomically.
+replaced atomically. A breaking client/server cutover follows the
+[coordinated release runbook](./operations/v1/coordinated-release.md), which
+owns the forward/rollback matrix and the abort criteria.
 
 ## Extra server entries
 
@@ -217,19 +251,3 @@ adapter cannot queue around it; RFC 9112 9.3.2 has a client retry requests a
 closed connection left unanswered, and browsers do not pipeline. node:http, and
 so `vite dev`, queues pipelined requests instead. `test/http-pipelining-real.test.js`
 pins both halves on the built runtime.
-
-## Accepted decisions
-
-The decision index is [`docs/decisions/README.md`](./decisions/README.md):
-
-- [Protocol compatibility](./decisions/protocol-compatibility.md)
-- [Native runtime baseline](./decisions/native-runtime-baseline.md)
-- [Cluster fan-out boundaries](./decisions/cluster-fanout-boundaries.md)
-- [Persistence boundary](./decisions/persistence-boundary.md)
-- [Release coupling](./decisions/release-coupling.md)
-- [Memory-pressure signal basis](./decisions/memory-pressure-signal.md)
-- [Documentation canonicality](./decisions/documentation-canonicality.md)
-
-Wire-level rationale and conformance remain in [`PROTOCOL.md`](../PROTOCOL.md),
-especially its compatibility rules, guarantees, conformance classes, and
-design-rationale appendix.

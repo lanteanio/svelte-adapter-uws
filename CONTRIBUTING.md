@@ -195,7 +195,8 @@ and has no config:
   public surface it describes. Change a declaration, review what moved, then
   re-pin with `npm run check:migration -- --write`.
 - **check-release-notes** - the newest changelog entry is action-first and
-  bounded, and its release page and routes exist.
+  bounded, its release page and routes exist, and `docs/releases/` holds no
+  other page or file (macOS `.DS_Store` aside).
 - **check-release-ledger** - the published-releases table in
   `docs/release-manifest.md` and the changelog headings reconcile offline:
   every published version has a heading, unpublished headings carry the

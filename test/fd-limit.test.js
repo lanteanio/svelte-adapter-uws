@@ -43,6 +43,12 @@ describe('parseProcLimits', () => {
 });
 
 describe('fdPreflightWarning', () => {
+	it('warns below the documented 8192 floor', () => {
+		expect(LOW_FD_SOFT_LIMIT).toBe(8192);
+		expect(fdPreflightWarning({ soft: 8191, hard: 8191 })).not.toBe(null);
+		expect(fdPreflightWarning({ soft: 8192, hard: 8192 })).toBe(null);
+	});
+
 	it('warns below the low-limit floor with the numbers and the remediation link', () => {
 		const message = fdPreflightWarning({ soft: 1024, hard: 1048576 });
 		expect(message).toContain('1024');
