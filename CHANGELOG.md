@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Percent-encoded targets are served as before, non-ASCII page names included, and a static file with a non-ASCII name is now served for its encoded spelling. Built assets pay one read of the query and a scan of the target, which measured within run-to-run noise (bench/40). A handshake refused for its query counts as `upgrade_rejected_total{reason="malformed_handshake"}`; one whose path carries such a byte misses the WebSocket route and is refused like any other request. node's HTTP parser refuses the raw bytes itself and passes a `#` on, so under `vite dev` the WebSocket handshake and the auth path refuse a fragment and pages are served as Vite serves them. `createTestServer` refuses on the routes it mirrors.
   - **Detail:** [Changed engineering detail](#changed).
+- **Changed: the WebTransport reliable stream carries empty messages and close codes.** Section 15 of PROTOCOL.md, still a freeze candidate, carries an empty WebSocket message as a zero-length record and a close as a close record (`kind` `0x02`) with its code and reason, so a stream client can tell a throttle or terminal close from a disconnect.
+  - **Affects:** Authors of a runtime or client that implements the section 15 reliable-stream binding. The JavaScript adapter and its client do not implement it and behave exactly as before.
+  - **Action:** Accept a zero-length record; wherever a WebSocket would send a close frame, other than for an error in the frames themselves, write a close record with the same payload and then FIN, and refuse any byte after one; reset with `RECORD_TOO_LARGE` instead of sending a message larger than you may emit, except a live relayed `game` event, which is not delivered; open the stream only after the CONNECT response; re-pin `test-vectors/webtransport-stream.json`, which now has eight records, names the check behind every refusal, and flags the entries that hold only at its assumed receiver limit or only for a receiver that reads on after a close.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Section 15 stays provisional until its wire-status line reads frozen, so the change lands inside revision 1. A zero-length record that used to be a `PROTOCOL_ERROR` is now an empty message, `kind` `0x02` is now a close record, a well-formed record whose inner message is malformed no longer resets the lane and is dropped, denied or passed through as on WebSocket, and bytes the stack holds unsent now count against the pending bound. An endpoint may also cap its pending records at no fewer than 65,536, a server must bound bytes sent but not yet acknowledged at no less than 1 MiB, a receiver limit is never below 125 bytes, a server may refuse a stream that arrived before it sent its successful response, and `NO_ERROR` (`0x00`) joins the stream errors.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
@@ -203,6 +209,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control.
 
 ### Changed
+
+- **Section 15 carries empty messages and WebSocket closes.** PROTOCOL.md
+  15.1, 15.3, 15.4 and 15.6, appendices C.6, D and E,
+  `protocol.schema.json#x-webtransport`, and
+  `test-vectors/webtransport-stream.json` move together:
+  - A zero length is a legal prefix; the `kind` byte still follows, and the
+    record is an empty message of that kind (`minimumMessageBytes` 0).
+  - `kind` `0x02` is a close record holding the WebSocket close payload:
+    empty, or a big-endian code from 1000-1003, 1007-1014 or 3000-4999 and a
+    UTF-8 reason of at most 123 bytes. Wherever an endpoint would send a
+    WebSocket close frame (4429, 1001 after a `reconnect` advisory, 4401,
+    1008, an application's own code, or none) it writes one with the same
+    payload as the last record on its direction and FINs; record-layer
+    errors still reset. A server that closes a lane before admitting it sends
+    the close record in place of `welcome`.
+  - A malformed close payload is `PROTOCOL_ERROR`, and so is any byte after a
+    close record on its direction, decided before any prefix verdict, for a
+    receiver that reads on; one may instead stop reading with `NO_ERROR`.
+    Either way a close already read stands. As RFC 6455 reports the first
+    close frame received, an endpoint reports the first well-formed close
+    record it read (1005 for an empty one) and 1006 when it read none. A
+    receiver's stream limit is never below 125 bytes, the largest close
+    record.
+
+- **The section 15 vectors name the check behind every refusal.**
+  `test-vectors/webtransport-stream.json`:
+  - The transcript gains an empty record, a `reconnect` advisory and a close
+    record, `validRecords` adds single-record edges (each close-code range
+    edge among them), the unknown-kind example moves to `0x03`, the
+    zero-length invalid prefix is gone (`8000`, a non-canonical zero, is
+    new), and every invalid entry names the `check` that refuses it, defined
+    in `checks`.
+  - Entries carry `reportsCode` where a close is involved, and
+    `dependsOnReceiverLimit` (five entries across two lists) or
+    `assumesReceiverReadsOn` where they hold only for some receivers.
+  - `test/protocol-schema.test.js` binds the close codes and the 123-byte
+    reason to the runtime's own close rule (`isSendableCloseCode`,
+    `MAX_CLOSE_REASON_BYTES`), so the two carriages agree on which close
+    codes may be sent.
+
+- **Section 15 closes a lane in order, and says which frame carries an
+  error.** PROTOCOL.md 15.4, 15.6 and appendix C.6:
+  - An endpoint that reads the peer's close record answers with its own,
+    normally echoing the code, as RFC 6455 answers a close frame; one that
+    reads the peer's FIN or reset ends its own direction too. Each does so
+    within a bounded time, may first finish complete queued records unless it
+    received the peer's STOP_SENDING, and never FINs inside a record. The
+    closer keeps reading for that answer and keeps the session open until
+    then, because a session close discards data in flight; a session close's
+    own code carries no meaning in this binding.
+  - No text or binary record read after an endpoint's own close or FIN, or
+    after the peer's close, FIN or reset, is acted on, and nothing past a
+    record refused with a lane error or on an ended direction is read, so a
+    close there does not change what the endpoint reports.
+  - An endpoint that finds a lane error sends its code on both RESET_STREAM
+    and STOP_SENDING, never resetting a direction it finished with FIN unless
+    the peer asks with STOP_SENDING; an answer to STOP_SENDING should copy the
+    code, as QUIC recommends. The new `NO_ERROR` (`0x00`) closes a direction of
+    a lane that is already closing and is what the W3C API sends when no code
+    is given. A reset carries no close code.
+  - Of the checks on received bytes, only the record layer's reset the lane:
+    a malformed inner message is handled as on WebSocket. Crossing a pending
+    bound always resets, and section 6.4's drop under backpressure does not
+    apply on this carriage.
+
+- **Section 15 says what a sender does with an oversized message, and what
+  the pending bounds count.** PROTOCOL.md 15.1, 15.2, 15.3, 15.5, 15.6 and
+  appendices C.6 and D:
+  - A sender holding a message larger than it may emit resets the lane with
+    `RECORD_TOO_LARGE` (`senderOverBoundError`) instead of emitting,
+    dropping or splitting it. Recovery never replays such a message and never
+    gap-fills past it: it answers with section 8.1's truncation at or before
+    it, so the client re-snapshots. A relayed `game` event whose fan-out is
+    too large for the lane is not delivered to that subscriber, as the
+    datagram carriage already treats an over-size event, and the room `seq`
+    shows the gap.
+  - A byte stays pending until the transport has sent it, acknowledged or
+    not; an endpoint whose stack does not show that counts until the write
+    settles, and one whose stack reports only acknowledgement keeps one
+    combined bound of at least 2 MiB. An endpoint may also bound pending
+    records per session, at no fewer than 65,536 (`minimumPendingRecords`, the
+    byte floor over 16); a close record counts against neither bound. A
+    server must bound bytes sent but not yet acknowledged, at no less than 1 MiB
+    (`minimumServerUnacknowledgedBytes`), and a client should. An empty text
+    or binary record is a message to every per-message limit; a close record
+    is not.
+  - The lane is the first client-initiated bidirectional stream the server's
+    stack hands it and the server does not refuse, and the client opens it
+    only after the successful response. A server that can tell a stream
+    arrived earlier may refuse it with `STREAM_LIMIT`, and the session then
+    has no lane.
 
 - **The request target is checked on every route.** `invalidRequestTarget`
   (utils/request-target.js) refuses a path or query carrying a byte outside

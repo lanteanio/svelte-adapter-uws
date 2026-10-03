@@ -1,5 +1,5 @@
 {
-  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length, one kind byte restating the WebSocket text/binary opcode, plus the unchanged WebSocket message bytes. The final two records are the ambiguous pair: identical valid-UTF-8 JSON bytes carried once as a text data-event and once as an opaque binary application payload (section 1.4), so a decoder that ignores kind provably cannot tell them apart. fragmentLengths deliberately split the first record's prefix, kind, and body across separate reads, place a read boundary one byte before the first record ends, and coalesce later records. invalidRecords carry a well-formed prefix and are rejected on the kind byte or the text body.",
+  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length, one kind byte restating the WebSocket text, binary, or close opcode, plus the unchanged WebSocket message bytes. Records four and five are the ambiguous pair: identical valid-UTF-8 JSON bytes carried once as a text data-event and once as an opaque binary application payload (section 1.4), so a decoder that ignores kind provably cannot tell them apart. Record six is an empty text message, whose zero length is a complete prefix the kind byte still follows. Records seven and eight are a draining server's reconnect advisory and its close record, the last record that direction carries before FIN. fragmentLengths deliberately split the first record's prefix, kind, and body across separate reads, place a read boundary one byte before the first record ends, coalesce later records, end one read on the empty record's prefix and the next exactly where that record ends, and split the close code across two reads; a decoder delivers each record in the read that completes it. validRecords are single-record streams ending in FIN for edges the transcript cannot hold. Each invalidPrefixes and invalidRecords entry names the check that refuses it, and checks says what each check means; each invalidRecords entry is a complete stream ending in FIN. Entries marked dependsOnReceiverLimit can have a different verdict at some other receiver limit, and every unmarked entry holds at every limit of 125 bytes or more; entries marked assumesReceiverReadsOn hold for a receiver that reads on after a close record. reportsCode is the close code a receiver of that stream reports: the first close record it read (1005 for an empty one), or 1006 when the only close record is refused as malformed.",
   "assumedReceiverMessageBytes": 1048576,
   "connectQuery": "lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1",
   "decodedConnectCapabilities": [
@@ -15,7 +15,12 @@
     55,
     16,
     52,
-    51
+    51,
+    1,
+    1,
+    41,
+    1,
+    8
   ],
   "records": [
     {
@@ -79,52 +84,345 @@
       "note": "Byte-identical to the preceding text record. As binary its leading byte 0x7b is not a registered appendix C.3 tag, so section 1.4 delivers it to the application untouched; only kind separates the two records.",
       "payloadHex": "7b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d",
       "recordHex": "32017b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d"
+    },
+    {
+      "direction": "c->s",
+      "kind": "text",
+      "length": 0,
+      "note": "An empty WebSocket text message. Zero is a complete length, the kind byte still follows it, and the record delivers an empty message exactly as WebSocket does.",
+      "payloadHex": "",
+      "recordHex": "0000"
+    },
+    {
+      "direction": "s->c",
+      "kind": "text",
+      "length": 36,
+      "frame": {
+        "type": "reconnect",
+        "windowMs": 5000
+      },
+      "payloadHex": "7b2274797065223a227265636f6e6e656374222c2277696e646f774d73223a353030307d",
+      "recordHex": "24007b2274797065223a227265636f6e6e656374222c2277696e646f774d73223a353030307d"
+    },
+    {
+      "direction": "s->c",
+      "kind": "close",
+      "length": 10,
+      "decoded": {
+        "code": 1001,
+        "reason": "draining"
+      },
+      "note": "The close that follows the reconnect advisory (sections 3.9, 15.4): the WebSocket close payload, a big-endian code then a UTF-8 reason. It arrives after the advisory because it is an ordinary record, and its sender FINs after it.",
+      "payloadHex": "03e9647261696e696e67",
+      "recordHex": "0a0203e9647261696e696e67"
     }
   ],
-  "concatenatedHex": "45007b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d39007b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d0c0103018180808010ac02aabbcc32007b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d32017b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d",
-  "invalidPrefixes": [
+  "concatenatedHex": "45007b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d39007b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d0c0103018180808010ac02aabbcc32007b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d32017b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d000024007b2274797065223a227265636f6e6e656374222c2277696e646f774d73223a353030307d0a0203e9647261696e696e67",
+  "validRecords": [
     {
-      "reason": "zero-length record",
-      "hex": "00",
-      "error": "PROTOCOL_ERROR"
+      "reason": "an empty binary message",
+      "kind": "binary",
+      "recordHex": "0001"
     },
+    {
+      "reason": "a close record with an empty payload: a close without a code",
+      "kind": "close",
+      "recordHex": "0002",
+      "reportsCode": 1005
+    },
+    {
+      "reason": "a close record carrying 1000 and no reason",
+      "kind": "close",
+      "recordHex": "020203e8",
+      "decoded": {
+        "code": 1000,
+        "reason": ""
+      },
+      "reportsCode": 1000
+    },
+    {
+      "reason": "a close record carrying 1003, the top of the first range",
+      "kind": "close",
+      "recordHex": "020203eb",
+      "decoded": {
+        "code": 1003,
+        "reason": ""
+      },
+      "reportsCode": 1003
+    },
+    {
+      "reason": "a close record carrying 1007, the bottom of the second range",
+      "kind": "close",
+      "recordHex": "020203ef",
+      "decoded": {
+        "code": 1007,
+        "reason": ""
+      },
+      "reportsCode": 1007
+    },
+    {
+      "reason": "a close record carrying 1014, the top of the second range",
+      "kind": "close",
+      "recordHex": "020203f6",
+      "decoded": {
+        "code": 1014,
+        "reason": ""
+      },
+      "reportsCode": 1014
+    },
+    {
+      "reason": "a close record carrying 3000, the bottom of the library and application range",
+      "kind": "close",
+      "recordHex": "02020bb8",
+      "decoded": {
+        "code": 3000,
+        "reason": ""
+      },
+      "reportsCode": 3000
+    },
+    {
+      "reason": "a close record carrying 4999 and a reason of exactly 123 bytes in three-byte characters",
+      "kind": "close",
+      "recordHex": "7d021387e282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ace282ac",
+      "decoded": {
+        "code": 4999,
+        "reason": "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€"
+      },
+      "reportsCode": 4999
+    }
+  ],
+  "invalidPrefixes": [
     {
       "reason": "non-canonical encoding of length 1",
       "hex": "8100",
-      "error": "PROTOCOL_ERROR"
+      "error": "PROTOCOL_ERROR",
+      "check": "non-canonical"
+    },
+    {
+      "reason": "non-canonical encoding of length 0",
+      "hex": "8000",
+      "error": "PROTOCOL_ERROR",
+      "check": "non-canonical"
     },
     {
       "reason": "length 1048577 exceeds assumedReceiverMessageBytes",
       "hex": "818040",
       "error": "RECORD_TOO_LARGE",
-      "dependsOnReceiverLimit": true
+      "dependsOnReceiverLimit": true,
+      "check": "over-limit"
     },
     {
       "reason": "prefix runs past the 5-byte cap before any length is known",
       "hex": "808080808001",
-      "error": "PROTOCOL_ERROR"
+      "error": "PROTOCOL_ERROR",
+      "check": "over-cap"
     }
   ],
   "invalidRecords": [
     {
-      "reason": "unknown record kind 0x02",
-      "recordHex": "010200",
-      "error": "PROTOCOL_ERROR"
+      "reason": "unknown record kind 0x03",
+      "recordHex": "010300",
+      "error": "PROTOCOL_ERROR",
+      "check": "unknown-kind"
     },
     {
       "reason": "reserved record kind 0xff",
       "recordHex": "01ff00",
-      "error": "PROTOCOL_ERROR"
+      "error": "PROTOCOL_ERROR",
+      "check": "unknown-kind"
     },
     {
       "reason": "text record that is not valid UTF-8",
       "recordHex": "0200fffe",
-      "error": "PROTOCOL_ERROR"
+      "error": "PROTOCOL_ERROR",
+      "check": "invalid-text"
     },
     {
       "reason": "text record ending inside a UTF-8 sequence",
       "recordHex": "0100c3",
-      "error": "PROTOCOL_ERROR"
+      "error": "PROTOCOL_ERROR",
+      "check": "invalid-text"
+    },
+    {
+      "reason": "a close record behind a refused record is never read",
+      "recordHex": "0200fffe020203e8",
+      "error": "PROTOCOL_ERROR",
+      "check": "invalid-text",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record whose payload is one byte",
+      "recordHex": "010203",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-payload-length",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 999, which no WebSocket endpoint may send",
+      "recordHex": "020203e7",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 1004, which no WebSocket endpoint may send",
+      "recordHex": "020203ec",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 1005, which no WebSocket endpoint may send",
+      "recordHex": "020203ed",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 1006, which no WebSocket endpoint may send",
+      "recordHex": "020203ee",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 1015, which no WebSocket endpoint may send",
+      "recordHex": "020203f7",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 2000, which no WebSocket endpoint may send",
+      "recordHex": "020207d0",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 2999, which no WebSocket endpoint may send",
+      "recordHex": "02020bb7",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record carrying 5000, which no WebSocket endpoint may send",
+      "recordHex": "02021388",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-code",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record whose reason is not valid UTF-8",
+      "recordHex": "040203e8fffe",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-reason-utf8",
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record whose reason is 124 ASCII bytes; a receiver at the 125-byte floor refuses its length first",
+      "recordHex": "7e0203e861616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-reason-length",
+      "dependsOnReceiverLimit": true,
+      "reportsCode": 1006
+    },
+    {
+      "reason": "close record whose reason is 124 bytes but only 62 characters; a receiver at the 125-byte floor refuses its length first",
+      "recordHex": "7e0203e8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9",
+      "error": "PROTOCOL_ERROR",
+      "check": "close-reason-length",
+      "dependsOnReceiverLimit": true,
+      "reportsCode": 1006
+    },
+    {
+      "reason": "a text record after a close record",
+      "recordHex": "020203e801007b",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1000
+    },
+    {
+      "reason": "an empty record after a close record",
+      "recordHex": "020203e80000",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1000
+    },
+    {
+      "reason": "a second close record after a close record",
+      "recordHex": "020203e8020203e9",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1000
+    },
+    {
+      "reason": "a single byte after a close record",
+      "recordHex": "020203e800",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1000
+    },
+    {
+      "reason": "an over-limit prefix after a close record: refused for following the close, before any prefix verdict",
+      "recordHex": "020203e8818040",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1000
+    },
+    {
+      "reason": "a byte after an empty close record",
+      "recordHex": "000200",
+      "error": "PROTOCOL_ERROR",
+      "check": "after-close",
+      "assumesReceiverReadsOn": true,
+      "reportsCode": 1005
+    },
+    {
+      "reason": "a zero length, then FIN before its kind byte",
+      "recordHex": "00",
+      "error": "PROTOCOL_ERROR",
+      "check": "fin-inside-record"
+    },
+    {
+      "reason": "a text body cut short by FIN after one valid byte",
+      "recordHex": "030061",
+      "error": "PROTOCOL_ERROR",
+      "check": "fin-inside-record"
+    },
+    {
+      "reason": "an unknown kind behind a length above assumedReceiverMessageBytes: size is judged before kind",
+      "recordHex": "818040ff",
+      "error": "RECORD_TOO_LARGE",
+      "check": "over-limit",
+      "dependsOnReceiverLimit": true
+    },
+    {
+      "reason": "a close record declaring a length above assumedReceiverMessageBytes: no close-specific check runs before the size verdict",
+      "recordHex": "81804002",
+      "error": "RECORD_TOO_LARGE",
+      "check": "over-limit",
+      "dependsOnReceiverLimit": true,
+      "reportsCode": 1006
     }
-  ]
+  ],
+  "checks": {
+    "non-canonical": "section 15.1: the length prefix is not the shortest encoding of its value",
+    "over-cap": "section 15.1: the prefix runs past 5 bytes; refused at the sixth byte at the latest, and MAY be at a fifth byte that still has its continuation bit set",
+    "over-limit": "section 15.1: a well-formed length above the receiver limit; judged before the kind byte",
+    "unknown-kind": "section 15.1: a kind byte other than 0x00, 0x01 or 0x02",
+    "invalid-text": "section 15.1: a text record whose bytes are not valid UTF-8 as a whole",
+    "close-payload-length": "section 15.4: a close payload of one byte, which holds no code",
+    "close-code": "section 15.4: a close code outside 1000-1003, 1007-1014 and 3000-4999",
+    "close-reason-length": "section 15.4: a close reason longer than 123 bytes",
+    "close-reason-utf8": "section 15.4: a close reason that is not valid UTF-8",
+    "after-close": "section 15.4: any byte after a close record on its direction, decided before any prefix verdict, by a receiver that reads on; one that stops reading after the close sends STOP_SENDING with NO_ERROR instead, and either way the close it read stands",
+    "fin-inside-record": "section 15.1: the direction finished while a record was incomplete"
+  }
 }

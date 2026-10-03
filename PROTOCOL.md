@@ -1400,19 +1400,40 @@ Each stream record is:
 - **A sender MUST NOT emit a record whose `messageBytes` exceed 1,048,576
   bytes**, unless it knows out of band that its peer accepts more. Nothing on
   this carriage negotiates a size, so this bound is fixed and every sender can
-  evaluate it against the record in hand.
+  evaluate it against the record in hand. A sender holding a message larger
+  than it may emit MUST NOT emit it, drop it, or split it across records - a
+  drop loses a reliable message without a word, and a split hands the
+  receiver messages nobody sent - so it MUST reset the reliable lane with
+  `RECORD_TOO_LARGE` instead. Recovery over this carriage - section 7's
+  resume by either mechanism, and section 8's `replay` - MUST NOT replay such
+  a message and MUST NOT gap-fill past it: the server MUST answer that
+  topic's recovery with section 8.1's truncation, at or before that message,
+  so the client re-snapshots and recovery does not repeat the reset. On this
+  carriage truncation therefore also covers history the server holds but
+  cannot carry; 8.1's client action is unchanged. Live delivery on the relayed
+  `game` lane (section 3.10) is the one exception to the reset, because its
+  WebTransport carriage already treats an over-size event as loss: the server
+  MUST NOT deliver a relayed event whose fan-out to a stream subscriber is
+  larger than it may emit, and MUST NOT reset that subscriber's lane for it,
+  as section 14.3 handles an over-size datagram. The room `seq` advances
+  regardless, so the gap is visible. Recovery of such an event follows the
+  truncation rule above.
 - **A receiver's limit is its section 1.3 inbound message limit applied to this
   carriage** - `maxPayloadLength` under another name: deployment-configurable,
-  and **1,048,576 bytes** absent configuration. A deployment SHOULD apply one
-  value to both carriages whether it raises that limit or lowers it, so that a
-  message its WebSocket accepts is not refused on its stream and a message its
-  WebSocket refuses is not accepted on its stream. A receiver MUST reject a
-  zero length, a declared length above its own limit (immediately on the
-  complete prefix, before allocating for that length and without waiting for
-  body bytes), or a record whose bytes are incomplete when the peer finishes
-  its sending direction. The LENGTH VALUE is judged only once the prefix is
-  complete, never on a partial accumulation, which would let the same bytes be
-  answered with two different codes.
+  and **1,048,576 bytes** absent configuration - except that it is never below
+  125 bytes, so that every legal close record (15.4) fits. A deployment SHOULD
+  apply one value to both carriages whether it raises that limit or lowers it,
+  so that a message its WebSocket accepts is not refused on its stream and a
+  message its WebSocket refuses is not accepted on its stream; a configured
+  limit under 125 bytes is the one case in which the stream accepts what the
+  WebSocket refuses. A receiver MUST reject a declared length above its own
+  limit (immediately on the complete prefix, before allocating for that length
+  and without waiting for body bytes), or a record whose bytes are incomplete
+  when the peer finishes its sending direction. The LENGTH VALUE is judged only
+  once the prefix is complete, never on a partial accumulation, which would let
+  the same bytes be answered with two different codes. A length of zero is
+  legal: the `kind` byte still follows, and the record carries an empty message
+  of that kind, exactly as WebSocket carries an empty text or binary message.
 - The two directions are not symmetric, and this section does not pretend
   otherwise: a client's inbound capacity is a property of its runtime rather
   than a deployment knob, and section 1.3 describes what the reference client
@@ -1420,38 +1441,45 @@ Each stream record is:
   refused by a peer that accepts less, exactly as on WebSocket. What the
   carriage improves is diagnosis: an over-limit server-to-client message is a
   SILENT drop on WebSocket (section 1.3) but a signalled `RECORD_TOO_LARGE`
-  here, so the same mistake is visible instead of invisible.
-- `kind` re-supplies the one bit of WebSocket framing a byte stream discards:
-  the message type. `0x00` is a text message, `0x01` is a binary message. A
-  receiver MUST reject any other value with `PROTOCOL_ERROR`; values
-  `0x02`-`0xFF` are reserved and only a future revision may define one. The
-  forward-compatibility pass-through of sections 1.4 and 10 deliberately does
-  NOT apply to this byte: an unknown frame can be forwarded or ignored, but a
-  record whose TYPE is unknown cannot be safely delivered anywhere, so it is a
-  structural error, not an extension point. The byte is read only after the
-  length verdict of the complete prefix, so a record refused for its length is
-  answered for its length and its `kind` byte is never inspected.
+  here (15.1's relayed `game` exception aside), so the same mistake is visible
+  instead of invisible.
+- `kind` re-supplies the part of WebSocket framing a byte stream discards: the
+  frame type. `0x00` is a text message, `0x01` is a binary message, and `0x02`
+  is a close record, the WebSocket close frame (15.4). Ping and pong have no
+  kind, because QUIC liveness replaces them (15.4). A receiver MUST reject any
+  other value with `PROTOCOL_ERROR`; values `0x03`-`0xFF` are reserved and only
+  a later revision of this section may define one. The forward-compatibility pass-through of
+  sections 1.4 and 10 deliberately does NOT apply to this byte: an unknown
+  frame can be forwarded or ignored, but a record whose TYPE is unknown cannot
+  be safely delivered anywhere, so it is a structural error, not an extension
+  point. The byte is read only after the length verdict of the complete
+  prefix, so a record refused for its length is answered for its length and
+  its `kind` byte is never inspected.
 - `messageBytes` are EXACTLY the bytes the corresponding WebSocket message
-  carries, and `kind` is that message's WebSocket type. No opcode, compression
-  marker, checksum, or carriage header is inserted inside `messageBytes`. Demux
-  after deframing follows the WebSocket rules unchanged, gated by `kind`
-  exactly as they are gated by the opcode there: a text record is subject to
-  section 1.1's control-frame recognition and MUST be valid UTF-8 in whole -
-  RFC 6455 parity, rejected per 15.6, because two peers that repair invalid
-  bytes differently would silently disagree about the record's content - while
-  a binary record is subject to the leading-byte registry of appendix C.3 and
-  section 1.4's unknown-leading-byte rule, and never to control-frame
-  recognition. A control record is therefore a TEXT record beginning exactly
-  `{"type`, a binary topic record is a BINARY record beginning `0x03`, and a
-  binary record whose bytes happen to be printable JSON stays an application
-  binary payload: two records with identical `messageBytes` and different
-  `kind` are as distinct here as a text and a binary WebSocket message carrying
-  the same bytes, which is what makes the carriage lossless rather than merely
-  length-delimited.
+  carries, and `kind` is that message's WebSocket type; a close record's
+  `messageBytes` are the close frame's payload, read by 15.4 and never handed
+  to demux. No opcode, compression marker, checksum, or carriage header is
+  inserted inside `messageBytes`. Demux after deframing follows the WebSocket
+  rules unchanged, gated by `kind` exactly as they are gated by the opcode
+  there: a text record is subject to section 1.1's control-frame recognition
+  and MUST be valid UTF-8 in whole - RFC 6455 parity, rejected per 15.6,
+  because two peers that repair invalid bytes differently would silently
+  disagree about the record's content - while a binary record is subject to
+  the leading-byte registry of appendix C.3 and section 1.4's
+  unknown-leading-byte rule, and never to control-frame recognition. A control
+  record is therefore a TEXT record beginning exactly `{"type`, a binary topic
+  record is a BINARY record beginning `0x03`, and a binary record whose bytes
+  happen to be printable JSON stays an application binary payload: two records
+  with identical `messageBytes` and different `kind` are as distinct here as a
+  text and a binary WebSocket message carrying the same bytes, which is what
+  makes the carriage lossless rather than merely length-delimited.
 - Record boundaries are independent of QUIC read boundaries. A prefix or body
   may arrive across any number of reads, and one read may contain any number of
   complete records plus a partial next record. A receiver MUST parse
-  incrementally and MUST NOT treat a read boundary as a message boundary.
+  incrementally and MUST NOT treat a read boundary as a message boundary. A
+  record is complete once its last byte has arrived - for an empty record, its
+  `kind` byte - and a receiver MUST NOT hold a complete record back waiting for
+  bytes after it.
 
 The prefix and the `kind` byte are carriage, not an inner frame. Consequently every JSON schema,
 `0x03` codec, conformance vector, unknown-frame rule, control-frame recognition
@@ -1470,29 +1498,44 @@ control record that reaches section 1.2's ceiling is answered with the ordinary
 
 The client MUST declare `lantean.reliable:1` using section 14.7 before opening
 the stream. After a successful CONNECT response it MAY open exactly **one**
-bidirectional stream, and the first client-initiated bidirectional stream is the
-reliable lane. The stream is optional: a declaring session may still use only
-datagrams.
+bidirectional stream. The client MUST NOT open the stream before the response:
+WebTransport lets a client open streams optimistically, and this lane does not
+take up that permission. The stream is optional: a declaring session may still
+use only datagrams.
 
-The server MUST NOT open the reliable stream. A second client-initiated
-bidirectional stream, any unidirectional stream, or any stream from a session
-that omitted the token is not another protocol lane; the endpoint closes it
-with `STREAM_LIMIT` (appendix C.6) and leaves an already-open reliable lane
-unchanged. Once the reliable stream closes it cannot be replaced within the
-same WebTransport session; recovery opens a new CONNECT session (15.5). This
-single-stream topology preserves the ordering guarantees of section 11 and
-prevents control, subscription, and data records from acquiring cross-stream
-race rules.
+The reliable lane is the first client-initiated bidirectional stream of the
+session that the server's WebTransport stack hands it, unless the server
+refuses that stream as early (below). The server MUST NOT open the reliable
+stream. A second
+client-initiated bidirectional stream, any unidirectional stream, or any
+stream from a session that omitted the token is not another protocol lane; the
+endpoint closes it with `STREAM_LIMIT` (appendix C.6) and leaves an
+already-open reliable lane unchanged. A server whose stack shows it that a
+stream arrived before the server sent its successful response MAY refuse that
+stream the same way; the session then has no lane, and every later stream is
+refused with `STREAM_LIMIT`. A stack that buffers early streams and
+hands them over afterwards gives the server nothing to judge. Once the
+reliable stream closes it cannot be replaced within the same WebTransport
+session; recovery opens a new CONNECT session (15.5). This single-stream
+topology preserves the ordering guarantees of section 11 and prevents
+control, subscription, and data records from acquiring cross-stream race
+rules.
 
 ### 15.3 Inner protocol lifecycle
 
 Opening the stream creates one logical protocol connection:
 
-1. The server's first stream record MUST be the unchanged `welcome` frame.
+1. The server's first stream record MUST be the unchanged `welcome` frame,
+   unless the server closes the lane before admitting it: then its first and
+   only record is a close record (15.4). A close record is carriage, not one
+   of the frames whose order section 11 promises.
 2. The client MAY send the unchanged `hello` frame. Inner capabilities are
    negotiated solely by `hello.caps`, not copied from CONNECT declarations.
 3. Subscribe, batch, lease/request-n, resume, data-event, and `0x03` records
-   then behave exactly as sections 2-11 specify.
+   then behave as sections 2-11 specify, except where this section says
+   otherwise - 15.1's rules on a message larger than its sender may emit
+   among them: recovery never replays one, and a relayed `game` event too
+   large for the lane is not delivered live.
 
 The `welcome.sessionId`, capability set, wire-id space, ingress-id space,
 subscriptions, leases, and resume state belong to the reliable stream. The
@@ -1517,14 +1560,80 @@ Liveness uses QUIC/WebTransport idle timeout, keepalive, path validation, and
 connection health. The WebSocket ping behavior in section 1.3 does not become an
 inner record, and a peer MUST NOT invent a JSON heartbeat.
 
-A FIN or reset in either direction closes the whole logical reliable lane:
-both endpoints stop writing it, and the server drops its reliable
-subscriptions, leases, ids, and session id exactly as on WebSocket close. It
-does **not** close the surrounding WebTransport session or its datagram
-membership. Closing the CONNECT session or QUIC connection closes both lanes.
-An orderly application shutdown SHOULD finish queued complete records, send
-FIN, and then keep the WebTransport session only if its datagram lane remains
-useful.
+A close record (`kind` `0x02`, 15.1) is the WebSocket close frame. Its
+`messageBytes` are that frame's payload: empty, or a 2-byte big-endian status
+code followed by a UTF-8 reason of at most **123 bytes**. The code is one of
+1000-1003, 1007-1014, or 3000-4999, the set a WebSocket endpoint may put in a
+close frame today; this revision fixes that set, so a code outside it,
+including one registered later, is refused here. Wherever an endpoint would
+send a WebSocket close frame - empty, or carrying the throttling `4429` of
+section 3.7, the `1001` that follows a `reconnect` advisory (section 3.9), a
+terminal `4401` or `1008`, or any code an application closes with - it MUST
+instead write a close record carrying that payload as the last record on its
+direction, then FIN, cutting a longer reason to the longest run of whole UTF-8
+code points that fits in 123 bytes; the receiver acts on the code exactly as
+it would on WebSocket. An error in the records themselves is not such a close:
+it resets the lane (15.6). Being an ordinary record, a close record follows
+everything written before it on its direction, so a `reconnect` advisory is
+never overtaken by its close, which a reset could not promise.
+
+A close record whose payload is one byte long, whose code is outside that set,
+or whose reason is longer than 123 bytes or not valid UTF-8 is a
+`PROTOCOL_ERROR`, and so is any byte its sender writes on that direction after
+a close record - a verdict reached on arrival, before any prefix is judged. A
+receiver MAY refuse a close record that declares more than 125 bytes as soon
+as it has read its `kind` byte. A receiver needs nothing more from a direction
+once it has read its close record, and MAY stop reading it with `NO_ERROR`
+(appendix C.6); one that reads on and finds such a byte MUST reset with
+`PROTOCOL_ERROR`, and the close it already read stands.
+
+An endpoint that reads the peer's close record and has not written its own
+MUST write one in reply, normally echoing the code it read, and FIN within a
+bounded time, as RFC 6455 answers a close frame with one. Unless it has
+received the peer's STOP_SENDING, which it answers per 15.6, it MAY first
+finish writing complete records it had already queued; it MUST NOT FIN inside
+a record, which its peer would have to refuse (15.1), and resets with
+`NO_ERROR` when it cannot finish one in time. An endpoint that reads the
+peer's FIN or receives its RESET_STREAM likewise ends its own direction within
+a bounded time, with FIN at a record boundary or with RESET_STREAM `NO_ERROR`.
+An endpoint that has written its own close record keeps reading the lane
+until it has read the peer's close record, FIN, or RESET_STREAM, or its
+bounded wait runs out, and until then sends STOP_SENDING only for a lane
+error.
+
+What an endpoint reports is RFC 6455's close code: the code of the first
+well-formed close record it read, or `1005` for an empty one, and `1006` when
+it read none - the lane ended with a FIN alone, a reset, or a wait that ran
+out. A close record refused as malformed is not read. Because a close record
+is answered with one, each side normally reports the code the other sent, as
+on WebSocket, and a client and a server report the same way.
+
+A close record, a FIN, or a reset in either direction closes the whole logical
+reliable lane, and the server drops its reliable subscriptions, leases, ids,
+and session id exactly as on WebSocket close. Once an endpoint has written its
+own close record or ended its own direction, or read the peer's close record,
+FIN, or reset, it MUST NOT act on any further text or binary record it reads:
+it neither delivers one to the application nor processes it as a control,
+relay, ingress, or plugin frame; a close record it reads still decides what it
+reports. An endpoint reads no record on a receiving direction past one it
+refused with a lane error (15.6), or after it has ended that direction; a
+close record there is not read. A sending direction has ended once the endpoint has asked its stack
+to send its FIN or RESET_STREAM; a receiving direction has ended once the
+endpoint has read its FIN, received its RESET_STREAM, or asked its stack to
+send STOP_SENDING for it. Closing the lane does **not** close the surrounding
+WebTransport session or its datagram membership.
+
+Closing the CONNECT session or the QUIC connection closes both lanes and
+discards stream data still in flight, a close record included. An endpoint
+that has ended its own direction SHOULD therefore keep the session open until
+it has read the peer's FIN or received its RESET_STREAM, or a bounded wait has
+run out. An orderly shutdown SHOULD finish queued complete records, write a
+close record (`1001` when the server is going away, as on WebSocket), send
+FIN, and wait the same way before it closes a session whose datagram lane is
+no longer useful. The application error code and message of a WebTransport
+session close carry no meaning in this binding: only a close record carries a
+close code. A browser that unloads a page ends its session without one, so the
+server reports `1006` where WebSocket would report `1001`.
 
 ### 15.5 Resume and QUIC migration
 
@@ -1536,55 +1645,106 @@ Recovery applies only after a different WebTransport CONNECT session is
 created. The client declares `lantean.reliable:1`, opens its new reliable
 stream, receives the new `welcome`, re-sends `hello`, and uses the unchanged
 resume-on-subscribe `recover` fields (or compatibility `resume` frame) from
-section 7. Offset and epoch comparison is identical to WebSocket. Datagram
-`game` membership is re-authorized independently at CONNECT and has no
-gap-fill.
+section 7. Offset and epoch comparison is identical to WebSocket; only the
+gap-fill differs, by 15.1's rule for a message larger than its sender may
+emit. Datagram `game` membership is re-authorized independently at CONNECT and
+has no gap-fill.
 
 ### 15.6 Flow control and slow consumers
 
 QUIC stream flow control and section 3.6 leases solve different layers and both
 apply:
 
-- QUIC flow control says how many bytes the transport currently accepts.
+- QUIC flow control says how many bytes the peer will currently take.
 - A negotiated `lease` says how many application messages the server permits;
   `request-n` is still advisory and does not enlarge any byte limit.
 
-An endpoint MUST bound complete message bytes that have been framed for this
-lane but not yet accepted by the WebTransport send stream. That bound MUST be
-at least **1,048,576 bytes per session**, and at least the largest record this
-endpoint may itself emit (15.1) where out-of-band knowledge raised that above
-the unnegotiated maximum - otherwise emitting a record the sender is permitted
-to emit would force it to reset its own lane. The sum is over each queued
-record's `messageLength`; the length prefix (at most 5 bytes, 15.1) and the
+An endpoint MUST bound, per session, the message bytes of complete records
+framed for this lane but not yet sent. A byte counts until the transport has
+sent it, whether or not the peer has acknowledged it: a byte a stack holds
+only because the peer's flow control has not admitted it is still pending,
+and a byte in flight is not, so acknowledgement delay cannot eat into the
+floor. An endpoint whose stack does not show what it has sent counts a byte
+until the write carrying it settles (the W3C WebTransport API's `write()`
+promise), accepting that such a stack may settle a write flow control still
+holds; a stack whose write settles only on acknowledgement reports only
+acknowledgement. An endpoint whose stack reports only acknowledgement counts
+unsent and unacknowledged bytes together against one bound of at least the
+unsent-byte floor plus 1,048,576 bytes - **2,097,152 bytes** unless
+out-of-band knowledge raised that floor. The unsent-byte bound MUST be at least
+**1,048,576 bytes per session**, and at least the largest record this endpoint
+may itself emit (15.1) where out-of-band knowledge raised that above the
+unnegotiated maximum - otherwise emitting a record the sender is permitted to
+emit would force it to reset its own lane. The sum is over the unsent message
+bytes of each queued record; the length prefix (at most 5 bytes, 15.1) and the
 `kind` byte are fixed framing overhead and do not count. One maximum-size
-message therefore always
-fits. The endpoint MUST stop pulling or producing optional work while the
-stream is blocked. If adding the next complete record would cross the bound, it resets the
-reliable lane with `SLOW_CONSUMER`; it MUST NOT drop a reliable record,
-silently skip a `seq`, or spill into a second stream. Recoverable topics then
-resume on a new connection by section 15.5; non-recoverable topics re-snapshot
-as section 7 already requires. The datagram lane may continue after the reset.
+message therefore always fits. Because an empty message adds nothing to that
+sum, an endpoint MAY also bound the number of pending records per session;
+that bound MUST be at least **65,536 records**. A close record (15.4) counts
+against neither bound. The endpoint MUST stop pulling or producing optional
+work while the stream is blocked. If adding the next complete record would
+cross either bound, it MUST reset the reliable lane with `SLOW_CONSUMER`.
+While the lane is open it MUST NOT drop that record or any queued record,
+skip a `seq`, or spill into a second stream; section 6.4's drop under
+backpressure does not apply on this carriage. The relayed `game` events 15.1
+does not deliver are never queued, so they are no exception to this.
+Recoverable topics then resume on a new connection by section 15.5;
+non-recoverable topics re-snapshot as section 7 already requires. The datagram
+lane may continue after the reset.
+
+Bytes sent but not yet acknowledged are a separate store: a peer that grants
+flow control yet never acknowledges one range would otherwise hold that
+storage without limit. A server MUST bound them, at no less than
+**1,048,576 bytes** so a maximum-size record can be in flight whole, and a
+client SHOULD. At that bound the endpoint MUST stop sending, and further
+records wait against the pending bounds above, so a peer that keeps
+withholding acknowledgement meets `SLOW_CONSUMER`.
 
 An inbound declared record above the receiver's 15.1 limit is stopped/reset with
-`RECORD_TOO_LARGE`. A non-canonical/zero prefix, a prefix over 5 bytes, an
-unknown `kind` (anything but `0x00`/`0x01`, 15.1), a text record that is not
-valid UTF-8, an invalid registered binary shape, or FIN inside a record is
-reset with `PROTOCOL_ERROR`. The two codes never overlap because the checks are
-ordered: the prefix is decided first and COMPLETE (15.1), with structure before
-size - a prefix over 5 bytes or not canonically encoded is `PROTOCOL_ERROR`
-whatever length it would have denoted, and `RECORD_TOO_LARGE` applies only to a
-well-formed length. Only a record that passed both prefix verdicts has its
-`kind` byte and body judged at all, so a refused length is never also reported
-for its `kind`. A receiver that judged a partial prefix value instead could
-answer the same bytes with either code, which is why 15.1 forbids it. These errors
-close the reliable lane and its state, not the whole WebTransport session.
+`RECORD_TOO_LARGE`, and a sender holding a message larger than it may emit
+resets its lane with the same code (15.1). A non-canonical prefix, a prefix
+over 5 bytes, an unknown `kind` (anything but `0x00`-`0x02`, 15.1), a text
+record that is not valid UTF-8, a malformed close record or any byte after one
+(15.4), or FIN inside a record is reset with `PROTOCOL_ERROR`. Of the checks
+on received bytes, only these record-layer checks reset the lane: a
+well-formed record whose inner message is malformed is handled exactly as the
+same message would be on WebSocket - dropped, denied, passed through, or
+closed with a close record (15.4). The two codes never overlap because the checks are
+ordered: a byte after a close record on its direction is refused before
+anything else (15.4); otherwise the prefix is decided first and COMPLETE
+(15.1), with structure before size - a prefix over 5 bytes or not canonically
+encoded is `PROTOCOL_ERROR` whatever length it would have denoted, and
+`RECORD_TOO_LARGE` applies only to a well-formed length. Only a record that
+passed both prefix verdicts has its `kind` byte and body judged at all, so a
+refused length is never also reported for its `kind`. A receiver that judged a
+partial prefix value instead could answer the same bytes with either code,
+which is why 15.1 forbids it. These errors close the reliable lane and its
+state, not the whole WebTransport session.
 
-One inner breach is deliberately NOT a lane reset: a CLIENT-TO-SERVER
-control-shaped record that reaches section 1.2's 8192-byte ceiling is answered
-with the ordinary `error` control frame and the lane stays open (15.1). That
+An endpoint that finds a lane error MUST close both directions with its code,
+except a direction that has already ended (15.4): RESET_STREAM on the
+direction it sends and STOP_SENDING on the one it receives. It MUST NOT reset
+a direction it finished with FIN except in answer to the peer's STOP_SENDING.
+An endpoint answering the peer's STOP_SENDING SHOULD copy its code into its
+own RESET_STREAM, as QUIC recommends; one that has already reset that
+direction sends nothing more. A code alone therefore does not say which side
+found the error. `NO_ERROR` reports none: an endpoint uses it to close a
+direction of a lane that is already closing - answering the peer's
+RESET_STREAM before it has received any STOP_SENDING from the peer, stopping reads
+it no longer needs, or abandoning a record it cannot finish (15.4) - and it is
+the code the W3C WebTransport API sends when an application aborts a stream
+without one. A reset carries no close code, whatever its code: what an
+endpoint reports is still decided by 15.4, and an unlisted code means no more
+than that.
+
+So a CLIENT-TO-SERVER control-shaped record that reaches section 1.2's
+8192-byte ceiling is deliberately NOT a lane reset: it is answered with the
+ordinary `error` control frame and the lane stays open (15.1). That
 ceiling does not apply server-to-client, so a large `batch` record is bounded
 only by the record limit. Section 12's authorization and rate limits still
-apply after deframing.
+apply after deframing. An empty text or binary record is a message to section
+3.11's admission and to every other per-message limit, exactly as an empty
+WebSocket message is; a close record is not a message.
 
 ### 15.7 Conformance and coexistence
 
@@ -1783,10 +1943,11 @@ the transport itself also closes.
 
 | Code | Name | Meaning |
 |---|---|---|
-| `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened. |
-| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; deployment-configurable, 1 MiB absent configuration - a sender within the unnegotiated 1 MiB bound may still exceed a lowered limit, and refusing it is conforming). |
-| `0x03` | `PROTOCOL_ERROR` | Record framing, body, or inner message was malformed: a bad prefix (including one over 5 bytes), an unknown `kind` byte, an invalid-UTF-8 text record, or a malformed inner message (15.1, 15.6). |
-| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB, and at least the largest record this endpoint may itself emit). |
+| `0x00` | `NO_ERROR` | The lane is already closing and this direction closes with it - answering the peer's reset before it has received any STOP_SENDING from the peer, stopping reads the endpoint no longer needs, or abandoning a record it cannot finish - or the application named no code (15.4, 15.6). It reports no error. |
+| `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened, or a stream arrived before the server sent its successful response, where the server can tell (15.2). |
+| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; deployment-configurable, 1 MiB absent configuration, never below 125 bytes - a sender within the unnegotiated 1 MiB bound may still exceed a lowered limit, and refusing it is conforming), or a sender held a message larger than it may emit (15.1). |
+| `0x03` | `PROTOCOL_ERROR` | Record framing or body was malformed: a bad prefix (including one over 5 bytes), an unknown `kind` byte, an invalid-UTF-8 text record, a malformed close record or bytes after one, or FIN inside a record (15.1, 15.4, 15.6). A malformed inner message is handled as on WebSocket instead. |
+| `0x04` | `SLOW_CONSUMER` | Pending unsent message bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB, and at least the largest record this endpoint may itself emit), or pending records would exceed its optional record bound (at least 65,536); also the combined bound of an endpoint whose stack reports only acknowledgement (at least 2 MiB), and a peer withholding acknowledgement until the pending bounds fill (15.6). |
 
 ---
 
@@ -1875,12 +2036,31 @@ These non-choices are deliberate and are recorded so they are not relitigated:
   pass-through rule exists for frames a peer can safely ignore or forward; a
   record whose type is unknown can be delivered nowhere safely. A text record
   must be whole-record valid UTF-8 for RFC 6455 parity, so the carriage never
-  accepts a text message the WebSocket carriage would have failed.
-- **QUIC flow control does not replace leases.** QUIC limits bytes accepted by
-  the transport; `lease` limits application messages according to server
-  pressure. The finite pending-record bound - at least 1 MiB, and at least what
+  accepts a text message the WebSocket carriage would have failed. A zero
+  length is legal for the same parity: an empty WebSocket message exists, and
+  with the `kind` byte after the prefix a zero-length record is unambiguous.
+- **Close is a record, not a reset code.** Sections 3.7 and 3.9 give WebSocket
+  close codes meanings a client acts on - slow down, disperse, stop - so the
+  carriage has to carry them. A reset code could, but a reset may overtake
+  records still in flight, losing the `reconnect` advisory a drain sends just
+  before its close, and it has no room for the reason. Closing the
+  WebTransport session could, but it takes the datagram lane down with it. A
+  close record is ordered behind everything written before it, keeps the
+  reason, closes only this lane, and carries the close frame's own payload, so
+  one parser reads both carriages. As on WebSocket, a close needs the
+  connection to stay up until the peer has ended its own direction, which is
+  why 15.4 asks the closer to wait. The wait is bounded by each side's own
+  clock rather than a number here: each bound only shortens that side's own
+  exposure, the session close backs both up, and what each side reports
+  depends only on which close records reach it before its wait ends.
+- **QUIC flow control does not replace leases.** QUIC limits the bytes the
+  peer will take; `lease` limits application messages according to server
+  pressure. The finite pending-byte bound - at least 1 MiB, and at least what
   this endpoint may itself emit - prevents either mechanism from becoming an
-  unbounded userspace queue.
+  unbounded userspace queue, and the optional record count bounds what bytes
+  cannot, because an empty message counts nothing. Its floor of 65,536 is the
+  byte floor divided by 16, so with both bounds at their floors it binds first
+  only on records averaging under 16 bytes.
 - **What a sender may emit is fixed; what a receiver accepts is its own.** A
   single fixed ceiling would have been simpler, but the inbound message limit is
   a documented deployment knob, so one fixed stream ceiling would make the same
@@ -1927,6 +2107,7 @@ These non-choices are deliberate and are recorded so they are not relitigated:
 | `0x03` binary | both | 6 |
 | plugin ingress (`cursor`, `presence-*`, `replay`, ...) | c->s | 8 |
 | varint-length + kind stream record (carriage; inner frame unchanged) | both | 15.1 |
+| close record (`kind` `0x02`; the WebSocket close frame's payload) | both | 15.4 |
 
 ---
 
