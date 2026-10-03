@@ -65,8 +65,9 @@ export interface UWSPluginOptions extends SharedAdapterOptions {
 	 * connections, topics with subscriber counts, presence and cursor
 	 * channels, pressure and egress readings, and versions - kept current
 	 * over Server-Sent Events, with a downloadable static diagnostic report
-	 * at `<path>/report`. Loopback-only: the socket, the `Host` header, and
-	 * the `Origin` header (when present) must all name a loopback host, so
+	 * at `<path>/report`. Loopback-only: the socket, the `Host` header (over
+	 * HTTP/2, `:authority`), and the `Origin` header (when present) must all
+	 * name a loopback host, so
 	 * neither a LAN peer under `--host` nor a DNS-rebound page can read it.
 	 *
 	 * `false` disables the dashboard; an object customizes the mount path.

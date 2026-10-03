@@ -161,6 +161,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every Host a browser or mainstream HTTP library sends is served as before: an ASCII host name, IPv4 address or bracketed IPv6 address with an optional port. A host name sent as raw UTF-8 rather than its `xn--` spelling, which the URL parser used to convert, is now refused as RFC 9110 has it. The configured proxy headers are held to the same rule, and a port header to digits. An empty or malformed value used to answer 500 on a page and log `runtime.ssr.failed`; it now answers 400 without the event. `createTestServer`'s admin route and the `vite dev` authentication endpoint refuse the same values, and under `vite dev` with `ORIGIN` set the `authenticate` hook's request is now built on that origin, as in production, rather than on the Host header.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: under `vite dev` over HTTPS the WebSocket, the auth endpoint and the dashboard accept a browser's requests.** Under `server.https` the plugin refused the browser's WebSocket, and over HTTP/2, which Vite 7.2 and later always speak there, its auth and dashboard requests; the auth hook also got `/` as its `url` and ran for `/__WS/AUTH` too.
+  - **Affects:** Apps that run `vite dev` with `server.https`, and `authenticate` hooks that read `event.url` or `event.request.url`, or return a Response, under `vite dev`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Dev only; production is unchanged. Under `server.https` a same-origin `Origin` on the WebSocket upgrade and the auth endpoint is the `https://` one, as under production's `SSL_CERT`, and the `http://` one for the same host is refused. The hook gets the request's own path and query in `event.url` and `request.url`, as in production, instead of `/` with the query. Another spelling of the auth path goes on to the app, as in production, and so does any dashboard spelling but its path and the paths under it; trailing slashes on `dashboard.path` are dropped. Over HTTP/2 the hook's `headers` carry no pseudo-headers and `host` is the `:authority`, and a Response the hook returns is written without the connection headers HTTP/2 does not carry, such as `transfer-encoding`. A hook Response whose body fails to read answers a 500 without the hook's headers and cookies, as in production. A status that is no final status node can write, such as the 0 of `Response.error()`, answers the same 500, and over HTTP/1.1 so does a header value or cookie that node's HTTP/1.1 writer refuses; production writes both as given. Header values and cookies with text past ASCII go out as their UTF-8 bytes, as production writes them. A client that leaves partway through an auth POST no longer ends the dev server. Over HTTP/1.1 a Response node refuses only as it writes it, such as a 204 announcing a `trailer`, closes the connection. A hook 304 keeps the `content-length` it declares when that reads as a length.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -265,6 +271,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each of them with its half of the change removed.
 
 ### Fixed
+
+- **`vite dev` accepts `server.https` requests as production does.** The
+  auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
+  they passed `false`, so under `server.https`, where Vite terminates TLS as
+  production does under SSL_CERT, the same-origin rule expected an `http://`
+  Origin and refused the browser's. `http1Headers` (src/vite.js) drops the
+  pseudo-headers node's http2 compatibility layer leaves in `req.headers` and
+  takes `host` from `:authority`, as SvelteKit's `getRequest` does; the auth
+  and dashboard middlewares read their headers through it. Answering over
+  HTTP/2, the auth lane leaves out of the hook's Response the
+  connection-specific headers HTTP/2 does not carry
+  (`connectionSpecificHeader`), on most of which node's http2 layer throws
+  when the response is written; over HTTP/1.1 they are written. Header
+  values and cookies with text past ASCII go to node as their UTF-8 bytes
+  (`wireValue`), which is what uWS writes; node takes one byte per
+  character, refusing one past U+00FF over HTTP/1.1 and keeping only its low
+  byte over HTTP/2.
+
+- **`vite dev`'s auth lane writes a hook Response as production does, or
+  answers 500 with nothing of the hook's on it.** Before it sets anything,
+  the lane refuses a status that is not an integer from 200 to 999
+  (`Response.error()` has 0, and a 1xx is no final status), reads the hook
+  Response's body and, over HTTP/1.1, checks every header and Set-Cookie
+  value with node's own validator, so a body that fails or a value node
+  refuses answers the catch's 500 with nothing of the hook's on it; over
+  HTTP/2 a status from 600 up is refused as it is set, with the same 500.
+  What node's HTTP/1.1 writer refuses only as it writes the response, such
+  as a `trailer` on a response it does not chunk, closes the connection,
+  because `res` then holds the hook's answer. A 304 keeps the
+  `content-length` the hook declares when production's `parseInt` reads it
+  as a non-negative safe integer; every other length is the body's own. A
+  client that goes away during the auth POST's body ended the dev server
+  through an unhandled rejection; the read's error is now caught and the
+  hook does not run for that request (production runs it and drops its
+  answer). A declared length past 64 KiB is answered 413 before the body
+  arrives, as production answers it, and a body without one is answered 413
+  the moment it crosses 64 KiB, before the hook runs; the rest of the body is
+  read and dropped, so an HTTP/2 stream completes.
+
+- **`vite dev`'s auth and dashboard mounts answer only their own paths.**
+  Both read the target from `req.originalUrl`, because connect strips the
+  mount from `req.url` and matches it without regard to case and with a `/`
+  or `.` after it: the auth lane routes the exact path only and hands the
+  hook that target, dropping the `?` of an empty query as uWS does, and the
+  dashboard answers its path and the paths under it, before its loopback
+  gate and method check run. `dashboard.path` loses its trailing slashes, as
+  `adminPath` does, and its collision check with the WebSocket and auth
+  paths ignores them on either side. `test/helpers/vite-dev.js` boots a real
+  Vite dev server, on `server.https` or with a cleartext HTTP/2 listener over
+  its middleware stack; `test/vite-origin-parity.test.js` and
+  `test/dev-dashboard.test.js` now run on it, and
+  `test/vite-dev-request-shape.test.js` holds the dev auth lane to the built
+  runtime by running the fixture's own hook on both.
+  `test/helpers/openssl.js` takes the openssl lookup out of
+  `test/tls-reload.test.js` for both suites.
 
 - **The Host value is held to the authority grammar where a URL is built from
   it.** `get_origin` (handler/config.js) now returns `originFromHeaders`

@@ -22,6 +22,11 @@ uws({ dashboard: false })              // disable
 uws({ dashboard: { path: '/__diag' } }) // move the mount path
 ```
 
+It answers its path and the paths under it exactly as written; trailing
+slashes on the option are dropped. Any other spelling, such as
+`/__UWS/DASHBOARD` or `/__uws/dashboard.json`, goes on to the app, although
+Vite's middleware mount would match it.
+
 ## The diagnostic report
 
 `/__uws/dashboard/report` downloads the same page as a static HTML attachment
@@ -43,7 +48,10 @@ unread body drained first so the refusal actually reaches the client:
   victim's browser then reaches this listener over a genuine loopback socket
   - but it cannot forge the `Host` header, which still names the attacker's
   domain. A bare DNS name is refused even if it currently resolves to
-  loopback, because what it resolves to is the attacker's choice;
+  loopback, because what it resolves to is the attacker's choice. Over
+  HTTP/2, which Vite speaks under `server.https` (before Vite 7.2, HTTP/1.1
+  when `server.proxy` is set), the `:authority` pseudo-header is the one
+  checked;
 - the **`Origin` header**, when the browser sends one, must itself be a
   loopback origin, closing cross-site fetches from pages already running on
   a non-loopback origin of the same machine.

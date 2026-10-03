@@ -5,30 +5,13 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync, readFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseSniHosts, readCertIdentity, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
+import { findOpenssl } from './helpers/openssl.js';
 
 // Cert parsing / server-name reconciliation needs a real X.509 cert with a SAN.
 // We generate a couple at setup with openssl; if none is found, those cases skip
 // while the injected-deps watcher test still runs. The binary must be resolved at
 // module scope: describe-vs-skip is decided at collection time, so a beforeAll
 // discovery would register the cert suites before learning openssl is missing.
-// On Windows the shell PATH often lacks openssl, but Git for Windows bundles one.
-function findOpenssl() {
-	const candidates = ['openssl'];
-	if (process.platform === 'win32') {
-		const roots = new Set([process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramW6432].filter(Boolean));
-		for (const root of roots) {
-			candidates.push(join(root, 'Git', 'usr', 'bin', 'openssl.exe'));
-			candidates.push(join(root, 'Git', 'mingw64', 'bin', 'openssl.exe'));
-		}
-	}
-	for (const bin of candidates) {
-		try {
-			execFileSync(bin, ['version'], { stdio: 'ignore' });
-			return bin;
-		} catch {}
-	}
-	return null;
-}
 const openssl = findOpenssl();
 const hasOpenssl = openssl !== null;
 let dir;

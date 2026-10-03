@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { validateHeaderValue } from 'node:http';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
@@ -67,6 +68,93 @@ function viteDiagnosticEndpoint(server) {
 		host: typeof configured.host === 'string' ? configured.host : null,
 		port: Number.isInteger(configured.port) ? configured.port : null
 	};
+}
+
+/**
+ * A dev request's headers in the shape production reads them: one string per
+ * name, repeated lines joined. With `server.https` set, Vite serves through
+ * node's http2 compatibility layer, whose header object carries the
+ * pseudo-headers (`:method`, `:path`, ...), which the Request constructor
+ * refuses, and carries the authority as `:authority` with no `host`. The
+ * pseudo-headers are dropped and `:authority` becomes `host`, as SvelteKit's
+ * getRequest does for the app's own requests on the same server.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {Record<string, string>}
+ */
+function http1Headers(req) {
+	/** @type {Record<string, string>} */
+	const headers = {};
+	for (const [k, v] of Object.entries(req.headers)) {
+		if (k.charCodeAt(0) === 58 /* : */) continue;
+		if (typeof v === 'string') headers[k] = v;
+		else if (Array.isArray(v)) headers[k] = v.join(', ');
+	}
+	const authority = req.headers[':authority'];
+	if (typeof authority === 'string' && authority !== '') headers['host'] = authority;
+	return headers;
+}
+
+/**
+ * Whether a response header is one HTTP/2 does not carry: a connection-specific
+ * field (RFC 9113 section 8.2.2), or `http2-settings`, which belongs to the
+ * HTTP/1.1 upgrade to h2c. node's http2 layer drops some values with a warning
+ * and throws on the rest when the response is written. `te` belongs to
+ * requests; its one value HTTP/2 admits, `trailers`, says nothing on a
+ * response.
+ *
+ * @param {string} name lower-case, as a Headers iterator yields it
+ */
+function connectionSpecificHeader(name) {
+	switch (name) {
+		case 'connection':
+		case 'keep-alive':
+		case 'proxy-connection':
+		case 'transfer-encoding':
+		case 'upgrade':
+		case 'http2-settings':
+		case 'te':
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * The length a bodiless 304 carries, read from the length its Response
+ * declares the way production's `endBodyless` reads it (`parseInt`), or null
+ * when that names no length: no number, a negative one, or one past a safe
+ * integer.
+ *
+ * @param {string | null} declared
+ * @returns {string | null}
+ */
+function notModifiedLength(declared) {
+	if (!declared) return null;
+	const length = parseInt(declared, 10);
+	return Number.isSafeInteger(length) && length >= 0 ? String(length) : null;
+}
+
+/**
+ * A header value as the bytes production puts on the wire. uWS writes text
+ * as its UTF-8 bytes; node's HTTP/1.1 and HTTP/2 writers take one byte per
+ * character (HTTP/1.1 refuses one past U+00FF, HTTP/2 keeps its low byte),
+ * so a value past ASCII goes to node as its UTF-8 bytes.
+ *
+ * @param {string} value
+ */
+function wireValue(value) {
+	return /[^\x00-\x7f]/.test(value) ? Buffer.from(value, 'utf8').toString('latin1') : value;
+}
+
+/**
+ * The path of a request target, without its query.
+ *
+ * @param {string} target
+ */
+function targetPath(target) {
+	const queryAt = target.indexOf('?');
+	return queryAt === -1 ? target : target.slice(0, queryAt);
 }
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { renderAppShell, createDashboardSnapshots, checkDashboardAccess } from './dev-dashboard.js';
@@ -148,8 +236,11 @@ export default function uws(options = {}) {
 		// would point them off-machine.
 		throw new TypeError('the uws() dev plugin option dashboard.path must be a local pathname starting with a single "/"');
 	}
-	const dashboardPath = options.dashboard === false ? null : (dashboardOptions.path || '/__uws/dashboard');
-	if (dashboardPath !== null && (dashboardPath === wsPath || dashboardPath === wsAuthPath)) {
+	// A trailing slash is dropped, as for adminPath: the dashboard answers the
+	// path and the paths under it, and the page builds its links on it.
+	const dashboardPath = options.dashboard === false ? null : (dashboardOptions.path || '/__uws/dashboard').replace(/\/+$/, '');
+	if (dashboardPath !== null &&
+		(dashboardPath === wsPath.replace(/\/+$/, '') || dashboardPath === wsAuthPath.replace(/\/+$/, ''))) {
 		throw new TypeError('the uws() dev plugin option dashboard.path collides with the WebSocket or auth path');
 	}
 	// One source of truth for both the actual ws receiver cap and the value app
@@ -2298,6 +2389,11 @@ export default function uws(options = {}) {
 					res.end('Bad Request');
 					return;
 				}
+				// Connect matches a mount without regard to case and with anything
+				// after a `/` or `.` (`/__WS/AUTH`, `/__ws/auth/x`, `/__ws/auth.json`),
+				// and strips it from `req.url`. Production routes the exact path only
+				// and hands every other spelling to the application.
+				if (targetPath(authTarget) !== wsAuthPath) { next(); return; }
 				await handlerReady;
 				if (!userHandlers.authenticate) { next(); return; }
 				if (req.method !== 'POST') {
@@ -2308,12 +2404,7 @@ export default function uws(options = {}) {
 					return;
 				}
 
-				/** @type {Record<string, string>} */
-				const headers = {};
-				for (const [k, v] of Object.entries(req.headers)) {
-					if (typeof v === 'string') headers[k] = v;
-					else if (Array.isArray(v)) headers[k] = v.join(', ');
-				}
+				const headers = http1Headers(req);
 
 				if (AUTH_PATH_REQUIRE_ORIGIN_V && !isAuthOriginAccepted(headers, {
 					allowedOrigins: ALLOWED_ORIGINS_V,
@@ -2324,7 +2415,9 @@ export default function uws(options = {}) {
 					// production is the direction that misleads: the developer's own
 					// testing passes and the deployment refuses.
 					pinnedOrigin: PINNED_ORIGIN_V,
-					isTls: false,
+					// Under `server.https` Vite terminates TLS, as production does
+					// under SSL_CERT, and a same-origin Origin is then `https://`.
+					isTls: !!req.socket?.encrypted,
 					hasUpgradeHook: false
 				})) {
 					res.statusCode = 403;
@@ -2345,29 +2438,56 @@ export default function uws(options = {}) {
 					return;
 				}
 
+				const overHttp2 = req.httpVersionMajor >= 2;
 				// Read body (capped at 64 KB; the hook rarely needs it).
 				const AUTH_BODY_LIMIT = 64 * 1024;
 				/** @type {Buffer[]} */
 				const chunks = [];
 				let total = 0;
 				let oversized = false;
-				for await (const chunk of req) {
-					total += chunk.length;
-					if (total > AUTH_BODY_LIMIT) { oversized = true; break; }
-					chunks.push(chunk);
-				}
-				if (oversized) {
+				// Answered at once, and the rest of the body is still read and
+				// dropped: an HTTP/2 stream left unread never completes.
+				const answerOversized = () => {
+					oversized = true;
+					chunks.length = 0;
 					res.statusCode = 413;
+					// Production's reason phrase; HTTP/2 carries none.
+					if (!overHttp2) res.statusMessage = 'Content Too Large';
 					res.setHeader('content-type', 'text/plain');
 					res.end('Content Too Large');
+				};
+				// A declared length past the cap is answered before the body
+				// arrives, as production answers it.
+				if (parseInt(headers['content-length'], 10) > AUTH_BODY_LIMIT) answerOversized();
+				// A client that goes away mid-body ends the read with an error. It
+				// is caught here: the middleware's promise has no one to hand a
+				// rejection to, and an unhandled one ends the dev server. Nothing
+				// answers a request whose client left, so the hook does not run
+				// for it.
+				try {
+					for await (const chunk of req) {
+						if (oversized) continue;
+						total += chunk.length;
+						if (total > AUTH_BODY_LIMIT) {
+							answerOversized();
+							continue;
+						}
+						chunks.push(chunk);
+					}
+				} catch {
 					return;
 				}
+				if (oversized) return;
+				// Over HTTP/2 a stream reset before the read began ends it empty.
+				if (req.aborted) return;
 				const bodyBuf = Buffer.concat(chunks);
 
 				// A host that passed the check above can still be one the URL
 				// parser refuses, as production answers it.
 				const origin = PINNED_ORIGIN_V || ((req.socket?.encrypted ? 'https://' : 'http://') + headers['host']);
-				const url = req.url || wsAuthPath;
+				// The target as the client sent it, not the remainder connect leaves
+				// in `req.url` (`/`). Production drops the `?` of an empty query.
+				const url = authTarget.length > wsAuthPath.length + 1 ? authTarget : wsAuthPath;
 				let request;
 				try {
 					request = new Request(origin + url, {
@@ -2399,6 +2519,14 @@ export default function uws(options = {}) {
 					platform: authPlatform
 				};
 
+				// Set once the hook's answer is going on `res`. Before that point a
+				// body that fails, a status that is no final status node can write,
+				// or a value node's HTTP/1.1 writer refuses answers the catch's 500
+				// with nothing of the hook's on it. What node's HTTP/1.1 writer
+				// refuses only as it writes, such as a `trailer` on a response it
+				// does not chunk, leaves `res` holding the hook's answer, and the
+				// catch closes the connection instead.
+				let writing = false;
 				try {
 					const result = await Promise.resolve(userHandlers.authenticate(event));
 
@@ -2410,27 +2538,57 @@ export default function uws(options = {}) {
 					}
 
 					if (result instanceof Response) {
-						res.statusCode = result.status;
+						// A network-error Response (`Response.error()`) has status 0, and
+						// a 1xx is no final status.
+						if (!(Number.isInteger(result.status) && result.status >= 200 && result.status <= 999)) {
+							throw new RangeError('the authenticate hook returned a Response with status ' + result.status);
+						}
+						// Read first, as production reads it.
+						const buf = result.body ? Buffer.from(await result.arrayBuffer()) : null;
+						/** @type {Array<[string, string]>} */
+						const outHeaders = [];
 						for (const [hk, hv] of result.headers) {
-							if (hk === 'set-cookie' || hk === 'content-length') continue;
-							res.setHeader(hk, hv);
+							if (hk === 'set-cookie') continue;
+							if (hk === 'content-length') {
+								// The body's own length is node's to write. A 304 has no
+								// body and keeps the length the hook declares, when that
+								// reads as one the way production's endBodyless reads it.
+								const declared = result.status === 304 ? notModifiedLength(hv) : null;
+								if (declared !== null) outHeaders.push([hk, declared]);
+								continue;
+							}
+							// Left out rather than failing the response when it is written.
+							if (overHttp2 && connectionSpecificHeader(hk)) continue;
+							outHeaders.push([hk, wireValue(hv)]);
 						}
 						const outCookies = [
 							...result.headers.getSetCookie(),
 							...cookies._serialize()
-						];
-						if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
-						if (result.body) {
-							const buf = Buffer.from(await result.arrayBuffer());
-							res.end(buf);
-						} else {
-							res.end();
+						].map(wireValue);
+						if (!overHttp2) {
+							// What HTTP/1.1's setHeader would refuse partway through, which
+							// past wireValue is a control character. A Headers name is
+							// already a token; over HTTP/2 node writes these values, as
+							// production does.
+							for (const [hk, hv] of outHeaders) validateHeaderValue(hk, hv);
+							for (const cookie of outCookies) validateHeaderValue('set-cookie', cookie);
 						}
+						// Over HTTP/2 the setter refuses 600-999 before storing it.
+						res.statusCode = result.status;
+						writing = true;
+						for (const [hk, hv] of outHeaders) res.setHeader(hk, hv);
+						if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
+						if (buf !== null) res.end(buf);
+						else res.end();
 						return;
 					}
 
+					const outCookies = cookies._serialize().map(wireValue);
+					if (!overHttp2) {
+						for (const cookie of outCookies) validateHeaderValue('set-cookie', cookie);
+					}
 					res.statusCode = 204;
-					const outCookies = cookies._serialize();
+					writing = true;
 					if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
 					res.end();
 				} catch (err) {
@@ -2447,6 +2605,10 @@ export default function uws(options = {}) {
 						message: 'The WebSocket authentication endpoint failed.',
 						attributes: { requestId: authRequestId, error: diagnosticError(err) }
 					});
+					if (writing) {
+						res.destroy();
+						return;
+					}
 					res.statusCode = 500;
 					res.setHeader('content-type', 'text/plain');
 					if (authRequestId) res.setHeader('x-request-id', authRequestId);
@@ -2489,7 +2651,16 @@ export default function uws(options = {}) {
 					dashboardStreams.clear();
 					stopDashboardTimer();
 				});
-				server.middlewares.use(dashboardPath, (req, res) => {
+				server.middlewares.use(dashboardPath, (req, res, next) => {
+					// Connect hands this mount every spelling that matches it without
+					// regard to case, and the path followed by a `.`, and strips the
+					// mount from `req.url`. The dashboard answers its own path and the
+					// paths under it as written, and leaves the rest to the application.
+					const dashboardTarget = targetPath(req.originalUrl || req.url || '');
+					if (dashboardTarget !== dashboardPath && !dashboardTarget.startsWith(dashboardPath + '/')) {
+						next();
+						return;
+					}
 					// Deliberately NOT gated on handlerReady. The dashboard reads
 					// only `platform` and the live `subscriptions` map, both of
 					// which exist before any user handler loads; awaiting the
@@ -2508,10 +2679,11 @@ export default function uws(options = {}) {
 						if (status === 405) res.setHeader('allow', 'GET');
 						res.end(message);
 					};
+					const dashboardHeaders = http1Headers(req);
 					const access = checkDashboardAccess({
 						remoteAddress: req.socket?.remoteAddress,
-						host: typeof req.headers.host === 'string' ? req.headers.host : null,
-						origin: typeof req.headers.origin === 'string' ? req.headers.origin : null
+						host: dashboardHeaders['host'] ?? null,
+						origin: dashboardHeaders['origin'] ?? null
 					});
 					if (!access.allowed) {
 						refuse(403, 'Forbidden: dev dashboard is loopback-only (' + access.reason + ')');
@@ -2521,7 +2693,7 @@ export default function uws(options = {}) {
 						refuse(405, 'Method Not Allowed');
 						return;
 					}
-					const subPath = (req.url || '/').split('?')[0];
+					const subPath = dashboardTarget.slice(dashboardPath.length);
 					if (subPath === '/' || subPath === '') {
 						res.statusCode = 200;
 						res.setHeader('content-type', 'text/html; charset=utf-8');
@@ -2634,7 +2806,7 @@ export default function uws(options = {}) {
 						// See the auth-path check above: production honours ORIGIN as
 						// the authoritative host pin, and dev must not be looser.
 						pinnedOrigin: PINNED_ORIGIN_V,
-						isTls: false,
+						isTls: !!req.socket?.encrypted,
 						hasUpgradeHook: !!userHandlers.upgrade
 					})) {
 						socket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nOrigin not allowed');

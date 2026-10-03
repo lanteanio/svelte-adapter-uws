@@ -1,14 +1,15 @@
-// The dev dashboard against the real dev plugin: real HTTP requests through
-// the plugin's own middleware, a real ws client whose subscription shows up
-// in the streamed snapshot, and the loopback gate probed with the forged
-// headers a hostile page would send. The pure pieces (the access gate, the
-// escaper, the accept guard) are additionally pinned as units, and the accept
-// guard's unit is the SAME function the page embeds - the render asserts the
-// source travels into the document.
+// The dev dashboard against the real dev plugin in a real Vite dev server:
+// real HTTP requests through Vite's middleware stack, a real ws client whose
+// subscription shows up in the streamed snapshot, and the loopback gate probed
+// with the forged headers a hostile page would send. The pure pieces (the
+// access gate, the escaper, the accept guard) are additionally pinned as units,
+// and the accept guard's unit is the SAME function the page embeds - the
+// render asserts the source travels into the document.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createServer, request as httpRequest } from 'node:http';
+import { request as httpRequest } from 'node:http';
 import uws from '../src/vite.js';
+import { bootViteDev, APP_STATUS } from './helpers/vite-dev.js';
 import {
 	renderAppShell,
 	createDashboardSnapshots,
@@ -29,65 +30,27 @@ afterEach(async () => {
 	for (const ws of sockets.splice(0)) {
 		try { ws.terminate(); } catch { /* already closed */ }
 	}
-	// An open SSE request is an ACTIVE connection: server.close() never reaps
-	// it, so a test that fails before its own destroy would hang teardown into
-	// a hook timeout. Destroy every tracked request here first.
+	// The client side of an open SSE stream, so a test that fails before its
+	// own destroy leaves no request behind; Vite's close destroys the server
+	// side of every socket it still holds.
 	for (const req of requests.splice(0)) {
 		try { req.destroy(); } catch { /* already gone */ }
 	}
-	for (const server of servers.splice(0).reverse()) {
-		if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
-		await new Promise((resolve) => server.close(() => resolve(undefined)));
-	}
+	for (const server of servers.splice(0).reverse()) await server.close();
 });
 
 async function bootDev(pluginOptions = {}) {
-	const middleware = [];
-	const httpServer = createServer((req, res) => {
-		// Replay Connect's prefix mount: the longest matching mount wins and
-		// the handler sees the sub-path, exactly as the plugin's own comment
-		// on `server.middlewares.use` relies on.
-		const url = new URL(req.url || '/', 'http://localhost');
-		const hit = middleware
-			.filter((entry) => url.pathname === entry.path || url.pathname.startsWith(entry.path + '/'))
-			.sort((a, b) => b.path.length - a.path.length)[0];
-		if (!hit) { res.statusCode = 404; res.end('Not Found'); return; }
-		req.url = (url.pathname.slice(hit.path.length) || '/') + url.search;
-		hit.fn(req, res, () => { res.statusCode = 404; res.end('Not Found'); });
-	});
-	servers.push(httpServer);
-
-	const plugin = uws({ allowedOrigins: '*', handler: '/virtual-dashboard-handler', ...pluginOptions });
-	await plugin.configureServer({
-		httpServer,
-		middlewares: {
-			// Connect also takes `use(fn)`, mounted at the empty route, which is
-			// how the plugin registers its WebSocket-path handshake check.
-			use(path, fn) {
-				if (typeof path === 'function') middleware.push({ path: '', fn: path });
-				else middleware.push({ path, fn });
-			}
-		},
-		config: {
-			root: process.cwd(),
-			server: {},
-			logger: { warn() {}, info() {}, error() {} }
-		},
-		async ssrLoadModule() {
-			return { default: {}, open() {} };
-		}
-	});
-	await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+	const server = await bootViteDev({ pluginOptions: { allowedOrigins: '*', ...pluginOptions }, handler: { open() {} } });
+	servers.push(server);
 	await new Promise((resolve) => setTimeout(resolve, 20));
-	const port = httpServer.address().port;
-	return { port, middleware };
+	return { port: server.port };
 }
 
 /**
  * One dashboard request with controllable Host/Origin, resolving to status,
- * headers, and the full body.
+ * headers, and the full body. `subPath` is appended to `base`.
  */
-function fetchDash(port, subPath, { host = `localhost:${port}`, origin, method = 'GET', body } = {}) {
+function fetchDash(port, subPath, { host = `localhost:${port}`, origin, method = 'GET', body, base = '/__uws/dashboard' } = {}) {
 	return new Promise((resolve, reject) => {
 		const headers = { host };
 		if (origin !== undefined) headers.origin = origin;
@@ -95,7 +58,7 @@ function fetchDash(port, subPath, { host = `localhost:${port}`, origin, method =
 		const req = httpRequest({
 			host: '127.0.0.1',
 			port,
-			path: '/__uws/dashboard' + subPath,
+			path: base + subPath,
 			method,
 			headers
 		}, (res) => {
@@ -395,17 +358,48 @@ describe('the dev dashboard endpoint against the real plugin', () => {
 		expect(again.seq).toBeGreaterThan(before);
 	});
 
+	it('answers its own path and the paths under it as written, and leaves the rest to the app', async () => {
+		const { port } = await bootDev();
+		expect((await fetchDash(port, '/')).status).toBe(200);
+		expect((await fetchDash(port, '/report')).status).toBe(200);
+		expect((await fetchDash(port, '/nope')).status).toBe(404);
+		expect((await fetchDash(port, '?x=1')).status).toBe(200);
+		expect((await fetchDash(port, '/snapshot?t=1')).status).toBe(200);
+		// Vite's connect mounts each of these onto the dashboard path. They are
+		// the app's, so neither the loopback gate nor the method check answers
+		// them.
+		for (const path of ['/__UWS/DASHBOARD', '/__uws/Dashboard/report', '/__uws/dashboard.json', '/__uws/dashboard.']) {
+			expect((await fetchDash(port, '', { base: path })).status, path).toBe(APP_STATUS);
+			expect((await fetchDash(port, '', { base: path, host: `192.168.1.50:${port}` })).status, path).toBe(APP_STATUS);
+			expect((await fetchDash(port, '', { base: path, method: 'POST', body: 'x' })).status, path).toBe(APP_STATUS);
+		}
+	});
+
 	it('honors dashboard: false and a custom mount path', async () => {
 		const disabled = await bootDev({ dashboard: false });
-		expect(disabled.middleware.some((m) => m.path.startsWith('/__uws/dashboard'))).toBe(false);
+		expect((await fetchDash(disabled.port, '')).status).toBe(APP_STATUS);
 
 		const custom = await bootDev({ dashboard: { path: '/__diag' } });
-		expect(custom.middleware.some((m) => m.path === '/__diag')).toBe(true);
+		expect((await fetchDash(custom.port, '', { base: '/__diag' })).status).toBe(200);
+		expect((await fetchDash(custom.port, '/snapshot', { base: '/__diag' })).status).toBe(200);
+		expect((await fetchDash(custom.port, '')).status).toBe(APP_STATUS);
+
+		// Trailing slashes on the option name the same mount, and the page's
+		// own links resolve under it.
+		const slashed = await bootDev({ dashboard: { path: '/__diag//' } });
+		const page = await fetchDash(slashed.port, '', { base: '/__diag' });
+		expect(page.status).toBe(200);
+		expect(page.body).toContain('"basePath":"/__diag"');
+		expect((await fetchDash(slashed.port, '/snapshot', { base: '/__diag' })).status).toBe(200);
 
 		expect(() => uws({ handler: '/x', dashboard: 'yes' })).toThrow(/dashboard/);
 		expect(() => uws({ handler: '/x', dashboard: { path: 'no-slash' } })).toThrow(/dashboard\.path/);
 		// A protocol-relative `//host` is a URL, not a local path: the page
 		// derives its stream and fetch URLs from it, so it must be refused.
 		expect(() => uws({ handler: '/x', dashboard: { path: '//evil.example/x' } })).toThrow(/dashboard\.path/);
+		// The collision holds whichever side carries a trailing slash.
+		expect(() => uws({ handler: '/x', authPath: '/__diag/', dashboard: { path: '/__diag/' } })).toThrow(/collides/);
+		expect(() => uws({ handler: '/x', path: '/__diag/', dashboard: { path: '/__diag' } })).toThrow(/collides/);
+		expect(() => uws({ handler: '/x', authPath: '/__diag//', dashboard: { path: '/__diag' } })).toThrow(/collides/);
 	});
 });

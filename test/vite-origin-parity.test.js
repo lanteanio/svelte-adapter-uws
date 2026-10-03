@@ -3,9 +3,9 @@
 // `pinnedOrigin` into either call site.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createServer, request as httpRequest } from 'node:http';
+import { request as httpRequest } from 'node:http';
 import { WebSocket } from 'ws';
-import uws from '../src/vite.js';
+import { bootViteDev } from './helpers/vite-dev.js';
 
 const originalOrigin = process.env.ORIGIN;
 const servers = [];
@@ -15,48 +15,17 @@ afterEach(async () => {
 	for (const ws of clients.splice(0)) {
 		try { ws.terminate(); } catch { /* already closed */ }
 	}
-	for (const server of servers.splice(0).reverse()) {
-		await new Promise((resolve) => server.close(() => resolve(undefined)));
-	}
+	for (const server of servers.splice(0).reverse()) await server.close();
 	if (originalOrigin === undefined) delete process.env.ORIGIN;
 	else process.env.ORIGIN = originalOrigin;
 });
 
-async function bootDev({ origin, handler = {}, loadHandler } = {}) {
+async function bootDev({ origin, handler = {}, ready } = {}) {
 	if (origin === undefined) delete process.env.ORIGIN;
 	else process.env.ORIGIN = origin;
-
-	const middleware = [];
-	const httpServer = createServer((req, res) => {
-		const pathname = new URL(req.url || '/', 'http://localhost').pathname;
-		const hit = middleware.find((entry) => entry.path === pathname);
-		if (!hit) { res.statusCode = 404; res.end('Not Found'); return; }
-		hit.fn(req, res, () => { res.statusCode = 404; res.end('Not Found'); });
-	});
-	servers.push(httpServer);
-
-	const plugin = uws({
-		allowedOrigins: 'same-origin',
-		handler: '/virtual-origin-handler'
-	});
-	await plugin.configureServer({
-		httpServer,
-		middlewares: {
-			use(path, fn) { middleware.push({ path, fn }); }
-		},
-		config: {
-			root: process.cwd(),
-			server: {},
-			logger: { warn() {}, info() {}, error() {} }
-		},
-		async ssrLoadModule() {
-			if (loadHandler) return loadHandler();
-			return { default: handler, ...handler };
-		}
-	});
-	await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
-	const port = httpServer.address().port;
-	return { port };
+	const server = await bootViteDev({ pluginOptions: { allowedOrigins: 'same-origin' }, handler, ready });
+	servers.push(server);
+	return { port: server.port };
 }
 
 function postAuth(port, origin, host = 'attacker.example') {
@@ -125,13 +94,10 @@ describe('Vite fixed-origin parity', () => {
 	it('waits for the handler before deciding whether a missing Origin is allowed', async () => {
 		let releaseLoad;
 		const loading = new Promise((resolve) => { releaseLoad = resolve; });
-		const handler = { upgrade: () => ({ id: 'hook-authenticated' }) };
 		const { port } = await bootDev({
 			origin: undefined,
-			async loadHandler() {
-				await loading;
-				return { default: handler, ...handler };
-			}
+			handler: { upgrade: () => ({ id: 'hook-authenticated' }) },
+			ready: loading
 		});
 
 		const connecting = connect(port, { origin: undefined });
@@ -144,8 +110,6 @@ describe('Vite fixed-origin parity', () => {
 	});
 
 	it('refuses a Host that is not an authority on auth, as production does', async () => {
-		// Counts runs rather than reading the request path: this harness mounts
-		// without stripping the mount path, which Vite's connect does.
 		let ran = 0;
 		const { port } = await bootDev({
 			origin: undefined,
