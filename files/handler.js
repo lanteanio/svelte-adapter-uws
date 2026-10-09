@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX, runHook, runUnsubscribeHook } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -1355,7 +1355,7 @@ const platform = {
 		subs.delete(topic);
 		totalSubscriptions--;
 		assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
-		wsModule.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+		runUnsubscribeHook(wsModule, ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		return true;
 	},
 
@@ -2600,10 +2600,10 @@ if (WS_ENABLED) {
 	}
 
 	// One-shot runtime warning when a user upgrade handler attaches Set-Cookie
-	// to the 101 Switching Protocols response. Cloudflare Tunnel and some other
-	// strict edge proxies silently close WebSocket connections with 1006 when
-	// the 101 carries Set-Cookie. The `authenticate` hook refreshes cookies
-	// over a normal HTTP response and works behind every proxy.
+	// to the 101 Switching Protocols response. A cookie on the 101 reaches the
+	// browser only if every proxy in the path forwards the 101 unchanged; the
+	// `authenticate` hook refreshes cookies over a normal HTTP response, which
+	// every proxy handles.
 	let warnedSetCookieOnUpgrade = false;
 	/** @param {Record<string, string | string[]> | null | undefined} responseHeaders */
 	function maybeWarnSetCookieOnUpgrade(responseHeaders) {
@@ -2612,10 +2612,10 @@ if (WS_ENABLED) {
 			if (k.toLowerCase() === 'set-cookie') {
 				warnedSetCookieOnUpgrade = true;
 				console.warn(
-					'[adapter-uws] Set-Cookie on the 101 upgrade response is rejected by ' +
-					'Cloudflare Tunnel and some other edge proxies (WebSocket opens, then ' +
-					'closes with 1006 TCP FIN). Migrate to the `authenticate` hook to ' +
-					'refresh session cookies over a normal HTTP response: ' +
+					'[adapter-uws] Set-Cookie on the 101 upgrade response reaches the browser ' +
+					'only if every proxy in the path forwards the 101 unchanged. Use the ' +
+					'`authenticate` hook to refresh session cookies over a normal HTTP ' +
+					'response: ' +
 					'export function authenticate({ cookies }) { cookies.set(...); }\n' +
 					'  See: https://svti.me/cf-cookies'
 				);
@@ -2744,9 +2744,9 @@ if (WS_ENABLED) {
 	// - Authenticate endpoint (pre-upgrade HTTP hook) ---------------------
 	// Optional `authenticate` export in hooks.ws.ts runs as a normal HTTP POST
 	// so session cookies can be refreshed via a standard Set-Cookie on a 200
-	// response. This works behind Cloudflare Tunnel and other strict edge
-	// proxies that silently drop WebSocket connections whose 101 response
-	// carries Set-Cookie. The client store POSTs here before opening the WS
+	// response, which every proxy handles; a cookie on the 101 depends on every
+	// proxy in the path forwarding the 101 unchanged. The client store POSTs
+	// here before opening the WS
 	// when `connect({ auth: true })` is used.
 	if (typeof wsModule.authenticate === 'function') {
 		const authPath = WS_AUTH_PATH;
@@ -3085,6 +3085,13 @@ if (WS_ENABLED) {
 						if (aborted || timedOut) { releaseInFlight(); return; }
 						res.cork(() => {
 							if (responseHeaders) {
+								// Write the switching-protocols status before any header. uWS writes
+								// an implicit "200 OK" on the first writeHeader() and keeps the first
+								// status it wrote, so the 101 that res.upgrade() writes afterwards
+								// would be dropped and the client would refuse the handshake
+								// ("Unexpected response code: 200"). res.upgrade() tolerates the
+								// pre-written 101 and appends its own headers to it.
+								res.writeStatus('101 Switching Protocols');
 								for (const [hk, hv] of Object.entries(responseHeaders)) {
 									if (Array.isArray(hv)) {
 										for (const v of hv) res.writeHeader(hk, v);
@@ -3156,7 +3163,7 @@ if (WS_ENABLED) {
 			bumpOut(ws, welcome);
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
-			wsModule.open?.(ws, { platform: userData[WS_PLATFORM] });
+			runHook(wsModule, 'open', 'Open handler error', ws, { platform: userData[WS_PLATFORM] });
 		},
 
 		message: async (ws, message, isBinary) => {
@@ -3190,7 +3197,7 @@ if (WS_ENABLED) {
 				if (parsed === null || typeof parsed !== 'object') {
 					// Not a JSON object envelope (parse failed, or parsed to
 					// null / primitive / array). Forward raw bytes only.
-					wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+					runHook(wsModule, 'message', 'Message handler error', ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
 				msg = parsed;
@@ -3245,7 +3252,7 @@ if (WS_ENABLED) {
 						assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
 					}
 					if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
-					wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+					runUnsubscribeHook(wsModule, ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
 				if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -3383,7 +3390,7 @@ if (WS_ENABLED) {
 			// Delegate everything else to the user's handler (if provided).
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			runHook(wsModule, 'message', 'Message handler error', ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		drain: (ws) => {
@@ -3391,7 +3398,7 @@ if (WS_ENABLED) {
 			// Resume any sendCoalesced traffic held back by backpressure
 			// before delegating to the user's drain hook.
 			flushCoalescedFor(ws);
-			wsModule.drain?.(ws, { platform: ws.getUserData()[WS_PLATFORM] });
+			runHook(wsModule, 'drain', 'Drain handler error', ws, { platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close: (ws, code, message) => {
@@ -3430,7 +3437,7 @@ if (WS_ENABLED) {
 				}
 				: { code, message, platform: closePlatform, subscriptions };
 			try {
-				wsModule.close?.(ws, ctx);
+				runHook(wsModule, 'close', null, ws, ctx);
 			} finally {
 				totalSubscriptions -= subscriptions.size;
 				assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });

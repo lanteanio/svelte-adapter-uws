@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, runHook, runUnsubscribeHook } from './files/utils.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -308,7 +308,7 @@ export async function createTestServer(options = {}) {
 			try { ws.unsubscribe(topic); }
 			catch { closedWsAbortsT++; return false; }
 			subs.delete(topic);
-			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+			runUnsubscribeHook(handler, ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 			return true;
 		},
 		batch(messages) {
@@ -552,6 +552,13 @@ export async function createTestServer(options = {}) {
 						if (aborted) { releaseInFlight(); return; }
 						res.cork(() => {
 							if (responseHeaders) {
+								// Write the switching-protocols status before any header. uWS writes
+								// an implicit "200 OK" on the first writeHeader() and keeps the first
+								// status it wrote, so the 101 that res.upgrade() writes afterwards
+								// would be dropped and the client would refuse the handshake
+								// ("Unexpected response code: 200"). res.upgrade() tolerates the
+								// pre-written 101 and appends its own headers to it.
+								res.writeStatus('101 Switching Protocols');
 								for (const [hk, hv] of Object.entries(responseHeaders)) {
 									if (Array.isArray(hv)) {
 										for (const v of hv) res.writeHeader(hk, v);
@@ -602,7 +609,7 @@ export async function createTestServer(options = {}) {
 			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
 			sendOutboundT(ws, welcome);
 			wsConnections.add(ws);
-			handler.open?.(ws, { platform: userData[WS_PLATFORM] });
+			runHook(handler, 'open', 'Open handler error', ws, { platform: userData[WS_PLATFORM] });
 			for (const resolve of connectionWaiters) resolve(undefined);
 			connectionWaiters = [];
 		},
@@ -673,7 +680,7 @@ export async function createTestServer(options = {}) {
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 							ws.unsubscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
-							handler.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+							runUnsubscribeHook(handler, ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 							return;
 						}
 						if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -778,7 +785,7 @@ export async function createTestServer(options = {}) {
 
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			handler.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			runHook(handler, 'message', 'Message handler error', ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close(ws, code, message) {
@@ -808,7 +815,7 @@ export async function createTestServer(options = {}) {
 					bytesOut: stats.bytesOut
 				}
 				: { code, message, platform: closePlatform, subscriptions: subs };
-			handler.close?.(ws, ctx);
+			runHook(handler, 'close', null, ws, ctx);
 			wsConnections.delete(ws);
 		}
 	});

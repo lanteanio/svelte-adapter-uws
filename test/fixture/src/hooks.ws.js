@@ -1,8 +1,16 @@
+import { upgradeResponse } from 'svelte-adapter-uws/upgrade-response';
+
 export function upgrade({ headers, cookies, url }) {
 	const token = cookies?.token;
 	if (token === 'reject') return false;
 	if (token === 'error') throw new Error('auth error');
-	return token ? { token } : {};
+	const userData = token ? { token } : {};
+	// boom=open / boom=close make that hook throw for this connection only.
+	const boom = new URL(url, 'http://localhost').searchParams.get('boom');
+	if (boom) userData.boom = boom;
+	// A header on the 101 takes the handler's header-writing path.
+	if (url.includes('header=1')) return upgradeResponse(userData, { 'x-fixture': 'upgrade' });
+	return userData;
 }
 
 export function subscribe(ws, topic, { platform }) {
@@ -14,7 +22,15 @@ export function subscribe(ws, topic, { platform }) {
 	ws.getRemoteAddressAsText();
 }
 
+// Async, so the failure is a rejected promise: a synchronous throw inside the
+// control-message handling is contained by the dev server's own parse
+// try/catch and would prove nothing there.
+export async function unsubscribe(ws, topic) {
+	if (topic === 'boom') throw new Error('unsubscribe boom');
+}
+
 export function open(ws, { platform }) {
+	if (ws.getUserData().boom === 'open') throw new Error('open boom');
 	platform.publish('test-topic', 'connected', { ts: Date.now() });
 	// Exercise platform.connections and topic() helpers
 	const _ = platform.connections;
@@ -47,5 +63,6 @@ export function message(ws, { data, platform }) {
 }
 
 export function close(ws, { code, platform }) {
+	if (ws.getUserData().boom === 'close') throw new Error('close boom');
 	platform.publish('test-topic', 'disconnected', { code });
 }

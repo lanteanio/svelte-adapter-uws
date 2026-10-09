@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, runHook, runUnsubscribeHook } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -388,7 +388,7 @@ export default function uws(options = {}) {
 			if (!(subs instanceof Set) || !subs.has(topic)) return false;
 			ws.unsubscribe(topic);
 			subs.delete(topic);
-			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			runUnsubscribeHook(userHandlers, ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
 		get assertions() {
@@ -934,9 +934,9 @@ export default function uws(options = {}) {
 								if (hasSetCookie) {
 									console.warn(
 										'[adapter-uws] upgradeResponse() attaches Set-Cookie to the 101 response. ' +
-										'This fails silently behind Cloudflare Tunnel and some other strict edge proxies ' +
-										'(WebSocket opens, then closes with 1006). Use the `authenticate` hook to ' +
-										'refresh session cookies over a normal HTTP response.\n' +
+										'A cookie on the 101 reaches the browser only if every proxy in the path ' +
+										'forwards the 101 unchanged. Use the `authenticate` hook to refresh ' +
+										'session cookies over a normal HTTP response.\n' +
 										'  See: https://svti.me/cf-cookies'
 									);
 								} else {
@@ -997,7 +997,7 @@ export default function uws(options = {}) {
 				bumpOutV(userData, welcome);
 
 				// Call user open handler
-				userHandlers.open?.(wrapped, { platform: userData[WS_PLATFORM] });
+				runHook(userHandlers, 'open', 'Open handler error', wrapped, { platform: userData[WS_PLATFORM] });
 
 				ws.on('message', async (raw, isBinary) => {
 					// Convert to ArrayBuffer (matching uWS interface)
@@ -1075,7 +1075,7 @@ export default function uws(options = {}) {
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 								subscriptions.get(ws)?.delete(msg.topic);
 								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
-								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+								runUnsubscribeHook(userHandlers, wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 								return;
 							}
 							if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -1183,9 +1183,7 @@ export default function uws(options = {}) {
 					// when the prefix matched + parsed to an object + no control
 					// type matched; otherwise undefined.
 					await handlerReady;
-					if (userHandlers.message) {
-						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
-					}
+					runHook(userHandlers, 'message', 'Message handler error', wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
 				});
 
 				ws.on('close', (code, reason) => {
@@ -1217,7 +1215,7 @@ export default function uws(options = {}) {
 							bytesOut: stats.bytesOut
 						}
 						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
-					userHandlers.close?.(wrapped, ctx);
+					runHook(userHandlers, 'close', null, wrapped, ctx);
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);

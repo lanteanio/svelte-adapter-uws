@@ -206,6 +206,103 @@ test.describe('WebSocket platform API coverage', () => {
 	});
 });
 
+// - WebSocket hook failures -------------------------------------------- dev
+// The fixture's open hook throws for a connection whose URL carries boom=open,
+// its close hook for boom=close, and its message hook parses every frame as
+// JSON, so a non-JSON frame throws inside it. Each failure must cost only the
+// connection it ran for: that client reads a 1011 close, a bystander keeps
+// receiving, and a fresh connection is served afterwards. A failure that
+// escaped the hook would end the server process instead.
+
+function closeCodeOf(ws) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error('no close frame')), 5000);
+		ws.on('error', () => {});
+		ws.on('close', (code) => { clearTimeout(timer); resolve(code); });
+	});
+}
+
+async function echoes(ws, payload) {
+	const reply = waitFor(ws, (m) => m.event === 'echo' && m.data === payload);
+	ws.send(JSON.stringify({ type: 'echo', payload }));
+	return reply;
+}
+
+async function subscribedWithAck(ws, topic, ref) {
+	const ack = waitFor(ws, (m) => m.type === 'subscribed' && m.topic === topic && m.ref === ref);
+	ws.send(JSON.stringify({ type: 'subscribe', topic, ref }));
+	return ack;
+}
+
+async function bystanderStillReceives(bystander, sender, payload) {
+	const seen = waitFor(bystander, (m) => m.event === 'broadcast' && m.data === payload);
+	sender.send(JSON.stringify({ type: 'broadcast', payload }));
+	await seen;
+}
+
+test.describe('WebSocket hook failures (dev)', () => {
+	test('a throwing open hook closes only that connection with 1011', async () => {
+		const bystander = await connectWs();
+		await subscribedWithAck(bystander, 'test-topic', 1);
+
+		const victim = new WebSocket(`${WS_URL}?boom=open`);
+		expect(await closeCodeOf(victim)).toBe(1011);
+
+		const fresh = await connectWs();
+		await echoes(fresh, 'after-open-boom');
+		await bystanderStillReceives(bystander, fresh, 'open-boom-bystander');
+		bystander.close();
+		fresh.close();
+	});
+
+	test('a message hook that throws on a non-JSON frame closes only that connection', async () => {
+		const bystander = await connectWs();
+		await subscribedWithAck(bystander, 'test-topic', 1);
+
+		const victim = await connectWs();
+		const closed = closeCodeOf(victim);
+		victim.send('garbage');
+		expect(await closed).toBe(1011);
+
+		const fresh = await connectWs();
+		await echoes(fresh, 'after-message-boom');
+		await bystanderStillReceives(bystander, fresh, 'message-boom-bystander');
+		bystander.close();
+		fresh.close();
+	});
+
+	test('a message hook that throws on a JSON-prefixed frame that fails to parse closes only that connection', async () => {
+		// {"ty matches the control-message prefix the runtime checks before
+		// parsing; the parse fails and the raw frame is handed to the hook.
+		const victim = await connectWs();
+		const closed = closeCodeOf(victim);
+		victim.send('{"ty');
+		expect(await closed).toBe(1011);
+
+		const fresh = await connectWs();
+		await echoes(fresh, 'after-prefix-boom');
+		fresh.close();
+	});
+
+	test('a throwing close hook leaves the server serving', async () => {
+		const ws = await connectWs(`${WS_URL}?boom=close`);
+		ws.close();
+		await new Promise((r) => setTimeout(r, 100));
+
+		const fresh = await connectWs();
+		await echoes(fresh, 'after-close-boom');
+		fresh.close();
+	});
+
+	test('a throwing unsubscribe hook is contained and the connection keeps working', async () => {
+		const ws = await connectWs();
+		await subscribedWithAck(ws, 'boom', 1);
+		ws.send(JSON.stringify({ type: 'unsubscribe', topic: 'boom' }));
+		await subscribedWithAck(ws, 'after-unsubscribe-boom', 2);
+		ws.close();
+	});
+});
+
 test.describe('WebSocket upgrade handler', () => {
 	test('accepts connection with valid token cookie', async () => {
 		const { default: WebSocket } = await import('ws');

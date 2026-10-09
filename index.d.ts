@@ -481,8 +481,8 @@ export interface UpgradeContext {
  *
  * `authenticate` runs as a normal HTTP POST before the WebSocket upgrade, so
  * any `Set-Cookie` headers from `cookies.set()` ride on a standard response
- * and work behind every proxy (unlike `Set-Cookie` on the 101 upgrade, which
- * Cloudflare Tunnel and some other strict edge proxies silently drop).
+ * and work behind every proxy, while `Set-Cookie` on the 101 upgrade depends
+ * on every proxy in the path forwarding the 101 unchanged.
  */
 export interface AuthenticateContext {
 	/** The incoming request (standard `Request` object, with body). */
@@ -675,9 +675,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * Recommended for any flow that needs to refresh a session cookie on WS
 	 * connect. Returning cookies from this hook goes out via a standard HTTP
-	 * response, which works behind every proxy. Setting `Set-Cookie` on the
-	 * 101 upgrade response (via `upgradeResponse()`) is silently dropped by
-	 * Cloudflare Tunnel and some other strict edge proxies.
+	 * response, which works behind every proxy. `Set-Cookie` on the 101 upgrade
+	 * response (via `upgradeResponse()`) depends on every proxy in the path
+	 * forwarding the 101 unchanged.
 	 *
 	 * Triggered by the client store via `connect({ auth: true })`, which
 	 * POSTs to `/__ws/auth` (configurable via `websocket.authPath`) before
@@ -788,8 +788,14 @@ export interface WebSocketHandler<UserData = unknown> {
 		| ReturnType<typeof upgradeResponse<UserData>>
 		| Promise<UserData | false | ReturnType<typeof upgradeResponse<UserData>>>;
 
-	/** Called when a WebSocket connection is established. */
-	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
+	/**
+	 * Called when a WebSocket connection is established.
+	 *
+	 * May be async. A hook that throws or rejects is logged and that
+	 * connection is closed with code 1011; other connections and the
+	 * process are unaffected. The returned promise is not awaited.
+	 */
+	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void | Promise<void>;
 
 	/**
 	 * Called when a message is received.
@@ -797,8 +803,12 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * **Note:** subscribe/unsubscribe messages from the client store are
 	 * handled automatically before this is called. You only need this for
 	 * custom application-level messages.
+	 *
+	 * May be async. A hook that throws or rejects is logged and that
+	 * connection is closed with code 1011; other connections and the
+	 * process are unaffected. The returned promise is not awaited.
 	 */
-	message?: (ws: WebSocket<UserData>, ctx: MessageContext) => void;
+	message?: (ws: WebSocket<UserData>, ctx: MessageContext) => void | Promise<void>;
 
 	/**
 	 * Called when a client tries to subscribe to a topic.
@@ -895,14 +905,20 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * Use this to clean up per-topic state like presence or group membership
 	 * without waiting for the socket to close.
+	 *
+	 * May be async. A hook that throws or rejects is logged; the connection
+	 * and its remaining subscriptions are unaffected.
 	 */
-	unsubscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => void;
+	unsubscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => void | Promise<void>;
 
 	/**
 	 * Called when backpressure has drained (buffered data was sent).
 	 * Use this for flow control when sending large or frequent messages.
+	 *
+	 * May be async. A hook that throws or rejects is logged and that
+	 * connection is closed with code 1011.
 	 */
-	drain?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
+	drain?: (ws: WebSocket<UserData>, ctx: OpenContext) => void | Promise<void>;
 
 	/**
 	 * Called when a reconnecting client presents a previous session id and
@@ -934,8 +950,13 @@ export interface WebSocketHandler<UserData = unknown> {
 	 */
 	resume?: (ws: WebSocket<UserData>, ctx: ResumeContext) => void;
 
-	/** Called when the connection closes. */
-	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;
+	/**
+	 * Called when the connection closes.
+	 *
+	 * May be async. A hook that throws or rejects is logged; the connection
+	 * is already closed and the adapter's own teardown still runs.
+	 */
+	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void | Promise<void>;
 }
 
 // - Platform type for event.platform ----------------------------------------
@@ -1652,16 +1673,14 @@ export interface TopicHelper {
  * Wrap upgrade hook return value to include response headers on the 101
  * Switching Protocols response.
  *
- * **Warning (Cloudflare):** attaching `Set-Cookie` to the 101 response is
- * rejected by Cloudflare Tunnel and some other strict edge proxies. The
- * WebSocket opens, then closes with code 1006 before any frames are exchanged.
- * For session-cookie refresh use the `authenticate` hook instead, which
- * refreshes cookies over a normal HTTP response and works behind every proxy.
+ * **Set-Cookie:** a cookie on the 101 response reaches the browser only if
+ * every proxy in the path forwards the 101 unchanged. For session-cookie
+ * refresh use the `authenticate` hook instead, which refreshes cookies over a
+ * normal HTTP response and works behind every proxy.
  *
- * This helper remains supported for non-cookie response headers and for
- * deployments that do not sit behind strict proxies.
+ * This helper remains supported for any response header on the 101.
  *
- * @example Custom non-cookie headers (safe):
+ * @example Custom headers:
  * ```js
  * import { upgradeResponse } from 'svelte-adapter-uws';
  *

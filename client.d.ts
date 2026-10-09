@@ -62,10 +62,10 @@ export interface ConnectOptions {
 	 * request. On a non-2xx response, the connection is not opened and the status
 	 * store transitions to `'closed'` with a permanent rejection.
 	 *
-	 * This exists because `Set-Cookie` on a 101 Switching Protocols response is
-	 * silently dropped by Cloudflare Tunnel and some other strict edge proxies,
-	 * which closes the WebSocket with code 1006 before any frames are exchanged.
-	 * Refreshing cookies via a normal HTTP response works behind every proxy.
+	 * This exists because `Set-Cookie` on a 101 Switching Protocols response
+	 * reaches the browser only if every proxy in the path forwards the 101
+	 * unchanged. Refreshing cookies via a normal HTTP response works behind
+	 * every proxy.
 	 *
 	 * @default false
 	 *

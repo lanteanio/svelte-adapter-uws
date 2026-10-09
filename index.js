@@ -15,10 +15,10 @@ const DEFAULT_WS_HANDLER = '// Built-in: subscribe/unsubscribe handled by the ru
 
 /**
  * Scan a bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
- * usage. Emits a loud warning at build time because Cloudflare Tunnel and some
- * other strict edge proxies silently drop WebSocket connections whose 101
- * response carries Set-Cookie - symptom is 1006 TCP FIN immediately after
- * open fires server-side. The recommended fix is the `authenticate` hook.
+ * usage. Emits a warning at build time: a cookie on the 101 reaches the
+ * browser only if every proxy in the path forwards the 101 unchanged, while a
+ * cookie set on a normal HTTP response is handled by every proxy. The
+ * recommended route is the `authenticate` hook.
  *
  * @param {string} source
  * @returns {boolean}
@@ -351,18 +351,17 @@ export default function (opts = {}) {
 			};
 
 			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
-			// and warn loudly. Cloudflare Tunnel and some other strict edge proxies
-			// silently close WebSocket connections whose 101 response carries
-			// Set-Cookie (1006 TCP FIN immediately after the server-side open fires).
+			// and warn. A cookie on the 101 depends on every proxy in the path
+			// forwarding the 101 unchanged; the `authenticate` hook sets it on a
+			// normal HTTP response instead.
 			if (websocket && existsSync(`${tmp}/ws-handler.js`)) {
 				try {
 					const handlerSrc = readFileSync(`${tmp}/ws-handler.js`, 'utf8');
 					if (detectSetCookieOnUpgrade(handlerSrc)) {
 						builder.log.warn(
 							'[adapter-uws] Your upgrade() hook attaches Set-Cookie to the 101 response ' +
-							'via upgradeResponse(). This fails silently behind Cloudflare Tunnel, ' +
-							"Cloudflare's proxy, and some other strict edge proxies: the WebSocket " +
-							'opens, then closes with code 1006 before any frames are exchanged.\n' +
+							'via upgradeResponse(). A cookie on the 101 reaches the browser only if ' +
+							'every proxy between the browser and this server forwards the 101 unchanged.\n' +
 							'\n' +
 							'Migrate to the `authenticate` hook to refresh session cookies over a ' +
 							'normal HTTP response that works behind every proxy:\n' +
@@ -374,7 +373,7 @@ export default function (opts = {}) {
 							'  }\n' +
 							'\n' +
 							'Then opt in from the client: connect({ auth: true }).\n' +
-							'This warning is safe to ignore if you do not deploy behind Cloudflare.'
+							'This warning is safe to ignore if nothing in front of this server rewrites the 101.'
 						);
 					}
 				} catch {

@@ -880,6 +880,8 @@ The `ws` object in `open`, `message`, `close`, and `drain` is a [uWebSockets.js 
 - `ws.send(data)` - send a message to this connection
 - `ws.close()` - close the connection
 
+Hooks may be `async`. A hook that throws or returns a rejected promise is logged as `[ws] <name> hook threw:` with the error. `open`, `message` and `drain` then close that one connection with code 1011; `close` and `unsubscribe` only log. Other connections and the server process are unaffected. The adapter does not await a hook's promise, so an async `open` does not hold back the connection's first message.
+
 ---
 
 ## Authentication
@@ -1009,7 +1011,7 @@ The WebSocket upgrade is an HTTP request. The browser treats it like any other r
 
 ### Refreshing session cookies on WebSocket connect
 
-For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach - attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` - is RFC-compliant but **is silently rejected by Cloudflare Tunnel, Cloudflare's proxy, and some other strict edge proxies**. The symptom is that the WebSocket `open` handler fires server-side, then the connection closes with code 1006 (`Received TCP FIN before WebSocket close frame`) before any frames are exchanged. The adapter emits a build-time warning when it detects this pattern.
+For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach is attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()`. It is RFC-compliant, but a cookie on the 101 reaches the browser only if every proxy between the browser and the adapter forwards the 101 unchanged, and that is not something you control once a tunnel or edge proxy sits in the path. The adapter emits a build-time warning when it detects this pattern.
 
 The adapter ships a first-class solution: the optional `authenticate` hook runs as a normal HTTP POST **before** the WebSocket upgrade. `Set-Cookie` rides on a standard 2xx response, which every proxy handles correctly; the browser then attaches the refreshed cookie to the upgrade request that follows.
 
@@ -1072,7 +1074,7 @@ With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', 
 
 **Why not put `Set-Cookie` on the 101?**
 
-Cloudflare's HTTP/2 WebSocket bridging rewrites 101 responses, and `Set-Cookie` on the 101 trips the edge into tearing the connection down. This is undocumented Cloudflare behavior, but reproducible on every tunnel and proxy connector. The `authenticate` hook sidesteps it entirely by using a standard HTTP response.
+A `Set-Cookie` on the 101 depends on every proxy between the browser and the adapter forwarding that response unchanged. A cookie set on a standard HTTP response is handled by every proxy, so the `authenticate` hook sidesteps the question entirely.
 
 ---
 

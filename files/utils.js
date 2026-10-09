@@ -1058,3 +1058,87 @@ export function readAssertionCounts() {
 export function _resetAssertionCountsForTest() {
 	assertionCounts.clear();
 }
+
+// - Hook boundary -------------------------------------------------------------
+
+/**
+ * Report a failed app hook and, when a close reason is given, close the
+ * connection it ran for with 1011.
+ * @param {string} name
+ * @param {string | null} closeReason
+ * @param {any} ws
+ * @param {unknown} err
+ */
+function hookFailed(name, closeReason, ws, err) {
+	console.error('[ws] ' + name + ' hook threw:', err);
+	if (closeReason === null) return;
+	try {
+		ws.end(1011, closeReason);
+	} catch {
+		// Already closed, by the hook itself or by the client.
+	}
+}
+
+/**
+ * Call an app WebSocket hook (`open`, `message`, `drain`, `close`) inside an
+ * exception boundary.
+ *
+ * The hosts call these hooks from a transport callback and never await the
+ * result. A synchronous throw out of a uWS callback is an uncaughtException
+ * and a rejected promise returned by an async hook is an unhandled rejection;
+ * under Node's default policy either one exits the whole process, so one
+ * connection's hook failure (an async `open` that awaits and then touches a
+ * socket the client has already closed is the common shape) would take every other
+ * connection down with it.
+ *
+ * Both land here: the throw is caught, a returned thenable gets a rejection
+ * handler, and the failure is reported once with the hook's name. With a
+ * string `closeReason` the offending connection is closed with 1011; `close`
+ * passes null because that connection is already gone. The hook is called as
+ * a method of the object that holds it, so `this` is what it was before, and
+ * it is still not awaited, so an async hook delays nothing it did not delay
+ * before. A present export that is not a function is still called, so its
+ * TypeError is reported instead of being skipped in silence.
+ *
+ * @param {any} owner - the object holding the app hooks
+ * @param {string} name - hook name, also used for the report
+ * @param {string | null} closeReason - 1011 close reason, or null to only report
+ * @param {any} ws
+ * @param {any} ctx
+ */
+export function runHook(owner, name, closeReason, ws, ctx) {
+	const hook = owner[name];
+	if (hook == null) return;
+	// The thenable check sits inside the same try as the call: a returned
+	// value whose `then` getter throws must not leave through the boundary.
+	try {
+		const result = hook.call(owner, ws, ctx);
+		if (result != null && typeof result.then === 'function') {
+			result.then(undefined, (err) => hookFailed(name, closeReason, ws, err));
+		}
+	} catch (err) {
+		hookFailed(name, closeReason, ws, err);
+	}
+}
+
+/**
+ * The same boundary for the app's `unsubscribe` hook, which takes the topic
+ * as its second argument. A failure is reported and the connection keeps its
+ * remaining subscriptions; nothing is closed.
+ * @param {any} owner - the object holding the app hooks
+ * @param {any} ws
+ * @param {string} topic
+ * @param {any} ctx
+ */
+export function runUnsubscribeHook(owner, ws, topic, ctx) {
+	const hook = owner.unsubscribe;
+	if (hook == null) return;
+	try {
+		const result = hook.call(owner, ws, topic, ctx);
+		if (result != null && typeof result.then === 'function') {
+			result.then(undefined, (err) => hookFailed('unsubscribe', null, ws, err));
+		}
+	} catch (err) {
+		hookFailed('unsubscribe', null, ws, err);
+	}
+}
