@@ -790,6 +790,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Directed sends refused by native backpressure no longer increase close-hook message or byte counters. Queued frames remain counted across production and testing, including wire batches, filtered sends, reconnect advice, game delivery and requests.
 
 - Test-server wire broadcasts no longer inflate close-hook traffic counters; directed sends and wire-id announcements remain counted, including with outbound fault injection.
+- Test-server topic broadcasts and packed batches also remain outside close-hook traffic counters when outbound fault injection walks individual subscribers; delivery, filtering, drops, and delays retain their existing behavior.
 
 - Clarify that trusted server subscription APIs accept system topics through the app hook without a namespace escape option; client wire subscriptions keep their existing guard.
 

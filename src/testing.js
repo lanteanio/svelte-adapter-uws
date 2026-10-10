@@ -1186,7 +1186,7 @@ export async function createTestServer(options = {}) {
 			let delivered = false;
 			for (const ws of wsConnections) {
 				if (!ws.isSubscribed(topic)) continue;
-				sendOutboundT(ws, msg);
+				sendOutboundT(ws, msg, false);
 				delivered = true;
 			}
 			return delivered;
@@ -2273,7 +2273,7 @@ export async function createTestServer(options = {}) {
 							if (subs.has(t)) { receives = true; break; }
 						}
 					}
-					if (receives) sendOutboundT(ws, sharedBatchEnv);
+					if (receives) sendOutboundT(ws, sharedBatchEnv, false);
 				}
 				return;
 			}
