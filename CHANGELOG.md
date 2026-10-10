@@ -625,6 +625,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The test server checks the final subscribe gate before recording a grant, matching production and development when authorization changes during an async hook.
 
+- The export type gate rejects JavaScript subpaths without declarations and
+  follows runtime and declaration star re-exports, including cycles and
+  ambiguous names, instead of silently skipping those public surfaces.
+
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup

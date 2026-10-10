@@ -12,16 +12,23 @@
  *
  * It guards the drift class where an `exports` entry points at a missing or
  * mistyped declaration (silently degrading consumers to `any`) or a file that
- * never gets published. It is dependency-free on purpose: no TypeScript install
- * is required, so it runs anywhere `node` does. Run via `npm run check`; wired
+ * never gets published. It uses the development TypeScript parser without
+ * executing package code. Run via `npm run check`; wired
  * into `pretest` so the unit run enforces it.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as acorn from 'acorn';
+import ts from 'typescript';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rootArg = process.argv.indexOf('--root');
+if (rootArg !== -1 && !process.argv[rootArg + 1]) {
+	console.error('check-types: --root requires a package directory');
+	process.exit(1);
+}
+const root = rootArg === -1
+	? resolve(dirname(fileURLToPath(import.meta.url)), '..')
+	: resolve(process.argv[rootArg + 1]);
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
 const errors = [];
@@ -87,7 +94,8 @@ function walk(subpath, value) {
 }
 
 if (pkg.exports && typeof pkg.exports === 'object') {
-	for (const [subpath, value] of Object.entries(pkg.exports)) walk(subpath, value);
+	if (isConditions(pkg.exports)) walk('.', pkg.exports);
+	else for (const [subpath, value] of Object.entries(pkg.exports)) walk(subpath, value);
 } else if (typeof pkg.exports === 'string') {
 	checkTarget('.', 'default', pkg.exports);
 }
@@ -99,128 +107,141 @@ for (const field of ['main', 'module']) {
 	if (typeof pkg[field] === 'string') checkTarget(`(package.${field})`, 'default', pkg[field]);
 }
 
-// Every named runtime export must carry a declaration.
-//
-// Three root exports shipped undeclared, were declared one by one, and the
-// class immediately re-broke when the next round added another - because
-// nothing checked the CLASS, only the instances. A consumer importing an
-// undeclared export gets `any` in a package whose whole point is that the
-// types ship, and nothing fails until someone notices by hand.
-//
-// Deliberately a source-text scan rather than a typecheck: this gate runs
-// before any build and must stay dependency-free, and the question here is
-// only "is there a declaration with this name", which the text answers.
-//
-// The PAIRS COME FROM THE EXPORTS MAP, not a hand-kept list. A hand-kept list
-// covered six of the thirty-two published pairs and left `./client` - the most
-// imported subpath in the package - ungated, where two exports were in fact
-// already undeclared. A gate that has to be remembered is the same failure it
-// was written to stop.
+// Read both sides from syntax trees. In particular, follow bare star exports
+// instead of treating them as an empty runtime or declaration surface.
+const modules = new Map();
+const ambiguous = Symbol('ambiguous export');
+const resolutionOptions = {
+	module: ts.ModuleKind.NodeNext,
+	moduleResolution: ts.ModuleResolutionKind.NodeNext,
+	allowJs: true
+};
+// Runtime resolution must never substitute a declaration for JavaScript.
+const runtimeHost = { ...ts.sys, fileExists: (path) => !/\.(?:d\.)?[cm]?tsx?$/.test(path) && ts.sys.fileExists(path) };
 
-/**
- * Names a JS module exports, read from the AST.
- *
- * PARSED, not pattern-matched. A hand-rolled scanner that stripped comments and
- * quoted literals looked right and was badly wrong: it has no way to tell a
- * regex literal from division, so a regex containing a quote (`/['"]/`) read as
- * the start of a string and swallowed everything to the next matching quote. On
- * `src/index.js` that ate 42,000 of 47,420 characters and the file reported ZERO
- * exports - a gate that silently checked nothing, which is worse than the false
- * positive it was written to remove. acorn is already a dependency here (see
- * check-scope.js) and answers the question exactly.
- *
- * @param {string} src
- * @param {string} label for the error message
- * @returns {Set<string> | null} null when the file cannot be parsed
- */
-function runtimeExportNames(src, label) {
-	let ast;
-	try {
-		ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true });
-	} catch (err) {
-		errors.push(`${label}: cannot be parsed to read its exports - ${/** @type {Error} */ (err).message}`);
-		return null;
+function resolveReexport(specifier, from, declarations) {
+	if (!declarations && specifier.startsWith('.')) {
+		const path = resolve(dirname(from), specifier);
+		if (existsSync(path)) return path;
+	} else {
+		const result = ts.resolveModuleName(specifier, from, resolutionOptions,
+			declarations ? ts.sys : runtimeHost, undefined, undefined, ts.ModuleKind.ESNext);
+		if (result.resolvedModule) return result.resolvedModule.resolvedFileName;
 	}
-	const names = new Set();
-	for (const node of ast.body) {
-		if (node.type === 'ExportNamedDeclaration') {
-			if (node.declaration) {
-				const d = node.declaration;
-				if (d.type === 'FunctionDeclaration' || d.type === 'ClassDeclaration') {
-					if (d.id) names.add(d.id.name);
-				} else if (d.type === 'VariableDeclaration') {
-					for (const decl of d.declarations) {
-						if (decl.id.type === 'Identifier') names.add(decl.id.name);
-					}
+	errors.push(`${from}: cannot resolve ${declarations ? 'declaration' : 'runtime'} re-export ${specifier}`);
+	return null;
+}
+
+function bindingNames(name, output) {
+	if (ts.isIdentifier(name)) output.push(name.text);
+	else for (const element of name.elements) {
+		if (!ts.isOmittedExpression(element)) bindingNames(element.name, output);
+	}
+}
+
+function readModule(file, declarations) {
+	const key = `${declarations}:${resolve(file)}`;
+	if (modules.has(key)) return modules.get(key);
+	const module = { key, explicit: new Map(), imports: new Map(), stars: [] };
+	modules.set(key, module);
+	let source;
+	try { source = readFileSync(file, 'utf8'); }
+	catch { errors.push(`${file}: cannot be read to compare exports`); return module; }
+	const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+		declarations ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+	for (const diagnostic of ast.parseDiagnostics) {
+		errors.push(`${file}: cannot be parsed to read its exports - ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`);
+	}
+	const target = (specifier) => {
+		const path = resolveReexport(specifier.text, file, declarations);
+		return path ? readModule(path, declarations) : null;
+	};
+	for (const node of ast.statements) {
+		if (ts.isExportDeclaration(node)) {
+			if (node.exportClause && ts.isNamespaceExport(node.exportClause)) {
+				module.explicit.set(node.exportClause.name.text, { namespace: target(node.moduleSpecifier) });
+			} else if (node.exportClause) {
+				const from = node.moduleSpecifier ? target(node.moduleSpecifier) : null;
+				for (const entry of node.exportClause.elements) {
+					const name = (entry.propertyName || entry.name).text;
+					module.explicit.set(entry.name.text, node.moduleSpecifier ? { from, name } : { local: name });
+				}
+			} else if (node.moduleSpecifier) {
+				const from = target(node.moduleSpecifier);
+				if (from) module.stars.push(from);
+			}
+		} else if (ts.isImportDeclaration(node) && node.importClause) {
+			// Resolve these only if a local export refers to the imported name.
+			const clause = node.importClause;
+			if (clause.name) module.imports.set(clause.name.text, { specifier: node.moduleSpecifier, name: 'default', target });
+			// Namespace imports re-exported locally remain distinct local
+			// bindings (ParseModule); named imports become indirect exports.
+			if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+				for (const entry of clause.namedBindings.elements) {
+					module.imports.set(entry.name.text, { specifier: node.moduleSpecifier, name: (entry.propertyName || entry.name).text, target });
 				}
 			}
-			for (const spec of node.specifiers) {
-				const exported = spec.exported;
-				const name = exported.type === 'Identifier' ? exported.name : exported.value;
-				if (name && name !== 'default') names.add(name);
+		} else if (node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+			if (node.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+				module.explicit.set('default', { local: node.name?.text || 'default' });
+				continue;
 			}
-		} else if (node.type === 'ExportAllDeclaration' && node.exported) {
-			const name = node.exported.type === 'Identifier' ? node.exported.name : node.exported.value;
-			if (name) names.add(name);
+			const names = [];
+			if (ts.isVariableStatement(node)) {
+				for (const declaration of node.declarationList.declarations) bindingNames(declaration.name, names);
+			} else if (node.name) names.push(node.name.text);
+			for (const name of names) module.explicit.set(name, { local: name });
+		} else if (ts.isExportAssignment(node)) {
+			module.explicit.set('default', { local: 'default' });
 		}
+	}
+	return module;
+}
+
+function exportedNames(module, visited = new Set()) {
+	if (visited.has(module)) return new Set();
+	visited.add(module);
+	const names = new Set(module.explicit.keys());
+	for (const star of module.stars) {
+		for (const name of exportedNames(star, visited)) if (name !== 'default') names.add(name);
 	}
 	return names;
 }
 
-/**
- * Remove comments from a `.d.ts` so a commented-out declaration is correctly
- * read as absent rather than as a declaration.
- *
- * A declaration file is not parsed here - acorn does not read TypeScript - so
- * this side stays a text scan. It is far safer than the same scan over JS: a
- * `.d.ts` carries no regex literals and no executable code, so the only hazard
- * the JS scanner tripped on does not exist. Quoted literals are deliberately
- * left alone, since swallowing them is what caused the failure above.
- *
- * @param {string} src
- * @returns {string}
- */
-function stripComments(src) {
-	let out = '';
-	let i = 0;
-	while (i < src.length) {
-		if (src[i] === '/' && src[i + 1] === '/') {
-			while (i < src.length && src[i] !== '\n') i++;
-			continue;
+// Mirror the ESM star ambiguity rule: two different bindings for one name
+// are not an export, while a diamond that reaches the same binding is valid.
+function resolveExport(module, name, visited = new Set()) {
+	const key = `${module.key}:${name}`;
+	if (visited.has(key)) return null;
+	visited.add(key);
+	const entry = module.explicit.get(name);
+	if (entry) {
+		if ('namespace' in entry) return entry.namespace ? `${entry.namespace.key}:*` : null;
+		if (entry.local) {
+			const imported = module.imports.get(entry.local);
+			if (!imported) return `${module.key}:${entry.local}`;
+			const from = imported.target(imported.specifier);
+			return from ? resolveExport(from, imported.name, visited) : null;
 		}
-		if (src[i] === '/' && src[i + 1] === '*') {
-			i += 2;
-			while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
-			i += 2;
-			out += ' ';
-			continue;
-		}
-		out += src[i];
-		i++;
+		return entry.from ? resolveExport(entry.from, entry.name, visited) : null;
 	}
-	return out;
+	if (name === 'default') return null;
+	let found = null;
+	for (const star of module.stars) {
+		const binding = resolveExport(star, name, new Set(visited));
+		if (binding === ambiguous || (found && binding && found !== binding)) return ambiguous;
+		if (binding) found = binding;
+	}
+	return found;
 }
 
-/**
- * Names a `.d.ts` declares or re-exports.
- * @param {string} src already stripped of comments
- * @returns {Set<string>}
- */
-function declaredNamesIn(src) {
-	const names = new Set();
-	const declared = /(?:^|\n)\s*export\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\s*\*?|const|let|var|class|type|interface|enum)\s+([A-Za-z_$][\w$]*)/g;
-	for (const m of src.matchAll(declared)) names.add(m[1]);
-	// `export { a, b as c }`, including multiline lists and `export { x } from`.
-	const list = /(?:^|\n)\s*export\s*\{([\s\S]*?)\}/g;
-	for (const m of src.matchAll(list)) {
-		for (const part of m[1].split(',')) {
-			const name = part.trim().split(/\s+as\s+/).pop()?.trim();
-			if (name && /^[A-Za-z_$][\w$]*$/.test(name)) names.add(name);
-		}
-	}
-	const star = /(?:^|\n)\s*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from/g;
-	for (const m of src.matchAll(star)) names.add(m[1]);
-	return names;
+function namesIn(file, declarations) {
+	const module = readModule(file, declarations);
+	return new Set([...exportedNames(module)].filter((name) => {
+		if (name === 'default') return false;
+		const binding = resolveExport(module, name);
+		return binding !== null && binding !== ambiguous;
+	}));
 }
 
 // Pair each subpath's runtime target with its declaration target.
@@ -240,20 +261,13 @@ let undeclaredCount = 0;
 let declaredCount = 0;
 let pairsChecked = 0;
 for (const [subpath, { runtime, types }] of bySubpath) {
-	if (!runtime || !types) continue;
-	let runtimeSrc;
-	let typesSrc;
-	try {
-		runtimeSrc = readFileSync(join(root, runtime.replace(/^\.\//, '')), 'utf8');
-		typesSrc = stripComments(readFileSync(join(root, types.replace(/^\.\//, '')), 'utf8'));
-	} catch {
-		errors.push(`${subpath}: ${runtime} / ${types} cannot be read to compare exports`);
-		continue;
+	if (runtime && !types && !subpath.startsWith('(package.')) {
+		errors.push(`${subpath}: ${runtime} has no types condition`);
 	}
-	const runtimeNames = runtimeExportNames(runtimeSrc, runtime);
-	if (runtimeNames === null) continue;
+	if (!runtime || !types) continue;
+	const runtimeNames = namesIn(join(root, runtime.replace(/^\.\//, '')), false);
+	const declaredNames = namesIn(join(root, types.replace(/^\.\//, '')), true);
 	pairsChecked++;
-	const declaredNames = declaredNamesIn(typesSrc);
 	for (const name of runtimeNames) {
 		declaredCount++;
 		if (!declaredNames.has(name)) {
