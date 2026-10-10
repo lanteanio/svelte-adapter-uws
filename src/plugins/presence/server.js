@@ -37,6 +37,7 @@ const TOPIC_PREFIX = '__presence:';
 // client subscribed to the channel the revocation was about.
 registerDerivedTopicPrefix(TOPIC_PREFIX);
 
+import { assertSafeTopic } from '../_shared/topic.js';
 import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './codec.js';
 import { setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../../runtime/runtime.js';
 import { trackedSubscribe, trackedUnsubscribe, registerDerivedTopicPrefix, markSideEffectHooks, authorizeDerivedSubscribe } from '../../runtime/utils.js';
@@ -804,38 +805,42 @@ export function createPresence(options = {}) {
 			diffFlushTimer = null;
 		}
 		for (const [topic, entries] of pendingDiffs) {
-			// Null-prototype roster objects: the keys are resolved dedup keys
-			// (attacker-controlled strings) and this object becomes a wire
-			// frame verbatim, so no key may ever reach an inherited
-			// `__proto__` setter (which would silently turn the entry into
-			// the object's prototype instead of an own, serializable key).
-			/** @type {Record<string, Record<string, any>>} */
-			const joins = Object.create(null);
-			/** @type {Record<string, Record<string, any>>} */
-			const leaves = Object.create(null);
-			/** @type {Record<string, Record<string, any>> | null} */
-			let updates = null;
-			const users = topicPresence.get(topic);
-			for (const [key, e] of entries) {
-				if (e.op === 'join') {
-					// Read the live entry so the join roster carries the latest
-					// durable fields; the user is still present (a leave would have
-					// superseded the join).
-					const live = users && users.get(key);
-					if (live) joins[key] = publicData(live);
-				} else if (e.op === 'leave') {
-					leaves[key] = /** @type {Record<string, any>} */ (e.data);
-				} else {
-					if (!updates) updates = Object.create(null);
-					updates[key] = /** @type {Record<string, any>} */ (e.changed);
+			try {
+				// Null-prototype roster objects: the keys are resolved dedup keys
+				// (attacker-controlled strings) and this object becomes a wire
+				// frame verbatim, so no key may ever reach an inherited
+				// `__proto__` setter (which would silently turn the entry into
+				// the object's prototype instead of an own, serializable key).
+				/** @type {Record<string, Record<string, any>>} */
+				const joins = Object.create(null);
+				/** @type {Record<string, Record<string, any>>} */
+				const leaves = Object.create(null);
+				/** @type {Record<string, Record<string, any>> | null} */
+				let updates = null;
+				const users = topicPresence.get(topic);
+				for (const [key, e] of entries) {
+					if (e.op === 'join') {
+						// Read the live entry so the join roster carries the latest
+						// durable fields; the user is still present (a leave would have
+						// superseded the join).
+						const live = users && users.get(key);
+						if (live) joins[key] = publicData(live);
+					} else if (e.op === 'leave') {
+						leaves[key] = /** @type {Record<string, any>} */ (e.data);
+					} else {
+						if (!updates) updates = Object.create(null);
+						updates[key] = /** @type {Record<string, any>} */ (e.changed);
+					}
 				}
+				// Keep the common diff shape `{ joins, leaves }` byte-identical when
+				// no field-level update is pending, so a deployment that never calls
+				// update() sees an unchanged wire (and the binary codec encodes it as
+				// before). `updates` is additive: an old client ignores it.
+				const diff = updates ? { joins, leaves, updates } : { joins, leaves };
+				emit(TOPIC_PREFIX + topic, 'diff', diff, platform);
+			} catch {
+				// A later heartbeat repairs this topic; other topics must still flush.
 			}
-			// Keep the common diff shape `{ joins, leaves }` byte-identical when
-			// no field-level update is pending, so a deployment that never calls
-			// update() sees an unchanged wire (and the binary codec encodes it as
-			// before). `updates` is additive: an old client ignores it.
-			const diff = updates ? { joins, leaves, updates } : { joins, leaves };
-			emit(TOPIC_PREFIX + topic, 'diff', diff, platform);
 		}
 		pendingDiffs.clear();
 	}
@@ -892,16 +897,20 @@ export function createPresence(options = {}) {
 		if (heartbeatMs > 0) {
 			heartbeatTimer = setIntervalTimer(() => {
 				for (const [topic, users] of topicPresence) {
-					// Publish a `{userKey: data}` map (rather than a keys-only
-					// array) so a client whose entry aged out of its local
-					// `maxAge` sweep between heartbeats can re-add it from the
-					// heartbeat alone, without waiting for a diff /
-					// state to reconcile. Matches the Redis-backed
-					// variant in svelte-adapter-uws-extensions.
-					/** @type {Record<string, any>} */
-					const dataMap = Object.create(null); // attacker-controlled keys - see flushDiffs
-					for (const [userKey, entry] of users) dataMap[userKey] = publicData(entry);
-					emit(TOPIC_PREFIX + topic, 'heartbeat', dataMap, _platform);
+					try {
+						// Publish a `{userKey: data}` map (rather than a keys-only
+						// array) so a client whose entry aged out of its local
+						// `maxAge` sweep between heartbeats can re-add it from the
+						// heartbeat alone, without waiting for a diff /
+						// state to reconcile. Matches the Redis-backed
+						// variant in svelte-adapter-uws-extensions.
+						/** @type {Record<string, any>} */
+						const dataMap = Object.create(null); // attacker-controlled keys - see flushDiffs
+						for (const [userKey, entry] of users) dataMap[userKey] = publicData(entry);
+						emit(TOPIC_PREFIX + topic, 'heartbeat', dataMap, _platform);
+					} catch {
+						// Publication failure is confined to this topic and this heartbeat.
+					}
 				}
 			}, heartbeatMs);
 		}
@@ -947,6 +956,7 @@ export function createPresence(options = {}) {
 	/** @type {PresenceTracker} */
 	const tracker = {
 		join(ws, topic, platform) {
+			assertSafeTopic(topic);
 			capturePlatform(platform);
 
 			// Skip internal topics to prevent recursion when the subscribe
@@ -1080,11 +1090,12 @@ export function createPresence(options = {}) {
 		},
 
 		async sync(ws, topic, platform) {
-			capturePlatform(platform);
 			// Client snapshot topics are application topics. Never let an
 			// internal tap minted by this plugin self-authorize a second,
 			// doubly-prefixed tap.
 			if (typeof topic !== 'string' || topic.startsWith('__')) return;
+			try { assertSafeTopic(topic); } catch { return; }
+			capturePlatform(platform);
 			// Authorize against the REAL topic before granting tap-channel
 			// membership: the presence-snapshot message is otherwise an
 			// un-authorized path to subscribe to __presence:{topic} and read its

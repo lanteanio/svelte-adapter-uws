@@ -253,6 +253,7 @@ export interface CursorTracker<UserInfo = unknown> {
 	 * ```js
 	 * cursors.update(ws, 'canvas', { x: 120, y: 340 }, platform);
 	 * ```
+	 * @throws {TypeError} Topic contains quotes, backslashes, or control characters.
 	 */
 	update(ws: WebSocket<any>, topic: string, data: unknown, platform: Platform): void;
 

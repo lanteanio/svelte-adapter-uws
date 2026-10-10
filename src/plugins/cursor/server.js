@@ -48,6 +48,7 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
+import { assertSafeTopic } from '../_shared/topic.js';
 import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorEncodeDict, CursorTimeEncodeDict, CursorStreamEncodeDict } from './codec.js';
 import { WS_CAPS, trackedSubscribe, registerDerivedTopicPrefix, authorizeDerivedSubscribe } from '../../runtime/utils.js';
 import { MAX_PROJECTION_DEPTH, exceedsDepth } from '../_shared/sensitive.js';
@@ -959,7 +960,8 @@ export function createCursor(options = {}) {
 				driftCount++;
 				if (drift > driftMax) driftMax = drift;
 
-				flushDirty(topic, state.dirty);  // increments flushCount internally
+				try { flushDirty(topic, state.dirty); }
+				catch { /* A failed ephemeral frame must not stop other topics or the timer. */ }
 				state.dirty.clear();
 				dirtyTopics.delete(topic);
 
@@ -1071,11 +1073,13 @@ export function createCursor(options = {}) {
 				// did not.
 				if (exceedsDepth(data, MAX_PROJECTION_DEPTH)) return;
 			}
+			// Existing topic state proves the name was checked on its first update.
+			let topicMap = topics.get(topic);
+			if (!topicMap) assertSafeTopic(topic);
 			const state = getWsState(ws);
 			const isFirstOnTopic = !state.topics.has(topic);
 			state.topics.add(topic);
 
-			let topicMap = topics.get(topic);
 			if (!topicMap) {
 				if (topics.size >= maxTopics) {
 					const oldest = topics.keys().next().value;
@@ -1242,6 +1246,7 @@ export function createCursor(options = {}) {
 			// minted must never satisfy authorization for a client-supplied
 			// internal name and create `__cursor:__cursor:...` recursively.
 			if (typeof topic !== 'string' || topic.startsWith('__')) return;
+			try { assertSafeTopic(topic); } catch { return; }
 			// The snapshot handshake is the membership-establishing path for this
 			// tap channel: the client never wire-subscribes a `__`-prefixed topic
 			// (the wire gate blocks that), so the plugin subscribes the socket
