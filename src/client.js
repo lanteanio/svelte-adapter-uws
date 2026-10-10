@@ -1071,6 +1071,11 @@ function createConnection(options) {
 	/** @type {Map<string, number>} */
 	const lastSeenSeqs = new Map();
 
+	// Live frames can overtake an outstanding gap-fill. Keep their watermark
+	// separate until the matching topic acknowledgement completes recovery.
+	/** @type {Map<string, { ref: number, highest?: number }>} */
+	const pendingRecoveries = new Map();
+
 	// Process generation the server last reported per topic, learned from the
 	// subscribe ack. Sent back on resume so the server can tell whether the seq
 	// space we last saw still exists; a mismatch means the server reset that
@@ -1324,6 +1329,30 @@ function createConnection(options) {
 		return out;
 	}
 
+	/** @param {{ ref: number, recover?: Record<string, { offset: number }> }} frame */
+	function sendRecoveryFrame(frame) {
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		const text = JSON.stringify(frame);
+		if (frame.recover) {
+			for (const topic of Object.keys(frame.recover)) {
+				pendingRecoveries.set(topic, { ref: frame.ref });
+				lastSeenSeqs.set(topic, frame.recover[topic].offset);
+			}
+		}
+		ws.send(text);
+	}
+
+	/** @param {{ topic: string, ref?: number | string }} ack @param {boolean} accepted */
+	function finishRecovery(ack, accepted) {
+		const pending = pendingRecoveries.get(ack.topic);
+		if (!pending || ack.ref !== pending.ref) return;
+		pendingRecoveries.delete(ack.topic);
+		if (accepted && pending.highest !== undefined) {
+			const previous = lastSeenSeqs.get(ack.topic);
+			if (previous === undefined || pending.highest > previous) lastSeenSeqs.set(ack.topic, pending.highest);
+		}
+	}
+
 	// Initial-mount subscribe coalescer. Multiple subscribe(topic) calls
 	// landing in the same microtask collapse to a single subscribe-batch
 	// frame, so a page mounting N streams triggers the server's
@@ -1380,6 +1409,8 @@ function createConnection(options) {
 	// on the `denials` store for the application to act on.
 	/** @type {Map<string, number>} */
 	const rateLimitedTopics = new Map();
+	/** @type {Map<string, number>} */
+	const pendingRetryRefs = new Map();
 	/** @type {ReturnType<typeof setTimer> | null} */
 	let rateLimitedTimer = null;
 	const RATE_LIMITED_RETRY_MS = 250;
@@ -1405,7 +1436,23 @@ function createConnection(options) {
 			const frame = { type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ };
 			if (recover !== null) frame.recover = recover;
 			if (debug) console.log('[ws] subscribe-batch retry ->', chunk, recover ? '(+recover)' : '');
-			_flowSend(() => ws.send(JSON.stringify(frame)));
+			const generation = connectionGeneration;
+			for (const topic of chunk) pendingRetryRefs.set(topic, frame.ref);
+			_flowSend(() => {
+				if (generation !== connectionGeneration) return;
+				const wanted = chunk.filter(topic => subscribedTopics.has(topic) && pendingRetryRefs.get(topic) === frame.ref);
+				for (const topic of wanted) pendingRetryRefs.delete(topic);
+				if (wanted.length === 0) return;
+				if (wanted.length !== chunk.length) {
+					frame.topics = wanted;
+					if (frame.recover) {
+						const recover = {};
+						for (const topic of wanted) if (frame.recover[topic]) recover[topic] = frame.recover[topic];
+						frame.recover = recover;
+					}
+				}
+				sendRecoveryFrame(frame);
+			});
 		}
 	}
 
@@ -1609,6 +1656,8 @@ function createConnection(options) {
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 		if (authInFlight) return;
 		const generation = ++connectionGeneration;
+		pendingRecoveries.clear();
+		pendingRetryRefs.clear();
 		if (ws) {
 			ws = null;
 			if (socketAttemptTimer !== null) clearTimer(socketAttemptTimer);
@@ -1760,7 +1809,7 @@ function createConnection(options) {
 					const frame = { type: 'subscribe-batch', topics, ref: nextSubscribeRef++ };
 					if (recover !== null) frame.recover = recover;
 					if (debug) console.log('[ws] resubscribe-batch ->', topics, recover ? '(+recover)' : '');
-					ws?.send(JSON.stringify(frame));
+					sendRecoveryFrame(frame);
 				}
 			}
 
@@ -1796,8 +1845,13 @@ function createConnection(options) {
 			if (typeof msg.j === 'number') wsEvent.j = msg.j;
 			if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
 			if (typeof msg.seq === 'number') {
-				const prev = lastSeenSeqs.get(msg.topic);
-				if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+				const pending = pendingRecoveries.size === 0 ? undefined : pendingRecoveries.get(msg.topic);
+				if (pending) {
+					if (pending.highest === undefined || msg.seq > pending.highest) pending.highest = msg.seq;
+				} else {
+					const prev = lastSeenSeqs.get(msg.topic);
+					if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+				}
 			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate' || msg.event === 'gap' ||
 				msg.event === 'denied' || (msg.event === 'end' && msg.data?.truncated === true)) &&
 				typeof msg.topic === 'string' && msg.topic.charCodeAt(0) === 95 &&
@@ -1808,6 +1862,8 @@ function createConnection(options) {
 				// explicit rehydrate announces the replacement generation.
 				const baseTopic = msg.topic.slice('__replay:'.length);
 				lastSeenSeqs.delete(baseTopic);
+				const pending = pendingRecoveries.get(baseTopic);
+				if (pending) pending.highest = undefined;
 				if (msg.event === 'rehydrate' && typeof msg.data?.epoch === 'number') {
 					lastSeenEpochs.set(baseTopic, msg.data.epoch);
 				}
@@ -1953,6 +2009,7 @@ function createConnection(options) {
 					return;
 				}
 				if (msg.type === 'subscribed' && typeof msg.topic === 'string') {
+					finishRecovery(msg, true);
 					// Record the per-topic generation the server reported so we
 					// can present it back on resume. Old servers omit it; the
 					// map entry is simply absent and resume treats it as a match.
@@ -2016,6 +2073,7 @@ function createConnection(options) {
 					return;
 				}
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
+					finishRecovery(msg, false);
 					console.warn(formatDiagnostic({
 						source: 'svelte-adapter-uws',
 						component: 'client.subscription',
@@ -2304,6 +2362,9 @@ function createConnection(options) {
 		// the set bounded across churn of dynamic topics.
 		managedTopics.delete(topic);
 		subscribedTopics.delete(topic);
+		pendingRecoveries.delete(topic);
+		pendingRetryRefs.delete(topic);
+		rateLimitedTopics.delete(topic);
 		topicStores.delete(topic);
 		// Clean up topic+event filtered stores for this topic
 		for (const key of eventStores.keys()) {

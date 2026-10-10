@@ -950,6 +950,17 @@ server, or an old client against a new server, degrade to offset-only recovery
 (or, for resume-on-subscribe against a server that predates it, to a plain
 resubscribe) without breaking.
 
+While a topic's recovery is unanswered, a client MUST NOT advance its resume
+offset beyond the offset that request presented, even if newer live frames
+arrive. It MAY keep their highest sequence separately and commit it once the
+matching topic `subscribed` or whole-session `resumed` acknowledges completion;
+`subscribe-denied` ends that attempt without committing speculative progress.
+A truncation, denial, rehydrate or gap marker still invalidates the saved
+offset as described in section 8.1. If the connection ends before the answer,
+the next recovery uses the saved offset, so live traffic cannot skip an
+unreceived gap-fill. Match acknowledgements to the outstanding request's
+reference and topic when the request carries a reference.
+
 Some topic classes (cursors, for example) carry `seq` for uniformity and gap
 *detection* but are not recoverable: a gap triggers a fresh snapshot, not a
 replay. Recoverability is a per-topic property declared by the plugin, not a
@@ -1900,9 +1911,10 @@ WebSocket message is; a close record is not a message.
 A client or server claiming the reliable-stream binding MUST implement Core
 conformance from section 13 over this carriage, the framing/topology/lifecycle
 rules of section 15, and every optional inner capability it advertises or emits.
-Binary conformance continues to require JSON fallback. A client that recovers
-topics (section 7) over this carriage MUST also act on the truncation 15.1
-answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an
+Binary conformance continues to require JSON fallback. The unanswered-recovery
+offset rule in section 7 applies to every lane ending, including network loss
+and slow-consumer resets. A client that recovers topics over this carriage MUST
+also act on the truncation that section 15.1 answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an
 `end` there that carries `truncated:true`, with or without a `reqId` - even if
 it implements no section 8 plugin: it drops the topic's resume offset and
 surfaces the truncation to the application, which re-snapshots the topic as
