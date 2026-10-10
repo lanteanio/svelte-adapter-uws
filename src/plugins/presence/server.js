@@ -497,14 +497,16 @@ export function createPresence(options = {}) {
 	// `user_id`, `roles` - were refused in silence. The newly-refused names were
 	// the only ones an app could not already see coming.
 	const foldName = /** @param {string} k */ (k) => k.toLowerCase().replace(/[^a-z0-9]+/g, '');
+	const foldedKeyField = foldName(keyField);
 	const WARNABLE_RESERVED = new Set(
-		[keyField, 'id', 'userId', 'role', 'roles', 'userRole', 'constructor', 'prototype'].map(foldName)
+		[keyField, 'id', 'userId', 'role', 'roles', 'userRole', 'constructor', 'prototype']
+			.map(foldName).filter(Boolean)
 	);
 	const warnedReservedFields = new Set();
 	const warnOnReservedField = process.env.NODE_ENV === 'production'
 		? null
 		: /** @param {string} k */ (k) => {
-			if (!WARNABLE_RESERVED.has(foldName(k)) || warnedReservedFields.has(k)) return;
+			if ((k !== keyField && !WARNABLE_RESERVED.has(foldName(k))) || warnedReservedFields.has(k)) return;
 			warnedReservedFields.add(k);
 			console.warn(
 				`[svelte-adapter-uws] presence.update(): field '${k}' is reserved and was dropped. ` +
@@ -538,9 +540,11 @@ export function createPresence(options = {}) {
 		// `ROLE`, `userId` and `user_id` - so a client could not overwrite the
 		// identity its peers see, but could plant a confusable one BESIDE it,
 		// which spoofs any client rendering `entry.userId ?? entry.id`.
-		const folded = k.toLowerCase().replace(/[^a-z0-9]+/g, '');
+		// An empty fold carries no identity: unrelated Unicode or punctuation
+		// names must not alias the configured key. Reserve its exact spelling.
+		const folded = foldName(k);
 		return (
-			folded === keyField.toLowerCase().replace(/[^a-z0-9]+/g, '') ||
+			(foldedKeyField ? folded === foldedKeyField : k === keyField) ||
 			folded === 'id' ||
 			folded === 'userid' ||
 			folded === 'role' ||

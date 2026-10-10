@@ -225,6 +225,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Invalid non-nullish results now throw `TypeError`. Valid bytes, `Buffer`, views from another realm, nullish fallback and original codec exceptions retain their behavior. Earlier deliveries and publish bookkeeping are not rolled back.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: a Unicode-only presence identity key no longer blocks unrelated fields.** With a key such as `用户`, trusted server updates dropped every other name without ASCII letters or digits; the identity rule now reserves only the configured spelling when its folded name is empty.
+  - **Affects:** Apps using a Unicode-only or punctuation-only presence `key` and updating fields from server code.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Identity keys with a nonempty lowercase ASCII letter/digit fold keep their existing alias matching, including non-ASCII letters that lowercase to ASCII; the configured key itself and other reserved names remain protected, and wire updates still require `clientUpdateFields`.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -596,6 +603,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payloads. Real-socket tests cover all eight send/publish branches, original
   exceptions, nullish fallback and deliveries completed before a later failure.
 
+
+- **Presence updates with an empty folded identity name:** the default guard
+  compares the exact configured key when lowercasing and retaining only ASCII
+  letters and digits leaves an empty name. A key such as `用户` no longer
+  reserves unrelated Unicode-only or punctuation-only fields. Nonempty folds
+  retain their existing aliases, including Unicode letters that lowercase to
+  ASCII, and the fold is computed once per tracker. Reserved-field warnings
+  distinguish the exact empty-fold key from unrelated names. Other sensitive
+  and structural guards and the explicit client allowlist remain unchanged.
+  Real WebSocket tests cover delivered diffs and fresh snapshots, Unicode case
+  distinctions, punctuation-only keys, non-ASCII aliases with a nonempty fold,
+  warning eligibility, and default and explicit client update permissions.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

@@ -10,6 +10,11 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 *
 	 * If the field is missing from the data, each connection is tracked separately.
 	 *
+	 * The default update guard reserves aliases after lowercasing and removing
+	 * everything except ASCII letters and digits. If that leaves an empty name
+	 * (for example, `key: '用户'`), it reserves only the exact configured spelling;
+	 * unrelated Unicode or punctuation names remain eligible for updates.
+	 *
 	 * @default 'id'
 	 */
 	key?: keyof Selected & string;
