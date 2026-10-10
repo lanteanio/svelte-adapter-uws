@@ -11,11 +11,11 @@ const describeUWS = hasUWS ? describe : describe.skip;
 const composed = '\u00fcber';
 const decomposed = 'u\u0308ber';
 
-function request(port, target, method = 'GET') {
+function request(port, target, method = 'GET', host = '127.0.0.1') {
 	return new Promise((resolve, reject) => {
 		const chunks = [];
 		const socket = connect(port, '127.0.0.1', () => {
-			socket.write(method + ' ' + target + ' HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
+			socket.write(method + ' ' + target + ' HTTP/1.1\r\nHost: ' + host + '\r\nConnection: close\r\n\r\n');
 		});
 		socket.setTimeout(10000, () => { socket.destroy(); reject(new Error('HTTP response timed out')); });
 		socket.on('data', (chunk) => chunks.push(chunk));
@@ -61,6 +61,47 @@ describeUWS('encoded static and prerendered names on the built runtime', () => {
 	afterAll(async () => {
 		await server?.stop();
 		if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it('leaves host canonicalization off by default', async () => {
+		const response = await request(server.port, '/test.txt', 'GET', 'www.example.com');
+		expect(response.status).toBe(200);
+		expect(response.headers.location).toBeUndefined();
+		expect(response.body.length).toBeGreaterThan(0);
+	});
+
+	for (const method of ['GET', 'HEAD']) {
+		it('serves browser-encoded spaces and unreserved characters over ' + method, async () => {
+			const body = 'space-paren-hyphen-body';
+			index('/browser-names-' + method, { 'vtt_wct (34).png': body, 'a-b(c).txt': body, 'nested/file name.txt': body });
+			for (const name of ['vtt_wct%20(34).png', 'vtt_wct%20%2834%29.png', 'a%2Db%28c%29.txt', 'a%2db(c).txt', 'nested/file%20name.txt']) {
+				const target = '/browser-names-' + method + '/' + name + '?keep=%2F';
+				const response = await request(server.port, target, method);
+				expect(response.status, target).toBe(200);
+				expect(response.body, target).toBe(method === 'HEAD' ? '' : body);
+				expect(response.headers['content-length'], target).toBe(String(Buffer.byteLength(body)));
+			}
+		});
+	}
+
+	it('decodes an indexed name only once without traversing directories or matching encoded separators', async () => {
+		index('/browser-guards', { 'file name.txt': 'indexed-space-body', 'nested/secret.txt': 'indexed-nested-body' });
+		for (const target of [
+			'/browser-guards/file%2520name.txt',
+			'/browser-guards/nested%2Fsecret.txt',
+			'/browser-guards/nested%2fsecret.txt',
+			'/browser-guards/nested/../file%20name.txt',
+			'/browser-guards/nested/%2e%2e/file%20name.txt',
+			'/browser-guards/absent%20name.txt'
+		]) {
+			const response = await request(server.port, target);
+			expect([400, 404], target).toContain(response.status);
+			expect(response.body, target).not.toContain('indexed-space-body');
+			expect(response.body, target).not.toContain('indexed-nested-body');
+		}
+		for (const target of ['/browser-guards/file%name.txt', '/browser-guards/file%FFname.txt']) {
+			expect((await request(server.port, target)).status, target).toBe(400);
+		}
 	});
 
 	it.runIf(process.platform === 'win32')('serves indexed Unicode tilde names while refusing filesystem aliases', async () => {

@@ -661,6 +661,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Replay stores report a standalone truncation marker while their request is outstanding, once per replay, including when the end marker repeats the signal. Request IDs still isolate concurrent replay responses.
 
+- Static filename regression coverage now exercises browser-encoded spaces, hyphens and parentheses over real GET and HEAD requests, including traversal and double-decoding controls.
+
 - Large static responses resume from the shared cache under socket backpressure, avoiding a full unsent-body copy for every slow reader while preserving complete ranges and encoded bytes.
 
 - Static plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML responses declare UTF-8 so non-ASCII text decodes correctly. XML and RTF retain their own encoding declarations.
