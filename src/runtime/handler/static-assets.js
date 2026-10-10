@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { manifest, prerendered } from '../manifest-bridge.js';
+import { appPath, prerendered } from '../manifest-bridge.js';
 import { excludedDotPath } from '../utils/dot-path.js';
 import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl, contentDispositionValue } from '../utils.js';
 import { parseRange } from '../utils/byte-range.js';
@@ -204,7 +204,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 		let etag = '';
 		let lastModifiedMs;
 		let lastModified;
-		if (immutable && relPath.startsWith(`${manifest.appPath}/immutable/`)) {
+		if (immutable && relPath.startsWith(`${appPath}/immutable/`)) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
 			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
@@ -623,7 +623,7 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 }
 
 // Bounded cache for decoded URI pathnames. Avoids repeated decodeURIComponent
-// calls for the same encoded path. Uses Map insertion order for LRU eviction.
+// calls for the same encoded path. Evicts the oldest insertion (FIFO); a cache hit does not refresh it.
 export const DECODE_CACHE_MAX = 256;
 
 /**

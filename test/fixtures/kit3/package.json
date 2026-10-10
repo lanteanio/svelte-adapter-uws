@@ -1,0 +1,21 @@
+{
+	"name": "kit3-fixture",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"smoke": "node smoke.mjs",
+		"smoke:dev": "node smoke.mjs --dev"
+	},
+	"dependencies": {
+		"@sveltejs/kit": "3.0.1",
+		"svelte": "5.57.1",
+		"svelte-adapter-uws": "file:../../..",
+		"ws": "8.19.0"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "7.0.0",
+		"vite": "8.3.0"
+	}
+}

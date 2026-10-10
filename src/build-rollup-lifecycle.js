@@ -20,6 +20,20 @@ export async function writeAndCloseRollupBundle(bundle, output) {
 }
 
 /**
+ * Discover plugin server entries in case-sensitive file-name order. Directory
+ * enumeration differs between Unix scandir and Windows; sort before filtering.
+ * @param {string[]} files
+ * @param {Iterable<string>} knownFiles
+ * @returns {string[]} entry names without their .js extension
+ */
+export function discoverExtraEntries(files, knownFiles) {
+	const known = new Set(knownFiles);
+	return [...files].sort()
+		.filter(file => file.startsWith('__') && file.endsWith('.js') && !known.has(file))
+		.map(file => file.slice(0, -3));
+}
+
+/**
  * The import lines that make each discovered `__` entry run at startup, by the
  * file Rollup actually wrote for it rather than by its entry name: Rollup
  * rewrites characters it will not put in a file name (a `#` or `%` becomes

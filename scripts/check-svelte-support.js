@@ -6,6 +6,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const startMarker = '<!-- svelte-support:start -->';
@@ -184,10 +185,14 @@ export function validateSvelte4Profile(profile, readme, workflow) {
 	// CRLF.
 	if (!readme.replace(/\r\n/g, '\n').includes(rendered)) errors.push('README Svelte support block is stale; run node scripts/check-svelte-support.js --write');
 	errors.push(...sequenceErrors(rendered, '', 'the published reproduce sequence'));
-	if (!workflow.includes('working-directory: test/fixtures/svelte4')) {
+	const floorSteps = parse(workflow)?.jobs?.floor?.steps;
+	const fixtureSteps = Array.isArray(floorSteps)
+		? floorSteps.filter(step => step['working-directory'] === 'test/fixtures/svelte4')
+		: [];
+	if (fixtureSteps.length === 0) {
 		errors.push('test workflow never enters test/fixtures/svelte4');
 	}
-	errors.push(...sequenceErrors(workflow, 'run: ', 'the Svelte 4 CI job'));
+	errors.push(...sequenceErrors(fixtureSteps.map(step => 'run: ' + step.run).join('\n'), 'run: ', 'the Svelte 4 CI job'));
 	return errors;
 }
 

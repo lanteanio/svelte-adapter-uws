@@ -10,16 +10,43 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { rollup } from 'rollup';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
-import { writeAndCloseRollupBundle, extraEntryImports } from '../src/build-rollup-lifecycle.js';
+import { writeAndCloseRollupBundle, extraEntryImports, discoverExtraEntries } from '../src/build-rollup-lifecycle.js';
 
 const dirs = [];
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
 describe('extra entry imports', () => {
+	it('discovers mixed-case entries in file-name order without sorting its input', () => {
+		const listing = ['__b.js', '__known.js', '__a.js', '__B.js', 'x.js', '__data.json'];
+		expect(discoverExtraEntries(listing, ['__known.js'])).toEqual(['__B', '__a', '__b']);
+		expect(listing[0]).toBe('__b.js');
+	});
+	it('allows a later static entry to evaluate while the first awaits', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'extra-entry-await-'));
+		dirs.push(root);
+		const src = path.join(root, 'src');
+		const out = path.join(root, 'out');
+		mkdirSync(src);
+		const marker = '__extraEntryAwaitProbe';
+		writeFileSync(path.join(src, '__a.js'), `globalThis.${marker} = ['a-pre']; await new Promise(resolve => setTimeout(resolve, 20)); globalThis.${marker}.push('a-post');`);
+		writeFileSync(path.join(src, '__b.js'), `globalThis.${marker}.push('b');`);
+		const names = discoverExtraEntries(['__b.js', '__a.js'], []);
+		const bundle = await rollup({ input: Object.fromEntries(names.map(name => [name, path.join(src, name + '.js')])) });
+		const written = await writeAndCloseRollupBundle(bundle, { dir: path.join(out, 'server'), format: 'esm' });
+		writeFileSync(path.join(out, 'index.mjs'), extraEntryImports(written, src, names) + '\n');
+		// Native ESM is the deployment contract; Vitest's module runner serializes
+		// static dependency evaluation and cannot establish sibling interleaving.
+		const output = execFileSync(process.execPath, ['--input-type=module', '-e',
+			`await import(${JSON.stringify(pathToFileURL(path.join(out, 'index.mjs')).href)}); console.log(JSON.stringify(globalThis.${marker}));`
+		], { encoding: 'utf8', windowsHide: true });
+		expect(JSON.parse(output)).toEqual(['a-pre', 'b', 'a-post']);
+	});
+
 	it('imports entries whose names Rollup rewrites or that carry an apostrophe', async () => {
 		const root = mkdtempSync(path.join(tmpdir(), 'extra-entries-'));
 		dirs.push(root);

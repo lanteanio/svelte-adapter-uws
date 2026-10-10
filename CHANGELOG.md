@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: SvelteKit 3 build and development support.** Current SvelteKit projects can install the adapter without peer overrides and use direct Vite configuration, with the generated server instance and shared server module graph preserving HTTP, WebSocket and metrics behavior across both supported framework majors.
+  - **Affects:** Applications on SvelteKit 3 and existing SvelteKit 2 projects.
+  - **Action:** Use the configuration shown in the quick start; existing two-file SvelteKit 2 configuration remains supported.
+  - **Requires:** The declared Node and native-addon requirements still apply.
+  - **Compatibility:** SvelteKit 2 remains supported; user WebSocket, metrics and waiting-room modules evaluate after server initialization.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Added: release failed admissions without cancelling pending authorization.** The subscriptions entry now exposes `releaseSubscription`, which removes a socket's current topic membership and derived access immediately while preserving independent pending attempts, allowing a refused loader to clean up its admission without cancelling another loader that is still authorizing.
   - **Affects:** Frameworks and applications that roll back a granted topic membership after a later loader or policy step refuses it.
   - **Action:** Import `releaseSubscription` from `svelte-adapter-uws/subscriptions` and call `releaseSubscription(ws, topic)` for the failed admission, coordinating other completed admissions before releasing their shared physical membership.
@@ -524,6 +531,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- SvelteKit 3 uses the builder-generated server instance and the Vite SSR environment runner; SvelteKit 2 retains its existing builder and dev APIs. A locked application tests production and development HTTP, WebSocket delivery, shared module state, and module-level environment reads. Native ESM tests also pin sorted plugin entry discovery and the documented interleaving of static sibling entries at top-level await.
 
 - `releaseSubscription` in the subscriptions subpath removes failed framework admissions, including derived and publish access, while independently pending authorizations can still complete. Explicit unsubscribe continues to cancel pending attempts.
 

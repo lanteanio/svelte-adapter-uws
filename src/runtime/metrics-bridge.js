@@ -6,6 +6,7 @@
 //
 // The default export is the user's registry (from `websocket.metrics`), or
 // `null` when metrics are not configured.
-import metricsRegistry from 'METRICS_REGISTRY';
+import './_init.js';
+const { default: metricsRegistry } = await import('METRICS_REGISTRY');
 
 export { metricsRegistry };

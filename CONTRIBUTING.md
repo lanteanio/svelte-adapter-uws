@@ -132,7 +132,7 @@ client-only case. You cannot verify a runtime behaviour claim.
 | `npm run verify:fast` | `npm run check`, named as a lane. |
 | `npm run verify:suite` | The doctor with `--require-uws`, real HTTP/WebSocket smoke, packed publishing checks, then `npm test` under `REQUIRE_UWS=1`. What the suite job runs, verbatim. |
 | `npm run verify:sim` | The seed swarm and the golden corpus. No workflow runs this, so you are the only person who will. |
-| `npm run verify:pr` | `verify:suite` and `verify:sim`. The strongest single local signal, but not the hosted gate - see the job list below for the four jobs it does not cover. |
+| `npm run verify:pr` | `verify:suite` and `verify:sim`. The strongest single local signal, but not the hosted gate - see the job list below for the five jobs it does not cover. |
 | `npm run verify:docs` | The documentation gates plus the eleven suites that execute and route documented examples. Use this for a docs-only change. |
 | `npm run drill:respawner` | The external-respawner drill. What the respawner-drill job runs, verbatim. |
 | `npm run drill:operations` | The operations-pack gate, as a named lane. |
@@ -347,7 +347,7 @@ Notes on the slow parts:
 
 ## What to run before you propose a change
 
-The hosted gate is five jobs. `npm run verify:suite` is the only one you can
+The hosted gate is six jobs. `npm run verify:suite` is the only one you can
 reproduce verbatim: it runs on Ubuntu **and** Windows as that same command, not
 a re-spelling of it, so for that lane "it passed locally" and "CI is green"
 cannot drift into meaning different things. `npm run verify:pr` adds
@@ -370,7 +370,7 @@ pull request instead of treating a duration as proof.
 | `npm run verify:fast` | Seconds | Installed root dependencies | Static/generated/document gates only; appropriate for iteration, never a substitute for a runtime lane. |
 | `npm run verify:suite` | Minutes; cold fixture builds dominate | Native uWS must load; fixture dependencies installed | Required for source/runtime changes. A missing addon is a failure, not an accepted skip. |
 | `npm run verify:sim` | Minutes | Root dependencies; no browser | Required when behavior can change scheduling, delivery, recovery, or invariants; deterministic seeds are the reproducer. |
-| `npm run verify:pr` | Sum of suite and simulation lanes | Everything required by both lanes | Normal pre-PR default and the strongest single local signal, but NOT the hosted gate: `verify:sim` is not hosted and four hosted jobs are absent from it. A platform you cannot run must be named as a gap. |
+| `npm run verify:pr` | Sum of suite and simulation lanes | Everything required by both lanes | Normal pre-PR default and the strongest single local signal, but NOT the hosted gate: `verify:sim` is not hosted and five hosted jobs are absent from it. A platform you cannot run must be named as a gap. |
 | `npm run test:e2e` | Minutes after browser setup | Chromium, fixture dependencies, and native uWS for production | Required for socket-reachable or browser-client behavior; not hosted, so omission must be explicit. |
 | `npm run test:coverage` | Longest local lane | Unit, browser, fixture, and native prerequisites | Coverage work only; it does not replace the change-specific real-runtime, simulation, or benchmark evidence. |
 
@@ -394,10 +394,14 @@ equivalent:
   runs its preflight, `check`, `build` and `smoke`, so a break in the oldest
   supported profile or in the published bin surfaces here.
 
+- **kit3** installs the locked `test/fixtures/kit3` application and checks its
+  production build plus development and production HTTP/WebSocket round trips
+  on Linux and Windows, including shared module state and environment initialization.
+
 **`npm run verify:pr` is not the hosted gate.** It is `verify:suite` plus
 `verify:sim`, which makes it the strongest single local signal - but
 `verify:sim` is not hosted at all, and the respawner drill, the promtool rules,
-the advisory audit and the support-floor job are not in it. A green
+the advisory audit, support-floor job and Kit 3 job are not in it. A green
 `verify:pr` followed by a red CI is therefore a normal outcome rather than a
 surprise; the failing job name tells you which of the five above to run.
 

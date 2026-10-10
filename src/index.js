@@ -19,7 +19,7 @@ import {
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
-import { writeAndCloseRollupBundle, extraEntryImports } from './build-rollup-lifecycle.js';
+import { writeAndCloseRollupBundle, extraEntryImports, discoverExtraEntries } from './build-rollup-lifecycle.js';
 import { compileAccessibleWaitingRoomTemplate } from './runtime/utils/waiting-room-template.js';
 import { normalizeMessageAdmission } from './runtime/utils/message-admission.js';
 
@@ -735,6 +735,7 @@ export default function (opts = {}) {
 		websocketMetrics: websocket?.metrics ?? null,
 
 		async adapt(builder) {
+			const kitConfig = builder.config.paths ? builder.config : builder.config.kit;
 			// Verify the native addon is present before starting build work.
 			try {
 				await import('uWebSockets.js');
@@ -749,8 +750,8 @@ export default function (opts = {}) {
 			builder.mkdirp(tmp);
 
 			builder.log.minor('Copying assets');
-			builder.writeClient(`${out}/client${builder.config.kit.paths.base}`);
-			builder.writePrerendered(`${out}/prerendered${builder.config.kit.paths.base}`);
+			builder.writeClient(`${out}/client${kitConfig.paths.base}`);
+			builder.writePrerendered(`${out}/prerendered${kitConfig.paths.base}`);
 
 			if (precompress) {
 				builder.log.minor('Compressing assets');
@@ -764,12 +765,22 @@ export default function (opts = {}) {
 
 			builder.writeServer(tmp);
 
+			if (typeof builder.generateServerInstance === 'function') {
+				builder.generateServerInstance(`${tmp}/manifest.js`, { serverDirectory: tmp });
+			} else {
+				writeFileSync(`${tmp}/manifest.js`, [
+					"import { Server } from './index.js';",
+					`const manifest = ${builder.generateManifest({ relativePath: './' })};`,
+					'export const server = new Server(manifest);'
+				].join('\n\n'));
+			}
 			writeFileSync(
 				`${tmp}/manifest.js`,
 				[
-					`export const manifest = ${builder.generateManifest({ relativePath: './' })};`,
+					readFileSync(`${tmp}/manifest.js`, 'utf8'),
+					`export const appPath = ${JSON.stringify(builder.getAppPath())};`,
 					`export const prerendered = new Set(${JSON.stringify(builder.prerendered.paths)});`,
-					`export const base = ${JSON.stringify(builder.config.kit.paths.base)};`
+					`export const base = ${JSON.stringify(kitConfig.paths.base)};`
 				].join('\n\n')
 			);
 
@@ -788,12 +799,12 @@ export default function (opts = {}) {
 				if (!esbuildCtx) {
 					const esbuild = await import('esbuild');
 					const { loadEnv } = await import('vite');
-					const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
-					const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
+					const libDir = path.resolve(kitConfig.files?.lib || 'src/lib');
+					const publicPrefix = kitConfig.env?.publicPrefix ?? 'PUBLIC_';
 					const allEnv = loadEnv('production', process.cwd(), '');
-					const version = builder.config.kit.version?.name ?? '';
+					const version = kitConfig.version?.name ?? '';
 					const aliasMap = { '$lib': libDir };
-					const kitAliases = builder.config.kit.alias;
+					const kitAliases = kitConfig.alias;
 					if (kitAliases) {
 						for (const [key, value] of Object.entries(kitAliases)) {
 							if (!(key in aliasMap)) aliasMap[key] = path.resolve(value);
@@ -1069,18 +1080,8 @@ export default function (opts = {}) {
 
 			// Include extra entry files written by Vite plugins (e.g. __live-registry.js).
 			// Only picks up __-prefixed files to avoid bundling SvelteKit internals.
-			const knownEntries = new Set(Object.values(input).map(f => path.basename(f)));
-			/** @type {string[]} */
-			const extraEntries = [];
-			// Sorted, so the entries load in the same order on every filesystem: the
-			// directory listing order is the filesystem's, and NTFS and ext4 disagree.
-			for (const file of readdirSync(tmp).sort()) {
-				if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
-					const name = file.replace(/\.js$/, '');
-					input[name] = `${tmp}/${file}`;
-					extraEntries.push(name);
-				}
-			}
+			const extraEntries = discoverExtraEntries(readdirSync(tmp), Object.values(input).map(f => path.basename(f)));
+			for (const name of extraEntries) input[name] = `${tmp}/${name}.js`;
 
 			// Bundle the Vite output so that deployments only need
 			// their production dependencies. Anything in devDependencies
@@ -1254,7 +1255,7 @@ export default function (opts = {}) {
 			// dot-path in the output would 404 in production with nothing saying
 			// why. Say so here, where the file is still in front of the developer.
 			if (!staticDotfiles) {
-				const outBase = builder.config.kit.paths.base;
+				const outBase = kitConfig.paths.base;
 				const refused = [...new Set([
 					...listExcludedDotPaths(`${out}/client${outBase}`),
 					...listExcludedDotPaths(`${out}/prerendered${outBase}`)
@@ -1286,7 +1287,6 @@ export default function (opts = {}) {
 					ENV: './env.js',
 					HANDLER: './handler.js',
 					MANIFEST: './server/manifest.js',
-					SERVER: './server/index.js',
 					SHIMS: './shims.js',
 					WS_HANDLER: './server/ws-handler.js',
 					ENV_PREFIX: JSON.stringify(envPrefix),

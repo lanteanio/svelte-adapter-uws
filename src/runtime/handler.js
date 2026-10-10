@@ -6,20 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort, threadId, workerData } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
-import { manifest, prerendered, base } from 'MANIFEST';
+import { prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
-// IMPORTANT: ./_init.js MUST be imported before WS_HANDLER. It runs
-// `await server.init({ env: process.env })` at module top level, which
-// populates SvelteKit's `$env/dynamic/private` and `$env/dynamic/public`
-// runtime proxies. ESM evaluates imports depth-first in source order, so
-// _init.js's body (including the await) completes before the next import
-// (WS_HANDLER) is processed - giving the user's hooks.ws / src/lib/server
-// modules populated env values when their top-level code reads
-// `env.DATABASE_URL` etc. Reordering these two imports re-introduces a
-// real bug where `$env/dynamic/private` returns empty in the ws-handler
-// import graph; do not move them.
+// The bridge evaluates the user handler only after SvelteKit initialization.
 import { server } from './_init.js';
-import * as wsModule from 'WS_HANDLER';
+import { wsModule } from './ws-handler-bridge.js';
 import { metricsRegistry } from './metrics-bridge.js';
 import { waitingRoomRenderer } from './waiting-room-renderer-bridge.js';
 import { PRESSURE_REASON_CODES } from './observability-manifest.js';
@@ -357,10 +348,7 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 }
 
 
-// Server instance + init have moved to ./_init.js so they run BEFORE the
-// WS_HANDLER import is evaluated. See the comment above the import in the
-// header block of this file for the init-order rationale. `server` is
-// imported from there.
+// The shared server is initialized before the WebSocket handler is evaluated.
 
 // - uWS App -----------------------------------------------------------------
 

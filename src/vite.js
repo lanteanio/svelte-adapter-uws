@@ -1626,6 +1626,7 @@ export default function uws(options = {}) {
 
 	/** @type {import('vite').ViteDevServer | null} */
 	let viteServer = null;
+	let loadDevModule;
 
 	/** @type {string | null} Resolved absolute path of the WS handler file */
 	let resolvedHandlerPath = null;
@@ -1920,7 +1921,8 @@ export default function uws(options = {}) {
 	 */
 	async function adapterHandlerOption(root, resolved) {
 		for (const plugin of resolved?.plugins ?? []) {
-			const adapter = plugin?.api?.options?.kit?.adapter;
+			const config = plugin?.api?.options;
+			const adapter = config?.adapter ?? config?.kit?.adapter;
 			if (adapter?.name !== 'adapter-uws') continue;
 			const handler = adapter.websocketHandler;
 			const metrics = adapter.websocketMetrics;
@@ -2097,8 +2099,9 @@ export default function uws(options = {}) {
 			// available. SvelteKit runs Vite 7's environment API with
 			// separate `client` and `ssr` environments; `env.isSsrBuild`
 			// in `config()` is `false` even during the SSR build, so we
-			// detect SSR via `resolved.build.ssr` instead.
-			if (resolved.build?.ssr) {
+			// detect the legacy SSR build or the shared server environment.
+			// Kit 3 builds both environments from one resolved config.
+			if (resolved.build?.ssr || (resolved.command === 'build' && resolved.environments?.ssr)) {
 				ssrRoot = resolved.root || process.cwd();
 				const adapterOption = await adapterHandlerOption(ssrRoot, resolved);
 				ssrHandler = await discoverHandler(ssrRoot, resolved, adapterOption);
@@ -2303,34 +2306,45 @@ export default function uws(options = {}) {
 			PINNED_ORIGIN_V = parse_origin(process.env[adapterOption.envPrefix + 'ORIGIN'] || undefined);
 			const resolvedHandler = await discoverHandler(root, server.config, adapterOption);
 
-			// The metrics registry, on the same mechanism as the handler and for
-			// the same reason: an option named on the adapter must mean the same
-			// thing in dev as it does in the build. Failures here are contained -
-			// a broken metrics module must not stop a dev server from serving -
-			// and reported through the same indexed line the build path uses.
-			if (adapterOption.metrics) {
-				const metricsPath = path.resolve(adapterOption.metrics);
-				try {
-					const ns = await server.ssrLoadModule(metricsPath);
-					const picked = ns.default ?? ns.metrics ?? ns.registry ?? null;
-					if (picked !== null && typeof picked !== 'object' && typeof picked !== 'function') {
-						console.error(adapterConsoleLine(
-							ADAPTER_ERROR_IDS.METRICS_MODULE_SHAPE,
-							` got ${typeof picked} from ${JSON.stringify(adapterOption.metrics)}`
-						));
-					} else {
-						devMetricsRegistry = picked;
-					}
-				} catch (err) {
-					console.error('[adapter-uws] metrics module load error detail:', err);
-				}
-			}
+			// Kit 3 serves routes through the runnable SSR environment. Its legacy
+			// ssrLoadModule graph is separate, so using it would duplicate shared state.
+			const useEnvironmentRunner = (server.config.plugins ?? []).some(plugin => plugin?.api?.options?.adapter?.name === 'adapter-uws');
+			const environmentReady = useEnvironmentRunner && !server.httpServer.listening
+				? new Promise(resolve => server.httpServer.once('listening', resolve))
+				: Promise.resolve();
+			loadDevModule = async (id) => {
+				await environmentReady;
+				return useEnvironmentRunner ? server.environments.ssr.runner.import(id) : server.ssrLoadModule(id);
+			};
 
 			handlerReady = (async () => {
+				// The metrics registry, on the same mechanism as the handler and for
+				// the same reason: an option named on the adapter must mean the same
+				// thing in dev as it does in the build. Failures here are contained -
+				// a broken metrics module must not stop a dev server from serving -
+				// and reported through the same indexed line the build path uses.
+				if (adapterOption.metrics) {
+					const metricsPath = path.resolve(adapterOption.metrics);
+					try {
+						const ns = await loadDevModule(metricsPath);
+						const picked = ns.default ?? ns.metrics ?? ns.registry ?? null;
+						if (picked !== null && typeof picked !== 'object' && typeof picked !== 'function') {
+							console.error(adapterConsoleLine(
+								ADAPTER_ERROR_IDS.METRICS_MODULE_SHAPE,
+								` got ${typeof picked} from ${JSON.stringify(adapterOption.metrics)}`
+							));
+						} else {
+							devMetricsRegistry = picked;
+						}
+					} catch (err) {
+						console.error('[adapter-uws] metrics module load error detail:', err);
+					}
+				}
+
 				if (!resolvedHandler) return;
 				resolvedHandlerPath = resolvedHandler.path;
 				try {
-					const mod = await server.ssrLoadModule(resolvedHandler.path);
+					const mod = await loadDevModule(resolvedHandler.path);
 					handlerFailed = false;
 					applyHandlers(mod);
 					handlerEverLoaded = true;
@@ -3652,7 +3666,7 @@ export default function uws(options = {}) {
 			// Re-load the handler on every HMR update - ssrLoadModule returns the
 			// cached module instantly when nothing was invalidated, so this is cheap.
 			// We compare function references to detect actual changes.
-			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then(async (mod) => {
+			handlerReady = loadDevModule(resolvedHandlerPath).then(async (mod) => {
 				const recovered = handlerFailed;
 				handlerFailed = false;
 				let connectionsRestarted = false;

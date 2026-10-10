@@ -228,19 +228,13 @@ describe('the declared support floor is executed, not just declared', () => {
 	// runtime, so a suite that loads it is a suite the floor lane has to run. A
 	// new one landing outside the filters would leave the lane quietly proving
 	// less than it did, which is the failure mode a scoped lane has.
-	// The lane installs no fixture, because nothing it selects needs one. A
-	// filter widened until it selects a suite that boots the built runtime would
-	// fail the job in a `vite build` rather than on the floor question it was
-	// added to ask. Booting is what costs a build - taking the helper's `hasUWS`
-	// flag alone does not, which is the same distinction the vitest global setup
-	// draws when it decides which variants to pre-build.
-	it('selects nothing that boots the built fixture', () => {
-		const testDir = new URL('./', import.meta.url);
-		for (const file of readdirSync(testDir).filter((f) => f.endsWith('.test.js'))) {
-			if (!filters.some((f) => ('test/' + file).includes(f))) continue;
-			const source = readFileSync(new URL(file, testDir), 'utf8');
-			expect(source.includes('startRealRuntime('), `test/${file} boots the fixture`).toBe(false);
-		}
+	it('installs the backend fixture before running client integration tests', () => {
+		const floor = testWorkflow.slice(testWorkflow.indexOf('  floor:'));
+		const install = floor.indexOf('name: Install the backend fixture for client integration tests');
+		const run = floor.indexOf('run: npm run test:floor');
+		expect(install).toBeGreaterThan(-1);
+		expect(run).toBeGreaterThan(install);
+		expect(floor.slice(install, run)).toMatch(/working-directory: test\/fixture\s+run: npm ci/);
 	});
 
 	it('covers every suite that loads the browser client', () => {

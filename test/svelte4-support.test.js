@@ -1,3 +1,4 @@
+import { parse, stringify } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
@@ -101,16 +102,19 @@ describe('locked Svelte 4 support profile', () => {
 	});
 
 	it('rejects a CI job that runs the preflight after the checks it guards', () => {
-		const original = read('.github/workflows/test.yml');
-		const step = '        run: npm exec -- svelte-adapter-uws-preflight\n';
-		const moved = original.replace(step, '') + step;
+		const parsed = parse(read('.github/workflows/test.yml'));
+		const steps = parsed.jobs.floor.steps;
+		const [preflight] = steps.splice(steps.findIndex(step => step.run === 'npm exec -- svelte-adapter-uws-preflight'), 1);
+		steps.splice(steps.findIndex(step => step.run === 'npm run check') + 1, 0, preflight);
+		const moved = stringify(parsed);
 		expect(validateSvelte4Profile(loadSvelte4Profile(), read('README.md'), moved))
 			.toContain('the Svelte 4 CI job runs npm run check before npm exec -- svelte-adapter-uws-preflight');
 	});
 
 	it('refuses to measure the position of a step that appears twice', () => {
-		const original = read('.github/workflows/test.yml');
-		const duplicated = original + '\n        run: npm run smoke\n';
+		const parsed = parse(read('.github/workflows/test.yml'));
+		parsed.jobs.floor.steps.push({ 'working-directory': 'test/fixtures/svelte4', run: 'npm run smoke' });
+		const duplicated = stringify(parsed);
 		expect(validateSvelte4Profile(loadSvelte4Profile(), read('README.md'), duplicated))
 			.toContain('the Svelte 4 CI job repeats the step npm run smoke, so its position cannot be checked');
 	});

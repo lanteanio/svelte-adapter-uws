@@ -194,14 +194,9 @@ jobs:
   # than a second full matrix leg. `test/ci-workflows.test.js` fails if a suite
   # that loads the client is not covered by the filters.
   #
-  # The selection is NOT addon-free, which the word "pure" would wrongly imply.
-  # It builds no fixture - that is asserted by the guard suite, and it is what
-  # the wall time depends on - but one selected file drives a real socket
-  # through the published in-process test server, and its module-level gate
-  # REFUSES to skip while `CI` is set, on purpose: a skipped real-runtime suite
-  # reports PASSED having proved nothing. So a failed optional install has to be
-  # caught here, before the suites run, or this lane answers a question about
-  # svelte 4 with a message about a missing addon.
+  # Selected client tests include a real production server. Its independent
+  # fixture install supplies the backend, while the client imports the root's
+  # exact minimum peers. The locked Svelte 4 app below checks the full tuple.
   floor:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -213,9 +208,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       # The addon is optional, so `npm ci` succeeds without it. Say so here
-      # rather than from inside a suite. The doctor is deliberately not used
-      # here: it also demands the fixture install, which this lane neither needs
-      # nor does, so it would fail the job on a question it was not asked.
+      # rather than from inside a suite.
       - name: Verify the native runtime installed
         run: node -e "require('uWebSockets.js')"
       # Exactly the floor of each published range, not a range that resolves to
@@ -230,6 +223,9 @@ jobs:
       # install.
       - name: Install the declared minimum peers
         run: npm install --no-save svelte@4.0.0 ws@8.0.0
+      - name: Install the backend fixture for client integration tests
+        working-directory: test/fixture
+        run: npm ci
       - name: Run the suites that load the client
         run: npm run test:floor
       # A public claim needs one copy-pasteable application, not only a peer
@@ -255,3 +251,30 @@ jobs:
       - name: Exercise Svelte 4 HTTP, SSR store, and WebSocket behavior
         working-directory: test/fixtures/svelte4
         run: npm run smoke
+
+  kit3:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      - name: Install the locked SvelteKit 3 application
+        working-directory: test/fixtures/kit3
+        run: npm ci --install-links
+      - name: Build the SvelteKit 3 application
+        working-directory: test/fixtures/kit3
+        run: npm run build
+      - name: Exercise SvelteKit 3 production HTTP and WebSocket shared state
+        working-directory: test/fixtures/kit3
+        run: npm run smoke
+      - name: Exercise SvelteKit 3 development HTTP and WebSocket shared state
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev

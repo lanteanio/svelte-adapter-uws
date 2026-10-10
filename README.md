@@ -296,7 +296,7 @@ Continue only after the command prints `preflight OK`.
 
 ## Quick start: HTTP
 
-For HTTP, replace the SvelteKit adapter, build, and run the generated server.
+SvelteKit 2 and 3 are supported. For HTTP, replace the adapter, build, and run the generated server.
 
 **vite.config.ts**
 
@@ -6798,10 +6798,8 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - [svelte-realtime-demo](https://github.com/lanteanio/svelte-realtime-demo) - Live demo of svelte-realtime. [Try it here.](https://svelte-realtime-demo.lantean.io/)
 <!-- related-projects:end -->
 
-The [ecosystem architecture](./docs/architecture.md) defines which package owns
-transport, application dispatch, distributed infrastructure, authorization,
-persistence, failure recovery, and release ordering. Read it when a change
-crosses repository boundaries.
+The [ecosystem architecture](./docs/architecture.md) defines which package owns transport, application dispatch,
+distributed infrastructure, authorization, persistence, failure recovery, and release ordering. Read it when a change crosses repository boundaries.
 
 ## License
 
