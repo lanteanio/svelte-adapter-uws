@@ -489,6 +489,7 @@ export const platform = {
 					// Shared encode-once at the codec's baseline schema version.
 					if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
 					if (sharedPayload == null) { try { ws.send(envelope, false, compress); } catch { counters.closedWsAborts++; } continue; }
+					if (!isUint8Array(sharedPayload)) throw new TypeError('wire.encode must return Uint8Array or null');
 					const id = ensureWireId(ws, ud, topic);
 					if (id === -1) {
 						// Dropped wire-id announce: the client can never resolve
@@ -509,6 +510,7 @@ export const platform = {
 					// with the schema version that state negotiated.
 					const payload = wire.encode(event, data, state);
 					if (payload == null) { try { ws.send(envelope, false, compress); } catch { counters.closedWsAborts++; } continue; }
+					if (!isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
 					const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
 					const id = ensureWireId(ws, ud, topic);
 					if (id === -1) {
@@ -1172,6 +1174,7 @@ export const platform = {
 			bumpOut(ws, json);
 			return result;
 		}
+		if (!isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
 		const id = ensureWireId(ws, ud, topic);
 		if (id === -1) {
 			// Dropped wire-id announce: the client can never resolve this

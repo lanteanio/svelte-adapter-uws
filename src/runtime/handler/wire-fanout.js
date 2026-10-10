@@ -1,3 +1,4 @@
+import { isUint8Array } from 'node:util/types';
 import { buildBinaryFrame } from '../wire.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS } from '../utils.js';
 
@@ -14,7 +15,9 @@ function send(io, ws, value, binary) {
 
 /** Encode the one payload reused by a stateless subscriber walk. */
 export function encodeStatelessWirePayload(wire, event, data) {
-	return wire.encode(event, data);
+	const payload = wire.encode(event, data);
+	if (payload != null && !isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
+	return payload;
 }
 
 /**
@@ -126,6 +129,7 @@ export function deliverStatefulWireBatch(io) {
 				result = send(io, io.ws, io.envelopes[i], false);
 				continue;
 			}
+			if (!isUint8Array(entryPayload)) throw new TypeError('wire.encode must return Uint8Array or null');
 			const id = io.ensureId(io.ws, io.ud, io.topic);
 			if (id === -1) {
 				io.poison(io.ws, io.ud, io.wire.capability);
@@ -141,6 +145,7 @@ export function deliverStatefulWireBatch(io) {
 		return result;
 	}
 
+	if (!isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
 	const id = io.ensureId(io.ws, io.ud, io.topic);
 	if (id === -1) {
 		io.poison(io.ws, io.ud, io.wire.capability);

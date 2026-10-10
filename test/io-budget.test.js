@@ -541,11 +541,15 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// reverting handler/ingress.js alone to its previous content restores this
 	// digest and no other, so nothing else in the tree reaches this body. No
 	// byte is read, allocated or copied, and no copy primitive entered.
-	publishWire: 'f98579a4c2e88e5135b0ba177b170b151ea1fda496b3d2a036f36c0eca6604ce',
+	// Codec-result guards inspect the native Uint8Array brand before admission;
+	// no payload is read or copied and the valid frame construction is unchanged.
+	publishWire: '5d9ef0c62da8b2b7798cc737e4b1ca16d4656e75298e98e138849c8f3239e3c4',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '31eb28387d69104c3c46a19a5b5ab934f678730e4d143121e62030d6704ddb19',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
-	encodeStatelessWirePayload: 'fcacd501dd3d1bdcc14a5eff364da905f2b5e65999d12c1e8b8ad197ec2fd062',
+	// The encoded reference is checked once with the native brand predicate,
+	// then returned unchanged; nullish decline and original throws still pass.
+	encodeStatelessWirePayload: 'b95ac428cd6a9de9f7a14db3135023ff29ce5f000caa587faa093e29fe7cefac',
 	allocate: 'd76794d74a23fee1aa0913a38cc231f8dc42793accba687e0167bedd5d6ab1ba',
 	copy: '2d371b9cbe141c928ad53c75ea116f666dc3091ea8e4d2b948c327682021c576',
 	buildBinaryFrame: '84b0b451c4aa442f8268f81a848a0fdebfd11b93572351a9e06936dd875f2c8d',
@@ -2019,12 +2023,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph handler/config.js's get_origin also calls originFromHeaders and warns
 	// once about a refused proxy header. Header strings are read and compared
 	// only; no bytes are copied or written differently.
-	// Re-pinned for sendWireBatch codec-result validation: platform.js imports
-	// node:util/types isUint8Array and checks the batch/per-entry non-null
-	// result before wire-id admission and frame construction. The brand checks
-	// inspect no payload bytes, allocate no payload, and leave the valid frame
-	// builder and send path unchanged. No copy primitive entered the graph.
-	platform: '69bd4c8f12bbe99cbaf0ecdde2f22ac63d0fa44b8f195fb66386c2380387b681',
+	// Re-pinned for native codec-result brand guards in sendWire, sendWireBatch,
+	// publishWire and shared wire-fanout helpers. The native import and TypeError
+	// branches add no byte access, payload allocation, or copy primitive.
+	platform: '567011ec0ca8e5258fb8fbdb5e3c7c15787273247580666a3c7b230ea0442c9c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2415,7 +2417,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph handler/config.js's get_origin also calls originFromHeaders and warns
 	// once about a refused proxy header. Header strings are read and compared
 	// only; no bytes are copied or written differently.
-	'wire-fanout': '87e1f225a0b84d0ff0027f2c72403b045bd383e4563e041182bede2f40070678',
+	// Re-pinned for the native Uint8Array brand import and guards after
+	// stateless, stateful batch and per-entry encode results. References only:
+	// valid payloads reach the same builder and sends with no additional copy.
+	'wire-fanout': '19440696b4b39783fcf91f0dd5aa13a3e86cb20d196740899d8457cf0311cd7d',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
@@ -3770,8 +3775,30 @@ function assertParseBinaryFrameAuthority(source, options = {}) {
 	}
 }
 
+// A native brand check reads no payload bytes. Recognize its actual ESM
+// binding, not merely its spelling: a local shadow or a different import must
+// still be treated as an unknown consumer, including mutation-test extensions.
+function hasNativeUint8ArrayBrandBinding(source, fn) {
+	const ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
+	const imported = ast.body.some(node => node.type === 'ImportDeclaration' &&
+		node.source.value === 'node:util/types' && node.specifiers.some(specifier =>
+			specifier.type === 'ImportSpecifier' && specifier.imported.name === 'isUint8Array' &&
+			specifier.local.name === 'isUint8Array'));
+	if (!imported) return false;
+	const localBindings = new Set();
+	walkAst(fn, node => {
+		if (node.type === 'VariableDeclarator' || node.type === 'ClassDeclaration' || isFunctionNode(node)) {
+			collectBindingNames(node.id, localBindings);
+		}
+		if (isFunctionNode(node)) for (const param of node.params) collectBindingNames(param, localBindings);
+		if (node.type === 'CatchClause') collectBindingNames(node.param, localBindings);
+	});
+	return !localBindings.has('isUint8Array');
+}
+
 function assertFanoutCopyAuthority(source, functionName, options = {}) {
 	const fn = namedFunction(source, functionName);
+	const nativeBrandBinding = hasNativeUint8ArrayBrandBinding(source, fn);
 	const binaryValues = new Set(['payload', 'sharedPayload', 'frame']);
 	const flow = deriveBinaryFlow(fn, binaryValues);
 	const binaryCatchClauses = flow.binaryCatchClauses;
@@ -3815,6 +3842,8 @@ function assertFanoutCopyAuthority(source, functionName, options = {}) {
 		}
 		if (node.type !== 'CallExpression' || !node.arguments.some((arg) => expressionCarriesBinary(arg, flow))) return;
 		if (node.callee.type === 'Identifier' && allowedConsumers.has(node.callee.name)) return;
+		if (nativeBrandBinding && node.callee.type === 'Identifier' &&
+			node.callee.name === 'isUint8Array' && node.arguments.length === 1) return;
 		if (node.callee.type === 'MemberExpression') {
 			const object = node.callee.object;
 			const property = memberName(node.callee);
@@ -4427,6 +4456,24 @@ describe('deterministic HTTP and frame I/O budgets', () => {
 			const mutant = WIRE_SOURCE.replace(marker, `\t${bypass}\n${marker}`);
 			expect(mutant).not.toBe(WIRE_SOURCE);
 			expect(() => assertFrameBuilderAuthority(mutant), bypass).toThrow();
+		}
+	});
+
+	it('permits only the imported native Uint8Array brand predicate', () => {
+		const options = { allowSyntaxExtensions: true };
+		expect(() => assertFanoutCopyAuthority(PLATFORM_SOURCE, 'publishWire', options)).not.toThrow();
+		const imported = "import { isUint8Array } from 'node:util/types';";
+		const method = '\tpublishWire(topic, event, data, wire, options, relayToken, relaySeq) {';
+		for (const mutant of [
+			PLATFORM_SOURCE.replace(imported, "import { isUint8Array } from './custom-brand.js';"),
+			PLATFORM_SOURCE.replace(imported, "import { isInt8Array as isUint8Array } from 'node:util/types';"),
+			PLATFORM_SOURCE.replace(imported, '// ' + imported),
+			PLATFORM_SOURCE.replace(method, method + '\n const isUint8Array = customPredicate;'),
+			PLATFORM_SOURCE.replace(method, method + '\n const { isUint8Array } = customPredicates;'),
+			PLATFORM_SOURCE.replace(method, method.replace('relaySeq)', 'relaySeq, isUint8Array)'))
+		]) {
+			expect(mutant).not.toBe(PLATFORM_SOURCE);
+			expect(() => assertFanoutCopyAuthority(mutant, 'publishWire', options)).toThrow('uncounted consumer');
 		}
 	});
 

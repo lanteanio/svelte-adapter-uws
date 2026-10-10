@@ -218,6 +218,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** With an empty prefix, bare `ORIGIN` works as before. With a prefix and no prefixed origin pin, dev uses the request Host as production does; a bare `ORIGIN` no longer overrides it.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+
+- **Fixed: wire sends and publishes reject invalid codec payloads before binary admission.** A codec returning an object announced a wire id before frame construction failed; an array or string could instead be coerced into unintended bytes, so these invalid results now fail before reaching a binary subscriber.
+  - **Affects:** Custom codec authors using `sendWire`, `publishWire` or `publishWireBatch` in production or `createTestServer`.
+  - **Action:** Return a `Uint8Array` payload or decline with `null`/`undefined`; move asynchronous work outside `encode`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Invalid non-nullish results now throw `TypeError`. Valid bytes, `Buffer`, views from another realm, nullish fallback and original codec exceptions retain their behavior. Earlier deliveries and publish bookkeeping are not rolled back.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -580,6 +587,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid delivery keep their existing behavior. The isolated real-socket cases
   in `test/send-wire-batch-payload.test.js` exercise both runtimes and check
   the delivered binding, payload bytes, partial delivery and refusal boundary.
+
+- **Wire send and publish paths validate codec results before binary admission.**
+  `sendWire`, both stateful `publishWire` branches, the shared stateless encode
+  helper and stateful batch/per-entry delivery reject non-nullish results that
+  are not `Uint8Array` values before allocating a wire id or building a frame.
+  The production and testing paths use native brand checks without copying
+  payloads. Real-socket tests cover all eight send/publish branches, original
+  exceptions, nullish fallback and deliveries completed before a later failure.
 
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;

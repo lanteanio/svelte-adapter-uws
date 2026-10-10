@@ -2894,6 +2894,9 @@ export interface Platform {
 	 * single `app.publish` fan-out as `publish()`. The codec's `encode` may
 	 * return `null` for a frame it cannot represent, which transparently falls
 	 * back to JSON for that one frame.
+	 * A non-nullish codec result must be a Uint8Array; otherwise TypeError is
+	 * thrown before its wire id or frame is sent. Codec exceptions propagate;
+	 * earlier deliveries and publish bookkeeping are not rolled back.
 	 *
 	 * @param topic - Topic string
 	 * @param event - Event name (the codec maps it to an opcode)
@@ -2970,6 +2973,8 @@ export interface Platform {
 	 * seq'd send stays side-effect-free - no counter advance, no max-seen
 	 * record, no resume capture. Used for snapshot/catalog frames and
 	 * gap-fill replay to a single late-joining subscriber.
+	 * A non-nullish codec result must be a Uint8Array; otherwise TypeError is
+	 * thrown before its wire id or frame is sent. Codec exceptions propagate.
 	 */
 	sendWire(
 		ws: WebSocket<any>,
@@ -3018,6 +3023,9 @@ export interface Platform {
 	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
 	 * and a dropped frame or announce poisons the capability to JSON until
 	 * reconnect. A stateless codec routes through the per-entry path unchanged.
+	 * Non-null batch and per-entry codec results must be Uint8Array values.
+	 * An invalid result throws TypeError before its wire id or frame is sent;
+	 * codec exceptions propagate, with earlier deliveries and bookkeeping kept.
 	 *
 	 * The whole array is read before any of it is published. The length and the
 	 * options object are pinned on entry, and every entry's `data`,
