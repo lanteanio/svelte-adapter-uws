@@ -22,26 +22,60 @@
  * leak on an uncontained host is still PSI memory pressure's and
  * `resident_memory_bytes`' job - no cgroup means no rss wall to measure.
  *
- * Discovery follows the os-pressure idiom, once: the cgroup limit file is
- * located on first read - at the cgroup root (the container default, where a
- * private cgroup namespace presents the pod limit there) and, where
- * `/proc/self/cgroup` names a deeper path that is visible (a host cgroup
- * namespace), at the process's own group and its ancestors, latching the
- * file with the tightest limit. A confirmed absence (non-Linux, no memory
- * controller) permanently stops the reads; ANY unresolved read keeps
- * discovery armed, whatever the other candidates said, because a probe that
- * could not see one group cannot know it found the tightest wall - it reports
- * the best wall it did see and looks again next sample. So "once" holds for a
- * clean probe; where a candidate keeps failing in some way other than absence,
- * the probe repeats per sample for as long as that lasts, which is bounded by
- * the candidate count and costs a handful of small reads at the sampler's
- * cadence. After discovery, one file is re-read per sample so a runtime edit
- * of the limit VALUE is tracked; regrouping the process is not, and a latched
- * file that stops reading re-probes on the spot rather than reporting no wall.
- * The V8 limit is latched once and treated as fixed for the process life.
+ * Every sample sweeps the candidate limit files and takes the tightest: the
+ * cgroup root (the container default, where a private cgroup namespace
+ * presents the pod limit there) and, where `/proc/self/cgroup` names a deeper
+ * path that is visible (a host cgroup namespace), the process's own group and
+ * each ancestor whose limit applies to it (see cgroupMemoryLimitCandidates
+ * and bindingCandidates for the two shapes where one does not) - any of
+ * which can be the wall. Sweeping rather than latching one file is what keeps
+ * the answer right when the groups change under a live process: an ancestor
+ * lowered, a group raised above its parent. That costs one small read per
+ * candidate each sample - two in the container default, a handful in a host
+ * namespace, bounded by MAX_CGROUP_DEPTH - the same order as the PSI and
+ * cpu.stat reads the sampler already makes.
  *
- * Determinism: no clock, no RNG, no timers. The 1 Hz pressure sampler is
- * the only caller; nothing here sits on a frame path.
+ * The group list itself is read far less often. On most kernels in service,
+ * reading `/proc/self/cgroup` takes the kernel's global cgroup lock, which
+ * cgroup churn elsewhere on the host can hold long enough to stall the event
+ * loop this sampler runs on. So the list is read on the first sample, again
+ * on each sample after a read of it fails, and every GROUP_LIST_EVERY samples
+ * - and at once, with that sample swept again on the list as it then reads,
+ * when a file this reader had read is confirmed gone on a pass that did not
+ * read the list. A group with members cannot be removed, so that is the
+ * process moving, or the memory controller switched off above a group,
+ * which costs one extra list read and changes nothing. A move that removes
+ * no file this reader had read goes unseen until the next scheduled read, so
+ * any change of membership is followed within GROUP_LIST_EVERY samples.
+ *
+ * A file that fails to read for any reason other than absence stands at the
+ * value it was last read at, so the wall it carried holds through the
+ * failure instead of dropping out of the fold. A read is most likely to fail
+ * under exactly the memory event the signal exists to report, and a dropped
+ * wall reads 0 - or a looser ancestor's wall - while every consumer of the
+ * reading flaps with it at the sample cadence. Every readable file is re-read
+ * each sample, so what stands is current up to the failure. A reading is
+ * forgotten when its file is confirmed absent, or when a group list that
+ * reads no longer names it: the process left that group. A list that does
+ * not read says nothing about where the process lives, so the sweep uses the
+ * last list that did.
+ *
+ * The reads stop for good only where cgroups cannot appear: the group list
+ * and every limit file confirmed absent (non-Linux) on a reader that has
+ * never read either. A host with cgroups keeps sweeping even with no limit
+ * anywhere, because a limit can be set on a running service (`systemctl
+ * set-property ... MemoryMax=`) and the reading has to see it; that costs a
+ * few failed opens per sample.
+ *
+ * The engine ceiling, where one exists, is latched once and treated as fixed
+ * for the process life.
+ *
+ * A "sample" below is one read of the reader: a pressure-sampler tick, or a
+ * metrics scrape on a build where no sampler runs.
+ *
+ * Determinism: no clock, no RNG, no timers. The 1 Hz pressure sampler and,
+ * where it does not run, the metrics scrape are the callers; nothing here
+ * sits on a frame path.
  *
  * @module svelte-adapter-uws/runtime/utils/memory-wall
  */
@@ -50,6 +84,8 @@ import { readFileSync } from 'node:fs';
 import v8 from 'node:v8';
 
 const CGROUP_ROOT = '/sys/fs/cgroup';
+const V2_ROOT = `${CGROUP_ROOT}/memory.max`;
+const V1_ROOT = `${CGROUP_ROOT}/memory/memory.limit_in_bytes`;
 const SELF_CGROUP = '/proc/self/cgroup';
 
 // cgroup v1 reports "unlimited" as a page-rounded near-2^63 sentinel rather
@@ -60,6 +96,13 @@ const V1_UNLIMITED_FLOOR = 2 ** 62;
 // host cgroup namespace exposes a deep path. A real container nests a
 // handful of levels; the cap only bounds a pathological /proc line.
 const MAX_CGROUP_DEPTH = 16;
+
+/**
+ * Samples between scheduled reads of `/proc/self/cgroup`: a minute at the
+ * sampler's 1 Hz, and no less on a build with no sampler, whose scrape reads
+ * at most once a second.
+ */
+export const GROUP_LIST_EVERY = 60;
 
 function isConfirmedAbsence(error) {
 	const code = error?.code ?? String(error?.message ?? error).split(/[:\s]/, 1)[0];
@@ -91,6 +134,18 @@ export function parseCgroupMemoryLimit(content) {
  * process's own group or an ancestor) are both covered. Pure: the caller
  * supplies the /proc content (or null when unreadable).
  *
+ * A hierarchy whose path starts with `..` contributes nothing, its root
+ * included: the kernel spells a group outside the reader's cgroup namespace
+ * that way. The path is relative to a namespace root the process is not
+ * under, so it maps to no file, and that root's limit does not apply to the
+ * process. Where the mount shows the host root instead, that root carries no
+ * limit (v2 has no memory.max there, and v1 cannot set one), so dropping it
+ * loses nothing.
+ *
+ * Only the first line of each hierarchy counts, as a real kernel writes one,
+ * so the list is bounded at MAX_CGROUP_DEPTH per hierarchy plus the two roots
+ * whatever the content.
+ *
  * @param {string | null} selfCgroupContent
  * @returns {string[]}
  */
@@ -98,10 +153,12 @@ export function cgroupMemoryLimitCandidates(selfCgroupContent) {
 	/** @type {string[]} */
 	const candidates = [];
 	const push = (p) => { if (!candidates.includes(p)) candidates.push(p); };
+	/** @param {string} raw @returns {string[] | null} null when outside the namespace */
 	const ancestorsOf = (raw) => {
 		const clean = String(raw).replace(/^\/+|\/+$/g, '');
 		if (clean === '') return [];
 		const segments = clean.split('/');
+		if (segments[0] === '..') return null;
 		// Deepest prefixes first (the process's own group, then its ancestors);
 		// the cap bounds a pathological /proc line while keeping the nearest
 		// groups, which are the ones a limit most plausibly sits on.
@@ -110,20 +167,65 @@ export function cgroupMemoryLimitCandidates(selfCgroupContent) {
 		for (let i = segments.length; i > floor; i--) paths.push(segments.slice(0, i).join('/'));
 		return paths;
 	};
+	/** @type {string[] | null | undefined} undefined = no line seen */
+	let v2Paths;
+	/** @type {string[] | null | undefined} */
+	let v1Paths;
 	for (const line of String(selfCgroupContent ?? '').split('\n')) {
 		const v2 = /^0::(.*)$/.exec(line);
 		if (v2) {
-			for (const p of ancestorsOf(v2[1])) push(`${CGROUP_ROOT}/${p}/memory.max`);
+			if (v2Paths === undefined) v2Paths = ancestorsOf(v2[1]);
 			continue;
 		}
 		const v1 = /^\d+:([^:]*):(.*)$/.exec(line);
-		if (v1 && v1[1].split(',').includes('memory')) {
-			for (const p of ancestorsOf(v1[2])) push(`${CGROUP_ROOT}/memory/${p}/memory.limit_in_bytes`);
-		}
+		if (v1 && v1[1].split(',').includes('memory') && v1Paths === undefined) v1Paths = ancestorsOf(v1[2]);
 	}
-	push(`${CGROUP_ROOT}/memory.max`);
-	push(`${CGROUP_ROOT}/memory/memory.limit_in_bytes`);
+	for (const p of v2Paths ?? []) push(`${CGROUP_ROOT}/${p}/memory.max`);
+	for (const p of v1Paths ?? []) push(`${CGROUP_ROOT}/memory/${p}/memory.limit_in_bytes`);
+	if (v2Paths !== null) push(V2_ROOT);
+	if (v1Paths !== null) push(V1_ROOT);
 	return candidates;
+}
+
+/**
+ * Drop the cgroup v1 ancestors whose limit does not apply to the process. A
+ * v1 memory group charges its descendants, and so enforces its limit on
+ * them, only in hierarchical mode (`memory.use_hierarchy` 1). systemd turns
+ * it on at the root and kernels have since dropped the other mode, but an
+ * older host without systemd can leave an ancestor non-hierarchical, and its
+ * limit then binds only the tasks directly in it.
+ *
+ * Two candidates are never checked. The process's own group - the first v1
+ * candidate, nearest first - applies whatever its flag. And the v1 root: in a
+ * container on the host cgroup namespace, the v1 default, the runtime
+ * bind-mounts the container's own group there while `/proc/self/cgroup`
+ * keeps the host path, so the root IS the own group and the path-built
+ * candidates do not exist; on a host, the v1 root's limit cannot be set, so
+ * keeping it never adds a wall. Only an explicit 0 drops a group; a flag that
+ * cannot be read, or reads anything else, keeps it - folding in a wall that
+ * might not apply is the safer error than missing one that does. The flag
+ * cannot change on a group with children, so this runs per group-list read,
+ * not per sample.
+ *
+ * @param {string[]} candidates from cgroupMemoryLimitCandidates
+ * @param {(path: string) => string} readFile
+ * @returns {string[]}
+ */
+export function bindingCandidates(candidates, readFile) {
+	let own = true;
+	return candidates.filter((path) => {
+		if (!path.endsWith('/memory.limit_in_bytes')) return true;
+		if (path === V1_ROOT) return true;
+		if (own) {
+			own = false;
+			return true;
+		}
+		try {
+			return readFile(path.replace(/memory\.limit_in_bytes$/, 'memory.use_hierarchy')).trim() !== '0';
+		} catch {
+			return true;
+		}
+	});
 }
 
 /**
@@ -147,8 +249,8 @@ export function memoryWallRatio(w) {
 }
 
 /**
- * Stateful reader the pressure sampler holds. `ratio({ heapUsed, rss })`
- * returns the worst-of wall reading, or 0 when no wall is known.
+ * Stateful reader. `ratio({ heapUsed, rss })` returns the worst-of wall
+ * reading, or 0 when no wall is known.
  *
  * @param {{
  *   readFile?: (path: string) => string,
@@ -162,83 +264,102 @@ export function createMemoryWallReader(deps) {
 
 	/** @type {number | null | undefined} undefined = not latched yet */
 	let heapSizeLimit;
-	/** @type {string | null | false} false = probed, none found */
-	let limitPath = null;
+	// Cgroups cannot appear here (no group list, no limit file, nothing ever
+	// read), so the sweep stops for good.
+	let stopped = false;
+	/**
+	 * The value each candidate file was last read at (null = unlimited), so a
+	 * file that fails to read can stand at it.
+	 * @type {Map<string, number | null>}
+	 */
+	const lastRead = new Map();
+	/** @type {string[] | null} the candidates of the last group list that read */
+	let lastList = null;
+	let listDue = true;
+	let sinceList = 0;
+	// A group list or a limit file has answered a read: this host has cgroups,
+	// and a limit can be set on a running process at any time, so no sweep that
+	// finds every file absent may stop the reads.
+	let sawCgroups = false;
 
 	/**
-	 * @param {boolean} [mayConfirmAbsence] false when this probe follows the
-	 *   loss of a file that WAS carrying a limit. A wall already observed
-	 *   cannot be argued out of existence by one sweep that missed it: the
-	 *   group was reconfigured, not proven controller-less, so such a probe
-	 *   may report and re-latch but never take the permanent stop.
+	 * One pass: the group list if it is due, then every candidate limit file.
+	 * @returns {{ tightest: number | null, uncertain: boolean, listed: boolean, moved: boolean }}
 	 */
-	function discoverLimit(mayConfirmAbsence = true) {
+	function sweep() {
+		// A read that failed in a way that proves nothing may have hidden the one
+		// file that exists, so a sweep with one can never stop the reads.
 		let uncertain = false;
-		/** @type {string | null} */
-		let selfContent = null;
-		try {
-			selfContent = readFile(SELF_CGROUP);
-		} catch (error) {
-			// A hidden candidate LIST is as blinding as a hidden candidate file:
-			// only a confirmed absence may let an unlimited-only outcome latch.
-			if (!isConfirmedAbsence(error)) uncertain = true;
-		}
-		/** @type {{ path: string, limit: number | null } | null} */
-		let tightest = null;
-		for (const path of cgroupMemoryLimitCandidates(selfContent)) {
+		let listed = false;
+		let moved = false;
+		/** @type {string[]} */
+		let candidates;
+		if (listDue) {
 			try {
-				const limit = parseCgroupMemoryLimit(readFile(path));
-				if (limit !== null && (tightest === null || tightest.limit === null || limit < tightest.limit)) {
-					tightest = { path, limit };
-				} else if (tightest === null) {
-					// A readable file that says "unlimited": remember it so a
-					// clean probe still latches somewhere and later value edits
-					// are seen.
-					tightest = { path, limit: null };
-				}
+				candidates = bindingCandidates(cgroupMemoryLimitCandidates(readFile(SELF_CGROUP)), readFile);
+				listed = true;
+				lastList = candidates;
+				listDue = false;
+				sinceList = 0;
+				sawCgroups = true;
+				// A list that read is authoritative: a group not on it is one the
+				// process has left, and that group's wall no longer applies.
+				for (const path of lastRead.keys()) if (!candidates.includes(path)) lastRead.delete(path);
 			} catch (error) {
 				if (!isConfirmedAbsence(error)) uncertain = true;
+				// No list says nothing about where the process lives, so sweep the
+				// last one that read rather than collapse to the roots and drop the
+				// process's own group. A reader that never read one has the roots.
+				candidates = lastList ?? cgroupMemoryLimitCandidates(null);
 			}
+		} else {
+			candidates = /** @type {string[]} */ (lastList);
 		}
-		// A candidate answered, so report the best wall known right now. LATCHING
-		// it is a separate decision, and it needs a CLEAN probe: an uncertain
-		// read may be hiding a nearer, tighter group's file, and pinning a
-		// looser ancestor over it would under-report pressure for the life of
-		// the process - the signal would then sit low while the worker walks
-		// into the kill its own wall was supposed to predict. The same argument
-		// covers an unlimited-only outcome, so both share one rule. An
-		// uncertain probe uses the value and stays armed, re-reading the nearer
-		// candidates on the next sample; a confirmed absence still stops the
-		// reads for good below.
-		if (tightest !== null) {
-			if (!uncertain) limitPath = tightest.path;
-			return tightest.limit;
+		/** @type {number | null} */
+		let tightest = null;
+		for (const path of candidates) {
+			/** @type {number | null} */
+			let limit;
+			try {
+				limit = parseCgroupMemoryLimit(readFile(path));
+				lastRead.set(path, limit);
+				sawCgroups = true;
+			} catch (error) {
+				if (isConfirmedAbsence(error)) {
+					// A group with members cannot be removed, so a file this reader
+					// has read going away means the process moved, or the memory
+					// controller was switched off above the group: read the list
+					// again now. Not on a pass that just read it - that list is
+					// current and still names the group.
+					if (lastRead.delete(path) && !listed) {
+						listDue = true;
+						moved = true;
+					}
+					continue;
+				}
+				uncertain = true;
+				const last = lastRead.get(path);
+				if (last === undefined) continue;
+				limit = last;
+			}
+			if (limit !== null && (tightest === null || limit < tightest)) tightest = limit;
 		}
-		// Every candidate confirmed absent: stop reading for good. A transient
-		// error keeps discovery armed for the next sample.
-		if (!uncertain && tightest === null && mayConfirmAbsence) limitPath = false;
-		return null;
+		return { tightest, uncertain, listed, moved };
 	}
 
+	/** @returns {number | null} the tightest limit in bytes, or null for none */
 	function readCgroupLimit() {
-		if (limitPath === false) return null;
-		if (limitPath === null) return discoverLimit();
-		try {
-			return parseCgroupMemoryLimit(readFile(limitPath));
-		} catch {
-			// The discovered file failed this tick (cgroup reconfigured away).
-			// Re-arm discovery rather than pinning a dead path, and probe again
-			// NOW: answering null here would drop the container arm for this
-			// sample and report only the heap arm - a few percent while the
-			// resident set sits against a wall it is about to hit. A read is
-			// most likely to fail under exactly the memory event the signal
-			// exists to report, so the sample that loses its wall is the one
-			// that can least afford to. The probe may not conclude absence: a
-			// wall this reader has already seen was reconfigured, not proven
-			// never to have existed. discoverLimit never calls back here.
-			limitPath = null;
-			return discoverLimit(false);
-		}
+		if (stopped) return null;
+		if (!listDue && ++sinceList >= GROUP_LIST_EVERY) listDue = true;
+		let pass = sweep();
+		// A file this reader had read is gone and this pass swept a list that
+		// may be the one the process moved from: read the list and sweep again
+		// now, so the sample does not go out without the group the process
+		// lives in. At most once per sample; if the list cannot be read, the
+		// second pass sweeps the old one again.
+		if (pass.moved) pass = sweep();
+		if (!pass.uncertain && !sawCgroups) stopped = true;
+		return pass.tightest;
 	}
 
 	return {
