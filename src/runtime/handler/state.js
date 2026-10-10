@@ -6,7 +6,7 @@
 // which would hand importers a frozen snapshot of the value at import time.
 
 import { createCapCounts } from '../wire.js';
-import { now, processMonotonicNow } from '../runtime.js';
+import { processMonotonicNow } from '../runtime.js';
 import { createDivergenceDiagnosticStore } from '../divergence-diagnostics.js';
 
 /** Pooled HttpResponse abort-flag objects, reused to avoid per-request allocation. @type {{ aborted: boolean }[]} */

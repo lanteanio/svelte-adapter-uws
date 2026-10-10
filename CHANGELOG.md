@@ -416,6 +416,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Malformed strings and invalid expiry objects now fail authentication before a cookie is written; Date instance formatting overrides are ignored.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: native HTTP responses have one Date header.** Static files and application Responses now use the Date written by uWebSockets, including testing admin endpoints, so clients no longer receive duplicate dates; an application-supplied Date is omitted on native response paths while Vite retains the application's value.
+  - **Affects:** Applications that set Date on SSR, authentication, or admin Responses, including createTestServer admin handlers.
+  - **Action:** Let the native server supply the response Date.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Other application headers are preserved. Vite continues to use an application-supplied Date because its HTTP server does not add a second one.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -785,6 +792,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Static plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML responses declare UTF-8 so non-ASCII text decodes correctly. XML and RTF retain their own encoding declarations.
 
 - HTTP responses use the native Date field once, including static conditional and range responses and app-supplied SSR, auth, and admin Responses. The redundant date-header timer is removed.
+- Testing admin Responses also omit application-supplied Date, matching the native production writer; GET and HEAD carry one native Date while preserving other headers.
 
 - Static date preconditions accept only valid HTTP dates, including obsolete date forms and their rolling two-digit year boundary. ISO and free-form dates are ignored.
 
