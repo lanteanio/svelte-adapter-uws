@@ -11,7 +11,7 @@ import { parseRange } from '../utils/byte-range.js';
 import { negotiateEncoding } from '../utils/content-coding.js';
 import { locationTarget } from '../utils/location-target.js';
 import { revalidationHeaders } from '../utils/revalidation-headers.js';
-import { monotonicNow } from '../runtime.js';
+import { monotonicNow, now } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
 
@@ -163,23 +163,23 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 		];
 		let etag = '';
 		let lastModifiedMs;
+		let lastModified;
 		if (immutable && relPath.startsWith(`${manifest.appPath}/immutable/`)) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
 			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
-			// The date validator beside the entity one, at the whole-second
-			// precision HTTP dates carry, recorded from the same stat the ETag
-			// reads - so a cache that lost the ETag can still revalidate, and
-			// the date preconditions below answer from the file's real time.
-			// Immutable assets skip both validators: the versioned filename is
-			// the validator there.
-			lastModifiedMs = Math.floor(stat.mtimeMs / 1000) * 1000;
+			// A future or pre-1900 file time cannot supply an HTTP date. Keep
+			// the ETag, but omit Last-Modified and ignore date preconditions.
+			if (stat.mtimeMs >= Date.UTC(1900, 0, 1) && stat.mtimeMs <= now()) {
+				lastModifiedMs = Math.floor(stat.mtimeMs / 1000) * 1000;
+				lastModified = new Date(lastModifiedMs).toUTCString(); // determinism-allow: formats a held file time
+			}
 			const configuredCacheControl = resolveStaticCacheControl(relPath, staticCacheControl);
 			headers.push(
 				['cache-control', configuredCacheControl || 'no-cache'],
-				['etag', etag],
-				['last-modified', new Date(lastModifiedMs).toUTCString()] // determinism-allow: formats a held stat value; reads no clock
+				['etag', etag]
 			);
+			if (lastModified !== undefined) headers.push(['last-modified', lastModified]);
 		}
 
 		const ext = path.extname(relPath).toLowerCase();
