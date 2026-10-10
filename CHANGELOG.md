@@ -77,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Clients that opt into internal flow control, on workers whose memory reading passes 0.7.
   - **Action:** None.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Below 0.7 every window is the full base, as before. Between 0.7 and 0.985 every window is larger than it was, and from there to the wall both reach the same floor. The window is a function of `heap_used_ratio` and of subscriptions per connection, both exported, so a worker that grants smaller windows while `pressure_reason` still reads none can be read from them.
+  - **Compatibility:** No window is smaller than it was. The memory adjustment leaves the base unchanged at or below 0.7; the subscriber adjustment still applies. The window is a function of `heap_used_ratio` and of subscriptions per connection, both exported, so a worker that grants smaller windows while `pressure_reason` still reads none can be read from them.
   - **Detail:** [Changed engineering detail](#changed).
 
 - **Changed: a request target carrying a byte outside visible ASCII, or a fragment, is refused with 400.** uWS decoded raw non-ASCII bytes in the request line and served the page behind them, and routed on a path that kept its `#`; every route and the WebSocket handshake now refuse such a target, as RFC 9112 asks.
@@ -100,6 +100,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy.
+  - **Affects:** Linux deployments using cgroup v1 or v2 memory limits.
+  - **Action:** No configuration change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Transient read failures retain the last successful limit; removing a limit clears it after a successful unlimited reading. The additional file reads run on the sampling tick, outside the frame path.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: presence identity ignores inherited properties.** A configured identity field now groups connections only when the data object owns that field, so prototype properties no longer collapse unrelated connections into one presence member and a missing identity continues to fall back to the individual connection.
+  - **Affects:** Presence plugins using custom identity field names or inherited connection data.
+  - **Action:** Put the identity field directly on each connection data object.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Own fields retain their grouping behavior; a missing, null or inherited field uses the connection identity.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: long CRDT reconciliation intervals remain long.** Finite reconciliation delays above the JavaScript timer limit are capped at 2147483647 milliseconds instead of overflowing into a rapid background loop, preventing unexpectedly frequent synchronization requests while preserving ordinary intervals, the default cadence, and the explicit zero setting that disables reconciliation.
+  - **Affects:** Applications setting reconcileIntervalMs above approximately 24.8 days.
+  - **Action:** No change is required; zero still disables reconciliation.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Normal delays and invalid-value defaults are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: simulations report swallowed framework assertions.** Framework assertion counters contribute deterministic invariant violations from initialization through teardown, even when application hooks catch the thrown assertion, so a simulation can no longer report a clean run merely because a hook swallowed a failure before the scenario observed it.
+  - **Affects:** Applications using runSim or replaySim to check runtime invariants.
+  - **Action:** Resolve newly reported assertion categories in the scenario or its handlers.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Only assertions raised during the current run count; existing violations and replay behavior are retained.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: invalid admin responses produce a valid server error.** Returning Response.error() from an admin hook now sends a valid HTTP 500 response rather than passing its zero status to the native response writer, preserving valid HTTP framing and allowing the server to answer the next request after the failed hook.
+  - **Affects:** Applications with custom admin handlers.
+  - **Action:** Return an ordinary Response for intended HTTP statuses.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** HEAD errors omit the response body; valid admin responses keep their existing behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: WebSocket upgrade hooks cannot duplicate the Date header.** Upgrade response helpers and manually returned upgrade metadata reject Date case-insensitively because the native handshake writer already appends it, so successful WebSocket handshakes carry a single server date and an application cannot accidentally add a conflicting second value through either response path.
+  - **Affects:** Applications adding custom headers to successful WebSocket upgrades.
+  - **Action:** Remove Date from custom upgrade headers.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid handshakes retain exactly one native Date header; other permitted headers are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: TLS error reporters cannot interrupt recovery cleanup.** A throwing error callback no longer escapes when a certificate watch is lost or interrupts the reload broadcast after a certificate read fails, allowing watcher cleanup to finish and every worker to receive its reload request while the prior certificate identity remains available.
+  - **Affects:** Applications configuring TLS reload error reporting.
+  - **Action:** No configuration change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Lost watchers close once, workers still receive reload requests, and the last known certificate identity is retained on read failure.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: slow static downloads retain bounded response memory.** Large static bodies now resume from the shared cache as socket capacity becomes available, avoiding a separate full-body native copy for every slow reader and keeping paused downloads from multiplying retained file memory across connections.
   - **Affects:** Deployments serving large static files, particularly with many slow clients or custom HTTP/1.1 pipelining clients.
@@ -811,6 +860,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- **Documentation and contract checks match the shipped runtime.** Client reconnect defaults and authentication retry outcomes match the implementation; cache descriptions identify insertion-order eviction; sequence tests explain the current arity contract; strict TypeScript consumers pin readonly numeric assertion maps; metric-label checks drive actual instrumented terminal paths; release instructions separate the frozen source from subsequent ledger bookkeeping and merge stable hotfixes before tagging.
+
+- **Memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy. Transient read failures retain the last successful limit; removing a limit clears it after a successful unlimited reading. The additional file reads run on the sampling tick, outside the frame path.
+
+- **Presence identity ignores inherited properties.** A configured identity field now groups connections only when the data object owns that field, so prototype properties no longer collapse unrelated connections into one presence member and a missing identity continues to fall back to the individual connection. Own fields retain their grouping behavior; a missing, null or inherited field uses the connection identity.
+
+- **Long CRDT reconciliation intervals remain long.** Finite reconciliation delays above the JavaScript timer limit are capped at 2147483647 milliseconds instead of overflowing into a rapid background loop, preventing unexpectedly frequent synchronization requests while preserving ordinary intervals, the default cadence, and the explicit zero setting that disables reconciliation. Normal delays and invalid-value defaults are unchanged.
+
+- **Simulations report swallowed framework assertions.** Framework assertion counters contribute deterministic invariant violations from initialization through teardown, even when application hooks catch the thrown assertion, so a simulation can no longer report a clean run merely because a hook swallowed a failure before the scenario observed it. Only assertions raised during the current run count; existing violations and replay behavior are retained.
+
+- **Invalid admin responses produce a valid server error.** Returning Response.error() from an admin hook now sends a valid HTTP 500 response rather than passing its zero status to the native response writer, preserving valid HTTP framing and allowing the server to answer the next request after the failed hook. HEAD errors omit the response body; valid admin responses keep their existing behavior.
+
+- **WebSocket upgrade hooks cannot duplicate the Date header.** Upgrade response helpers and manually returned upgrade metadata reject Date case-insensitively because the native handshake writer already appends it, so successful WebSocket handshakes carry a single server date and an application cannot accidentally add a conflicting second value through either response path. Valid handshakes retain exactly one native Date header; other permitted headers are unchanged.
+
+- **TLS error reporters cannot interrupt recovery cleanup.** A throwing error callback no longer escapes when a certificate watch is lost or interrupts the reload broadcast after a certificate read fails, allowing watcher cleanup to finish and every worker to receive its reload request while the prior certificate identity remains available. Lost watchers close once, workers still receive reload requests, and the last known certificate identity is retained on read failure.
 
 - Document bounded-memory static delivery and pin its Linux HTTP pipelining behavior, including a complete single-request control and a truncated pipelined response.
 

@@ -167,8 +167,11 @@ their source.
 7. Append a `proposed` candidate event per package. It records the candidate
    package and version, event UTC, full Git head, planned tag, target channel,
    and retained-artifact evidence. It has no npm integrity, npm shasum or
-   Published UTC because no registry identity exists yet. The reviewed release
-   commit includes this proposed event; the release tag points at that commit.
+   Published UTC because no registry identity exists yet. The full Git head names the
+   frozen source commit already checked and packed in steps 1-5. Append this
+   event in a subsequent ledger-only bookkeeping commit; do not change the
+   frozen source to include its own SHA. Review both commits, and point the
+   release tag at the frozen source commit, never the bookkeeping commit.
 
 Abort before tagging if any input changes or any required rung is incomplete.
 
@@ -178,7 +181,7 @@ Prerelease versions come from `dev` and use the `next` channel.
 
 1. Create and push the immutable annotated Git tag only after preflight passes.
 2. Append a `tagged` candidate event after the remote tag is visible. The tag
-   remains on the reviewed proposal commit; the later event does not retarget
+   remains on the reviewed frozen source commit; the later event does not retarget
    it.
 3. Publish the exact retained tarball under the quarantine `candidate` dist-tag
    with provenance when the trusted publication workflow supports it. Use the
@@ -314,12 +317,15 @@ Never use `npm unpublish` as rollback and never overwrite a version.
    `hotfix/<stable-version>/<slug>` from its exact Git commit or immutable tag.
 2. Make the smallest fix, add a regression test, bump the patch version, and
    add a changelog entry that states the affected stable line.
-3. Run the full stable and cross-repository preflight. Follow the same proposed
-   -> tagged -> quarantine publication -> immutable published-row transaction,
-   then move `latest` only after verification and append its `routed` event.
-4. Merge the hotfix into `main`, then merge or cherry-pick the same logical
-   fix into `dev`. Resolve version/changelog differences explicitly; do not
-   silently leave the integration line vulnerable.
+3. Review and merge the hotfix into `main` before freezing or tagging, so the
+   release source is in the stable lineage required by the publication workflow.
+4. Run the full stable and cross-repository preflight against that frozen main
+   source. Follow the same proposed -> tagged -> quarantine publication ->
+   immutable published-row transaction, using a subsequent ledger-only commit
+   for the proposed event. Move `latest` only after verification and append its
+   `routed` event.
+5. Merge or cherry-pick the same logical fix into `dev`. Resolve version/changelog
+   differences explicitly; do not silently leave the integration line vulnerable.
 
 ## Dist-tag rollback
 

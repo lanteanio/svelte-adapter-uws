@@ -112,11 +112,8 @@ describe('cluster sequence authority policy', () => {
 		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
 		expect(() => assertBatchSequenceAuthority({ seq: 1, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
 		// The signature carries no count at all, so no caller can reintroduce one.
-		// EXACTLY one: `data` has a default and so is not counted, leaving
-		// `options` as the only positional parameter. `<= 2` was the same
-		// assertion with one parameter of slack - precisely the count slot it
-		// claimed to exclude - so the bounced `(options, count, data = workerData)`
-		// passed it at length 2 and the pin proved nothing.
+		// Only `options` precedes the defaulted worker data parameter.
+		// Exactly one prevents an entry-count argument from entering this API.
 		expect(assertBatchSequenceAuthority.length).toBe(1);
 	});
 
@@ -397,7 +394,7 @@ describe('cluster sequence authority policy', () => {
 		// its atomic pre-pass; the stamp, the monotone-max branch, and the
 		// relay filter all consume the captured values.
 		expectStatement(batch, 'assertClusterSequenceAuthorityValues(seqOption, relayOption);', 'publishBatched vets cluster sequence authority');
-		expectStatement(batch, 'const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic, seqBound);', 'publishBatched stamps from the captured value');
+		expectStatement(batch, 'const seq = stampSeqValue(msgSeqs[i], topicSeqs, entry.topic, seqBound);', 'publishBatched stamps from the captured value');
 		// Same reason as batch(), and here the stamping loop is what would
 		// otherwise surface a bad value - after earlier entries have advanced
 		// the topic counter for a frame the call never sends.

@@ -59,8 +59,9 @@ export interface ConnectOptions {
 	 * The preflight is a `fetch(authPath, { method: 'POST', credentials: 'include' })`
 	 * that runs before every connect (including reconnects) so rotated session
 	 * cookies are picked up. Concurrent connect attempts share a single in-flight
-	 * request. On a non-2xx response, the connection is not opened and the status
-	 * store transitions to `'closed'` with a permanent rejection.
+	 * request. A 429 retries with Retry-After respected; network and server errors
+	 * retry through the reconnect policy. Other 4xx responses stop retries and
+	 * transition the status store to `'failed'` without opening a socket.
 	 *
 	 * This exists because `Set-Cookie` on a 101 Switching Protocols response is
 	 * silently dropped by Cloudflare Tunnel and some other strict edge proxies,

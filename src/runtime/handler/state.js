@@ -813,7 +813,7 @@ export const lastPublishWarnAt = new Map();
 /** Binary-wire (0x03) capability accounting + topic-id space, shared with the test/dev platforms via wire.js. */
 export const capCounts = createCapCounts();
 
-/** Bounded LRU cache for decoded URI pathnames (null = decode error). @type {Map<string, string | null>} */
+/** Bounded FIFO cache for decoded URI pathnames (null = decode error). @type {Map<string, string | null>} */
 export const decodeCache = new Map();
 
 /**
