@@ -312,6 +312,7 @@ export function handleRequest(res, req) {
 	res.onAborted(() => {
 		state.aborted = true;
 		state.failBody?.();
+		state.cancelResponse?.();
 		if (!state.bodyReceived) controller.abort();
 	});
 

@@ -5,15 +5,16 @@ const STATE_POOL_MAX = 256;
 export function acquireState() {
 	const s = statePool.pop();
 	if (s) { s.aborted = false; s.responseStarted = false; s.closedByServer = false; s.bodyReceived = false; return s; }
-	return { aborted: false, responseStarted: false, closedByServer: false, bodyReceived: false, failBody: null, signal: null };
+	return { aborted: false, responseStarted: false, closedByServer: false, bodyReceived: false, failBody: null, cancelResponse: null, signal: null };
 }
 
-/** @param {{ aborted: boolean, responseStarted: boolean, closedByServer: boolean, bodyReceived: boolean, failBody: (() => void) | null, signal: AbortSignal | null }} s */
+/** @param {{ aborted: boolean, responseStarted: boolean, closedByServer: boolean, bodyReceived: boolean, failBody: (() => void) | null, cancelResponse: (() => void) | null, signal: AbortSignal | null }} s */
 export function releaseState(s) {
 	// The signal and the body stream belong to the request that just finished;
 	// a pooled state must not keep either reachable.
 	s.signal = null;
 	s.failBody = null;
+	s.cancelResponse = null;
 	if (statePool.length < STATE_POOL_MAX) statePool.push(s);
 }
 

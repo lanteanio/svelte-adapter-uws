@@ -1,4 +1,5 @@
 import { responseChunkBytes } from './response-body.js';
+import { readReady } from './response-read.js';
 
 /**
  * Whether an SSR response may be buffered whole for cross-waiter dedup.
@@ -8,12 +9,9 @@ import { responseChunkBytes } from './response-body.js';
  * forever - parking the leader and every concurrent anonymous waiter on the
  * same in-flight promise until the connection drops. Those must stream.
  *
- * Everything else is a finite render we buffer and share. Note we deliberately
- * do NOT require a `content-length`: SvelteKit's dynamically-rendered pages
- * carry none, so gating on that header would silently disable dedup for the
- * exact thundering-herd workload it exists to protect. The never-ending
- * content-type is the only reliable signal, and `writeResponse` already
- * chunk-streams the excluded case without buffering it.
+ * Other bodies may be shared if they finish without a pending I/O read and
+ * remain within the byte cap. A deferred body falls back to streaming even
+ * without a content-length; ready dynamic pages still share their render.
  *
  * Kept separate so it is unit-testable without pulling
  * in the build-time runtime init chain that `ssr.js` depends on.
@@ -44,7 +42,7 @@ export function declaresBodyPastCap(response, cap) {
 }
 
 /**
- * Read a body until it ends or its bytes pass `cap`, whichever comes first.
+ * Read a body until it ends, passes `cap`, or a subsequent read needs I/O.
  *
  * The cap is a ceiling on what is HELD, not a check made after the whole
  * body has been materialised: a leader that reads a response to its end and
@@ -57,16 +55,23 @@ export function declaresBodyPastCap(response, cap) {
  *
  * @param {ReadableStream<unknown>} body
  * @param {number} cap
+ * @param {{ cancelResponse?: (() => void) | null }} [state]
  * @returns {Promise<{ complete: true, bytes: Uint8Array } | { complete: false, stream: ReadableStream<Uint8Array> }>}
  */
-export async function readBodyUpTo(body, cap) {
+export async function readBodyUpTo(body, cap, state) {
 	const reader = body.getReader();
+	const cancel = () => { reader.cancel().catch(() => {}); };
+	if (state) state.cancelResponse = cancel;
 	/** @type {Uint8Array[]} */
 	const chunks = [];
 	let total = 0;
+	let pending;
+	const allowance = { spent: false };
 	try {
 		for (;;) {
-			const { done, value } = await reader.read();
+			const next = chunks.length ? await readReady(reader, allowance) : await reader.read();
+			if (next.pending) { pending = next.pending; break; }
+			const { done, value } = next;
 			if (done) {
 				reader.releaseLock();
 				const bytes = new Uint8Array(total);
@@ -83,34 +88,40 @@ export async function readBodyUpTo(body, cap) {
 		reader.cancel(error).catch(() => {});
 		reader.releaseLock();
 		throw error;
+	} finally {
+		if (state?.cancelResponse === cancel) state.cancelResponse = null;
 	}
-	// Past the cap: replay what is held, then continue from the source. The
-	// held chunks are released as they are replayed, so the prefix is not
-	// kept for the life of the stream.
+	// Replay the held prefix, then consume the exact read that was pending
+	// when buffering stopped. The wrapper's owner now owns cancellation too.
 	let replay = 0;
+	let released = false;
+	const release = () => { if (!released) { released = true; reader.releaseLock(); } };
 	const stream = new ReadableStream({
 		async pull(controller) {
 			if (replay < chunks.length) {
 				const chunk = chunks[replay];
-				chunks[replay] = /** @type {any} */ (null);
-				replay += 1;
+				chunks[replay++] = /** @type {any} */ (null);
 				controller.enqueue(chunk);
 				return;
 			}
 			try {
-				const { done, value } = await reader.read();
-				if (done) { reader.releaseLock(); controller.close(); }
+				const next = pending || reader.read();
+				pending = null;
+				const { done, value } = await next;
+				if (released) return;
+				if (done) { release(); controller.close(); }
 				else controller.enqueue(responseChunkBytes(value));
 			} catch (error) {
+				if (released) return;
 				reader.cancel(error).catch(() => {});
-				reader.releaseLock();
+				release();
 				throw error;
 			}
 		},
 		cancel(reason) {
 			chunks.length = 0;
 			const cancelled = reader.cancel(reason);
-			reader.releaseLock();
+			release();
 			return cancelled;
 		}
 	});

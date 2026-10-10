@@ -3,6 +3,7 @@
 /* global ENV_PREFIX */
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { responseChunkBytes } from './response-body.js';
+import { readReady } from './response-read.js';
 import { negotiateEncoding } from '../utils/content-coding.js';
 import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
@@ -351,7 +352,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 
 				try {
 					const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
-					if (state.aborted) { resolveShared(null); return; }
+					if (state.aborted) { resolveShared(null); response.body?.cancel().catch(() => {}); return; }
 
 					// Responses with Set-Cookie must not be shared (they're personalized).
 					// Responses that declare Vary on anything other than Accept-Encoding
@@ -378,8 +379,8 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 					// A never-ending SSE stream (see isDedupBufferable) must not be
 					// buffered: arrayBuffer() on it would await forever, parking this
 					// leader and every concurrent waiter on the same promise.
-					// writeResponse chunk-streams it instead. Every other (finite)
-					// render is buffered and shared below.
+					// writeResponse chunk-streams it instead. Other bodies share
+					// only while their reads are ready within the current turn.
 					if (!isDedupBufferable(response)) {
 						resolveShared(null);
 						await writeResponse(res, response, state, respAcceptEncoding, headOnly);
@@ -398,7 +399,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 						await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 						return;
 					}
-					const read = await readBodyUpTo(response.body, MAX_SSR_DEDUP_BODY);
+					const read = await readBodyUpTo(response.body, MAX_SSR_DEDUP_BODY, state);
 					if (state.aborted) {
 						resolveShared(null);
 						if (!read.complete) read.stream.cancel().catch(() => {});
@@ -449,7 +450,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 
 		// Normal (non-dedup) path
 		const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
-		if (state.aborted) return;
+		if (state.aborted) { response.body?.cancel().catch(() => {}); return; }
 		await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
@@ -518,7 +519,7 @@ function writeHeaders(res, response) {
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
- * @param {{ aborted: boolean, responseStarted?: boolean, closedByServer?: boolean }} state -
+ * @param {{ aborted: boolean, responseStarted?: boolean, closedByServer?: boolean, cancelResponse?: (() => void) | null }} state -
  *   Shared with the request handler; `responseStarted` flips once any byte
  *   reaches the wire, which is what tells the failure path an error response
  *   can no longer be sent, and `closedByServer` marks an abort this teardown
@@ -581,6 +582,8 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 	}
 
 	const reader = response.body.getReader();
+	const cancel = () => { reader.cancel().catch(() => {}); };
+	state.cancelResponse = cancel;
 	let streaming = false;
 	let streamDone = false;
 	try {
@@ -595,7 +598,7 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 		}
 
 		const firstBytes = responseChunkBytes(first.value);
-		const second = await reader.read();
+		const second = await readReady(reader);
 		if (second.done || state.aborted) {
 			// Single-chunk response (common for SSR) - one cork, one syscall
 			if (!state.aborted) {
@@ -634,23 +637,26 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 			return;
 		}
 
-		// Multi-chunk streaming response. Headers + first two chunks share one
-		// cork so they flush as a single syscall. Subsequent chunks are each
+		// Streaming response. Headers + ready prefix share one cork so a
+		// pending second chunk cannot hold the first. Later chunks are each
 		// written inside their own cork via writeChunkWithBackpressure, which
 		// also captures the drain signal from res.write() without tripping the
 		// uWS "writes must be made from within a corked callback" warning.
 		if (state.aborted) return;
-		const secondBytes = responseChunkBytes(second.value);
+		const secondBytes = second.pending ? null : responseChunkBytes(second.value);
 		streaming = true;
 		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
 			res.write(firstBytes);
-			res.write(secondBytes);
+			if (secondBytes) res.write(secondBytes);
 		});
 
+		let pending = second.pending;
 		for (;;) {
-			const { done, value } = await reader.read();
+			const next = pending || reader.read();
+			pending = null;
+			const { done, value } = await next;
 			if (done) { streamDone = true; break; }
 			if (state.aborted) break;
 
@@ -662,6 +668,7 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 			}
 		}
 	} finally {
+		if (state.cancelResponse === cancel) state.cancelResponse = null;
 		if (streaming && !state.aborted) {
 			if (streamDone) {
 				res.cork(() => res.end());

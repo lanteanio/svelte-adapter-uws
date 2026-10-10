@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: deferred responses send their first bytes promptly.** Streamed SvelteKit pages, endpoints and SSE deliver their ready prefix while later body work is pending, and socket disconnects cancel the active response producer even after receiving a complete POST request body.
+  - **Affects:** Applications returning streamed or deferred response bodies.
+  - **Action:** No configuration change is needed.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
   - **Affects:** Endpoints that return custom ReadableStream response bodies.
   - **Action:** None for valid string or binary chunks.
@@ -739,6 +746,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery markers clear stale topic offsets without losing their sequence-space identity. Both truncation forms and denials retain the epoch, relay gaps keep the old generation for a safe mismatch, and rehydrate records its announced generation.
 
 - Replay stores report a standalone truncation marker while their request is outstanding, once per replay, including when the end marker repeats the signal. Request IDs still isolate concurrent replay responses.
+
+- Response readers retain ready finite bodies but hand a pending read into streaming after one event-loop check-phase allowance per buffered prefix, keeping deferred first bytes independent of later body work. Active response cancellation belongs to the socket lifetime, including fully received POST requests.
 
 - SSR response streams preserve string, ArrayBuffer and offset-view bytes on both shared and direct requests. Strings count toward the dedup cap and qualify for normal compression; invalid chunks cancel their source and fail instead of returning corrupt or empty bodies.
 
