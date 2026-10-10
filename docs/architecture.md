@@ -218,6 +218,9 @@ optional and is passed to the extension that should use it. It bounds backend
 failure latency; it does not prove that missed cross-instance events or writes
 were reconstructed.
 
+Tenant-qualified identity and migration requirements for erasure are defined
+in [the erasure identity contract](./contracts/tenant-erasure-identity.md).
+
 ## Subscription-pressure signal
 
 Subscription pressure uses every settled logical subscription divided by the
