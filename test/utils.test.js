@@ -192,10 +192,10 @@ describe('parseCookies', () => {
 
 describe('mimeLookup', () => {
 	it('returns correct MIME types', () => {
-		expect(mimeLookup('style.css')).toBe('text/css');
-		expect(mimeLookup('app.js')).toBe('text/javascript');
+		expect(mimeLookup('style.css')).toBe('text/css; charset=utf-8');
+		expect(mimeLookup('app.js')).toBe('text/javascript; charset=utf-8');
 		expect(mimeLookup('data.json')).toBe('application/json');
-		expect(mimeLookup('page.html')).toBe('text/html');
+		expect(mimeLookup('page.html')).toBe('text/html; charset=utf-8');
 		expect(mimeLookup('logo.png')).toBe('image/png');
 	});
 
@@ -204,7 +204,7 @@ describe('mimeLookup', () => {
 	});
 
 	it('handles multiple dots', () => {
-		expect(mimeLookup('bundle.min.js')).toBe('text/javascript');
+		expect(mimeLookup('bundle.min.js')).toBe('text/javascript; charset=utf-8');
 	});
 
 	it('returns octet-stream for unknown extensions', () => {
@@ -217,7 +217,7 @@ describe('mimeLookup', () => {
 
 	it('is case insensitive for extension', () => {
 		expect(mimeLookup('image.PNG')).toBe('image/png');
-		expect(mimeLookup('style.CSS')).toBe('text/css');
+		expect(mimeLookup('style.CSS')).toBe('text/css; charset=utf-8');
 	});
 });
 

@@ -603,6 +603,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Static plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML responses declare UTF-8 so non-ASCII text decodes correctly. XML and RTF retain their own encoding declarations.
+
 - HTTP responses use the native Date field once, including static conditional and range responses and app-supplied SSR, auth, and admin Responses. The redundant date-header timer is removed.
 
 - Static date preconditions accept only valid HTTP dates, including obsolete date forms and their rolling two-digit year boundary. ISO and free-form dates are ignored.

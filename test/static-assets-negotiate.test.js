@@ -672,7 +672,7 @@ describeMaybe('static assets: resume over a real connection', () => {
 	it('puts the status line and the full header block on the wire', async () => {
 		const res = await rawGet(port, '/wire-probe/asset.txt', { 'accept-encoding': 'br' });
 		expect(res.status).toBe(200);
-		expect(res.headers['content-type']).toBe('text/plain');
+		expect(res.headers['content-type']).toBe('text/plain; charset=utf-8');
 		expect(res.headers['vary']).toBe('Accept-Encoding');
 		expect(res.headers['accept-ranges']).toBe('bytes');
 		expect(res.headers['cache-control']).toBe('no-cache');

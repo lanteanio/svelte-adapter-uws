@@ -1476,6 +1476,8 @@ All static assets (from the `client/` and `prerendered/` output directories) are
 
 Files with extensions that browsers cannot render inline (`.zip`, `.tar`, `.tgz`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.img`, `.bin`, etc.) automatically receive `Content-Disposition: attachment` so browsers prompt a download dialog instead of attempting to display them.
 
+Static text responses declare `charset=utf-8` for plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML. XML and RTF retain their in-band encoding declarations.
+
 If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served by the weights in the client's `Accept-Encoding` header, read as RFC 9110 12.5.3 reads them: `q=0` refuses a coding, the highest weight wins, brotli breaks a tie, `*` stands for the codings not named, and identity is served when neither coding is acceptable. Dynamic SSR compression negotiates the same way. Precompressed variants are only used when they are smaller than the original file. Each variant is a separate representation: mutable assets carry a separate ETag for each coding, byte ranges into it are measured against its own length, and `Vary: Accept-Encoding` is sent on every response - including `304 Not Modified`, which repeats the validated representation's `ETag`, `Cache-Control` and every configured `staticHeaders` entry, so a shared cache updates the right stored variant under the right freshness policy and a revalidating client keeps seeing its security headers.
 
 #### Cache policy for versioned custom assets (`staticCacheControl`)
