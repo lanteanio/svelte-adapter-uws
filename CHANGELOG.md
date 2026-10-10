@@ -197,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Complete body reads and hook responses are unchanged. An interrupted read rejects with the existing request-aborted error, and no response is written to the departed client.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: the Vite origin pin uses the adapter's environment prefix.** With `envPrefix` configured, dev read bare `ORIGIN`, so its authentication request URL and same-origin checks disagreed with production; it now reads the prefixed variable from the same adapter configuration and ignores bare `ORIGIN`.
+  - **Affects:** Apps that configure `envPrefix` and use the Vite WebSocket plugin.
+  - **Action:** Set the prefixed origin variable, such as `MY_APP_ORIGIN` for `envPrefix: 'MY_APP_'`; remove any dev-only bare `ORIGIN` workaround.
+  - **Requires:** No new dependency or plugin option.
+  - **Compatibility:** With an empty prefix, bare `ORIGIN` works as before. With a prefix and no prefixed origin pin, dev uses the request Host as production does; a bare `ORIGIN` no longer overrides it.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -527,6 +535,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auth rate-limit refusals round the configured window up before adding
   `Retry-After` jitter. Built-runtime HTTP tests cover fractional windows and
   retain the default whole-second range; rate accounting itself is unchanged.
+
+- The Vite plugin resolves `envPrefix` from the adapter metadata before
+  reading its `ORIGIN` pin, including direct `sveltekit(config)` setups and
+  the older config-file fallback. Real dev HTTP and WebSocket requests cover
+  the prefixed pin and a conflicting bare variable, including the
+  authentication hook's request URL and both same-origin gates.
+- A prefixed built fixture now exercises the proxy warning and SSR
+  `ADDRESS_HEADER` / `XFF_DEPTH` diagnostics. The real-runtime test helper
+  applies, scrubs, compares and restores that variant's prefixed environment
+  while callers keep unprefixed names; real requests verify inherited body
+  limits are scrubbed and unrelated bare variables remain unchanged.
 
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;

@@ -23,7 +23,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildFixtureOnce } from './fixture-build.js';
 import { registerRuntime, forgetRuntime } from './live-runtimes.js';
-import { variantOut } from '../fixture/variants.js';
+import { variantOut, FIXTURE_VARIANTS } from '../fixture/variants.js';
 // The PRODUCTION parsers, so the eval-time-env expectations below cannot drift
 // from what the runtime actually computes from the same string.
 import { parse_as_bytes, parse_origin } from '../../src/runtime/utils/parse.js';
@@ -192,12 +192,14 @@ function normalizeConfigValue(value) {
  *
  * @param {any} config - the booted `handler/config.js` module
  * @param {Record<string, string|undefined>} env
+ * @param {string} [prefix] - the built variant's environment namespace
  * @returns {string[]} one human-readable line per disagreement
  */
-export function evalTimeEnvMismatches(config, env) {
+export function evalTimeEnvMismatches(config, env, prefix = '') {
 	const mismatched = [];
 	for (const entry of OBSERVABLE) {
-		const wanted = env[entry.env];
+		const name = prefix + entry.env;
+		const wanted = env[name];
 		const got = entry.read(config);
 		const gotNorm = normalizeConfigValue(got);
 		if (entry.presenceOnly) {
@@ -208,7 +210,7 @@ export function evalTimeEnvMismatches(config, env) {
 			const gotSet = got !== undefined && got !== null;
 			if (wantedSet === gotSet || typeof got === 'function') continue;
 			mismatched.push(
-				`${entry.env}: asked for ${wantedSet ? 'set' : '(unset)'}, module has ${gotSet ? 'set' : '(unset)'} (presence only)`
+				`${name}: asked for ${wantedSet ? 'set' : '(unset)'}, module has ${gotSet ? 'set' : '(unset)'} (presence only)`
 			);
 			continue;
 		}
@@ -222,13 +224,13 @@ export function evalTimeEnvMismatches(config, env) {
 		} catch (error) {
 			// A knob the runtime itself would have rejected at eval. Report it rather
 			// than letting the comparison throw from inside a guard.
-			mismatched.push(`${entry.env}: ${String(wanted)} is not a value the runtime accepts (${error.message})`);
+			mismatched.push(`${name}: ${String(wanted)} is not a value the runtime accepts (${error.message})`);
 			continue;
 		}
 		if (wantedNorm === undefined && gotNorm === undefined) continue;
 		if (wantedNorm === gotNorm) continue;
 		mismatched.push(
-			`${entry.env}: asked for ${String(wantedNorm)}, module has ${gotNorm === undefined ? '(unset)' : String(gotNorm)}`
+			`${name}: asked for ${String(wantedNorm)}, module has ${gotNorm === undefined ? '(unset)' : String(gotNorm)}`
 		);
 	}
 	return mismatched;
@@ -271,6 +273,7 @@ export function freePort() {
  *
  * Env must be applied BEFORE the built handler is imported - the runtime reads
  * it at module eval - which is why this helper sets it rather than the caller.
+ * Callers use unprefixed names; the variant supplies its configured prefix.
  *
  * @param {{ variant?: string, env?: Record<string, string|undefined> }} [opts]
  * @returns {Promise<{ port: number, wsUrl: string, httpUrl: string, handler: any, stop: () => Promise<void> }>}
@@ -298,84 +301,95 @@ export async function startRealRuntime({ variant = 'default', env = {} } = {}) {
 	// depended on them persisting, which made this latent rather than broken - but
 	// a helper that permanently edits the environment of every later suite in the
 	// worker is a trap waiting for the first suite that reads one outside a boot.
+	const prefix = FIXTURE_VARIANTS[variant].envPrefix ?? '';
 	/** @type {Array<[string, string | undefined]>} */
-	const envBefore = EVAL_TIME_ENV.concat(Object.keys(env))
-		.map((key) => /** @type {[string, string | undefined]} */ ([key, process.env[key]]));
+	const envBefore = [...new Set(EVAL_TIME_ENV.concat(Object.keys(env)))].map((key) => {
+		const name = prefix + key;
+		return /** @type {[string, string | undefined]} */ ([name, process.env[name]]);
+	});
 
 	for (const key of EVAL_TIME_ENV) {
-		if (!(key in env)) delete process.env[key];
+		if (!(key in env)) delete process.env[prefix + key];
 	}
 	for (const [key, value] of Object.entries(env)) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
+		if (value === undefined) delete process.env[prefix + key];
+		else process.env[prefix + key] = value;
 	}
 
-	const builtHandler = path.join(fixtureDir, variantOut(variant), 'handler.js');
-	const handler = await import(pathToFileURL(builtHandler).href);
-
-	// The import above is a CACHE READ when another suite in this worker already
-	// loaded this variant. That only happens when file parallelism is off (at
-	// `--maxWorkers=1` / `--no-file-parallelism` vitest reuses one module
-	// registry); with parallelism on, each file re-evaluates. Either way the
-	// scrub above means the eval saw a known env - so if the module still comes
-	// back TLS, it is a genuinely stale cached one from a suite that booted TLS
-	// in-process, and every caller here dials `ws://`. Left unnamed that
-	// surfaces as a bare `socket hang up` with nothing pointing at the cause.
-	const config = await import(pathToFileURL(path.join(fixtureDir, variantOut(variant), 'handler', 'config.js')).href);
-
-	// COMPARE what the module actually booted with against what this call asked
-	// for. The scrub above only reaches module EVAL, and the import is a cache
-	// hit whenever another suite in this worker already loaded the variant (which
-	// is every time file parallelism is off). In that case the returned runtime
-	// is configured however the FIRST suite left it, and the previous version of
-	// this guard - which only looked at is_tls - let that pass silently: two
-	// suites were caught testing a server with an `ADDRESS_HEADER` they never
-	// asked for, and the order that passed was testing the wrong thing.
-	//
-	// A mismatch is not recoverable here (re-importing cannot re-evaluate a
-	// cached module graph), so the answer is to be LOUD about it. The cure is a
-	// dedicated fixture variant, which is what gives a suite its own module.
-	const mismatched = evalTimeEnvMismatches(config, process.env);
-	if (mismatched.length > 0) {
-		throw new Error(
-			`real-runtime: variant "${variant}" was already evaluated in this worker under a different ` +
-			`environment, so this suite would test a server it did not configure - ${mismatched.join('; ')}. ` +
-			'The runtime reads these at module eval and Node cannot re-evaluate a cached module, so two ' +
-			'suites needing different eval-time env cannot share a variant: give this one its own entry in ' +
-			'test/fixture/variants.js. (Most often seen with file parallelism off, where one worker runs ' +
-			'every file.)'
-		);
-	}
-
-	const port = await freePort();
-	await handler.start('127.0.0.1', port);
-
-	const runtime = {
-		port,
-		wsUrl: `ws://127.0.0.1:${port}/ws`,
-		httpUrl: `http://127.0.0.1:${port}`,
-		handler,
-		async stop() {
-			forgetRuntime(runtime);
-			try { await handler.shutdown(); } catch { /* already down */ }
-			try { handler.forceCloseApp(); } catch { /* already closed */ }
-			// RESTORE, rather than delete what this call set. Deleting only the
-			// caller's keys left the other scrubbed variables gone for the rest of
-			// the process, so the helper's cleanup was itself a source of
-			// cross-suite env drift - the thing the scrub exists to prevent.
-			for (const [key, value] of envBefore) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
+	const restoreEnv = () => {
+		for (const [key, value] of envBefore) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
 		}
 	};
+	try {
+		const builtHandler = path.join(fixtureDir, variantOut(variant), 'handler.js');
+		const handler = await import(pathToFileURL(builtHandler).href);
 
-	// Registered the moment it is listening, BEFORE the caller can hold it. A
-	// test whose budget expires during this boot never receives the value and so
-	// can never stop it; the harness sweep in helpers/stop-leaked-runtimes.js
-	// stops it instead of leaving a listener behind for the next test to find.
-	registerRuntime(runtime);
-	return runtime;
+		// The import above is a CACHE READ when another suite in this worker already
+		// loaded this variant. That only happens when file parallelism is off (at
+		// `--maxWorkers=1` / `--no-file-parallelism` vitest reuses one module
+		// registry); with parallelism on, each file re-evaluates. Either way the
+		// scrub above means the eval saw a known env - so if the module still comes
+		// back TLS, it is a genuinely stale cached one from a suite that booted TLS
+		// in-process, and every caller here dials `ws://`. Left unnamed that
+		// surfaces as a bare `socket hang up` with nothing pointing at the cause.
+		const config = await import(pathToFileURL(path.join(fixtureDir, variantOut(variant), 'handler', 'config.js')).href);
+
+		// COMPARE what the module actually booted with against what this call asked
+		// for. The scrub above only reaches module EVAL, and the import is a cache
+		// hit whenever another suite in this worker already loaded the variant (which
+		// is every time file parallelism is off). In that case the returned runtime
+		// is configured however the FIRST suite left it, and the previous version of
+		// this guard - which only looked at is_tls - let that pass silently: two
+		// suites were caught testing a server with an `ADDRESS_HEADER` they never
+		// asked for, and the order that passed was testing the wrong thing.
+		//
+		// A mismatch is not recoverable here (re-importing cannot re-evaluate a
+		// cached module graph), so the answer is to be LOUD about it. The cure is a
+		// dedicated fixture variant, which is what gives a suite its own module.
+		const mismatched = evalTimeEnvMismatches(config, process.env, prefix);
+		if (mismatched.length > 0) {
+			throw new Error(
+				`real-runtime: variant "${variant}" was already evaluated in this worker under a different ` +
+				`environment, so this suite would test a server it did not configure - ${mismatched.join('; ')}. ` +
+				'The runtime reads these at module eval and Node cannot re-evaluate a cached module, so two ' +
+				'suites needing different eval-time env cannot share a variant: give this one its own entry in ' +
+				'test/fixture/variants.js. (Most often seen with file parallelism off, where one worker runs ' +
+				'every file.)'
+			);
+		}
+
+		const port = await freePort();
+		await handler.start('127.0.0.1', port);
+
+		const runtime = {
+			port,
+			wsUrl: `ws://127.0.0.1:${port}/ws`,
+			httpUrl: `http://127.0.0.1:${port}`,
+			handler,
+			async stop() {
+				forgetRuntime(runtime);
+				try { await handler.shutdown(); } catch { /* already down */ }
+				try { handler.forceCloseApp(); } catch { /* already closed */ }
+				// RESTORE, rather than delete what this call set. Deleting only the
+				// caller's keys left the other scrubbed variables gone for the rest of
+				// the process, so the helper's cleanup was itself a source of
+				// cross-suite env drift - the thing the scrub exists to prevent.
+				restoreEnv();
+			}
+		};
+
+		// Registered the moment it is listening, BEFORE the caller can hold it. A
+		// test whose budget expires during this boot never receives the value and so
+		// can never stop it; the harness sweep in helpers/stop-leaked-runtimes.js
+		// stops it instead of leaving a listener behind for the next test to find.
+		registerRuntime(runtime);
+		return runtime;
+	} catch (error) {
+		restoreEnv();
+		throw error;
+	}
 }
 
 /**

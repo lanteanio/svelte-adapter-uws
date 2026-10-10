@@ -717,6 +717,9 @@ export default function (opts = {}) {
 	return {
 		name: 'adapter-uws',
 
+		// The dev plugin reads the same environment namespace as the build.
+		envPrefix,
+
 		// Read by the Vite plugin (src/vite.js) so this one value drives both
 		// surfaces. The plugin resolves the WS handler and emits it BEFORE the
 		// adapter runs, so without this the plugin could not see the adapter's

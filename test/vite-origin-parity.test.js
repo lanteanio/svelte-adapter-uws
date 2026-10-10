@@ -5,6 +5,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { request as httpRequest } from 'node:http';
 import { WebSocket } from 'ws';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { bootViteDev } from './helpers/vite-dev.js';
 
 const originalOrigin = process.env.ORIGIN;
@@ -190,4 +192,25 @@ describe('Vite fixed-origin parity', () => {
 			expect(ran, String(origin)).toBe(0);
 		}
 	});
+});
+
+// A fresh Node process lets SvelteKit load the real fixture configuration and
+// handler through Vite's module runner, including the resolved adapter metadata.
+describe('Vite reads the adapter environment prefix', () => {
+	it.each(['prefixed', 'bare-only'])('uses the real consolidated adapter config for %s ORIGIN', async (mode) => {
+		const runner = fileURLToPath(new URL('./helpers/vite-env-prefix-runner.js', import.meta.url));
+		const result = await new Promise((resolve, reject) => {
+			const child = spawn(process.execPath, [runner, mode], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+			let output = '';
+			child.stdout.on('data', chunk => { output += chunk; });
+			child.stderr.on('data', chunk => { output += chunk; });
+			let timedOut = false;
+			const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 60000);
+			child.once('error', error => { clearTimeout(timer); reject(error); });
+			child.once('close', code => { clearTimeout(timer); resolve({ code, output, timedOut }); });
+		});
+		expect(result.timedOut, result.output).toBe(false);
+		expect(result.code, result.output).toBe(0);
+		expect(result.output).toContain('vite-env-prefix: ' + mode + ' passed');
+	}, 65000);
 });

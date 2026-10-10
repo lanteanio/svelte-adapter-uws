@@ -109,7 +109,8 @@ export interface AdapterOptions {
 	precompress?: boolean;
 
 	/**
-	 * Prefix for environment variables.
+	 * Prefix for environment variables. The Vite plugin also uses this prefix
+	 * for its ORIGIN pin; with a prefix set, bare ORIGIN is ignored.
 	 * @default ''
 	 */
 	envPrefix?: string;

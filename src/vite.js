@@ -443,7 +443,8 @@ export default function uws(options = {}) {
 	// the Host header, both of which a non-browser client supplies - so the pin
 	// is what makes that mode mean anything. Dev honouring it too keeps the dev
 	// server from being quietly more permissive than the deployment.
-	const PINNED_ORIGIN_V = parse_origin(process.env.ORIGIN || undefined);
+	/** @type {string | undefined} Resolved from the adapter before dev starts. */
+	let PINNED_ORIGIN_V;
 
 	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
@@ -1911,7 +1912,7 @@ export default function uws(options = {}) {
 	 *
 	 * @param {string} root
 	 * @param {{ plugins?: Array<any> } | null | undefined} resolved
-	 * @returns {Promise<{ handler: string | null, from: string | null }>}
+	 * @returns {Promise<{ handler: string | null, metrics: string | null, envPrefix: string, from: string | null, configName: string | null }>}
 	 */
 	async function adapterHandlerOption(root, resolved) {
 		for (const plugin of resolved?.plugins ?? []) {
@@ -1922,6 +1923,7 @@ export default function uws(options = {}) {
 			return {
 				handler: typeof handler === 'string' && handler ? handler : null,
 				metrics: typeof metrics === 'string' && metrics ? metrics : null,
+				envPrefix: typeof adapter.envPrefix === 'string' ? adapter.envPrefix : '',
 				from: 'websocket.handler in SvelteKit config',
 				configName: 'SvelteKit config'
 			};
@@ -1937,20 +1939,21 @@ export default function uws(options = {}) {
 				// API path above to avoid evaluating app config twice.
 				const mod = await import(pathToFileURL(full).href);
 				const adapter = mod?.default?.kit?.adapter;
-				if (adapter?.name !== 'adapter-uws') return { handler: null, metrics: null, from: null, configName: null };
+				if (adapter?.name !== 'adapter-uws') return { handler: null, metrics: null, envPrefix: '', from: null, configName: null };
 				const handler = adapter.websocketHandler;
 				const metrics = adapter.websocketMetrics;
 				return {
 					handler: typeof handler === 'string' && handler ? handler : null,
 					metrics: typeof metrics === 'string' && metrics ? metrics : null,
+					envPrefix: typeof adapter.envPrefix === 'string' ? adapter.envPrefix : '',
 					from: `websocket.handler in ${name}`,
 					configName: name
 				};
 			} catch {
-				return { handler: null, metrics: null, from: null, configName: null };
+				return { handler: null, metrics: null, envPrefix: '', from: null, configName: null };
 			}
 		}
-		return { handler: null, metrics: null, from: null, configName: null };
+		return { handler: null, metrics: null, envPrefix: '', from: null, configName: null };
 	}
 
 	/**
@@ -2293,6 +2296,7 @@ export default function uws(options = {}) {
 			// and aborts dev startup, which is the point: it is the same error the
 			// build raises, surfaced at the earliest moment an app can see it.
 			const adapterOption = await adapterHandlerOption(root, server.config);
+			PINNED_ORIGIN_V = parse_origin(process.env[adapterOption.envPrefix + 'ORIGIN'] || undefined);
 			const resolvedHandler = await discoverHandler(root, server.config, adapterOption);
 
 			// The metrics registry, on the same mechanism as the handler and for

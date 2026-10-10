@@ -17,6 +17,7 @@ const directConfig = variant.configStyle === 'consolidated'
 	? {
 		adapter: adapter({
 			out: variant.out,
+			envPrefix: variant.envPrefix,
 			tracing: variant.tracing,
 			staticDotfiles: variant.staticDotfiles,
 			websocket: variant.handler

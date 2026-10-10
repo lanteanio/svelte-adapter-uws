@@ -1572,7 +1572,7 @@ before building proves nothing - verify against the production build.
 
 All variables are set at **runtime** (when you run `node build`), not at build time.
 
-If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefixed (e.g. `MY_APP_PORT` instead of `PORT`).
+If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefixed (e.g. `MY_APP_PORT` instead of `PORT`). The Vite plugin reads the same prefix from that adapter config: set `MY_APP_ORIGIN` to pin the dev authentication request URL and same-origin checks; bare `ORIGIN` is ignored when a prefix is configured.
 
 | Variable                      | Default      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ----------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

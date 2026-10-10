@@ -43,14 +43,20 @@ describeUWS('the configured proxy headers on the built runtime', () => {
 	let server = null;
 	/** @type {import('vitest').MockInstance | null} */
 	let warn = null;
+	const originalPrefixedBodyLimit = process.env.TEST_PROXY_BODY_SIZE_LIMIT;
+	const originalBareHostHeader = process.env.HOST_HEADER;
 
 	beforeAll(async () => {
+		process.env.TEST_PROXY_BODY_SIZE_LIMIT = '1';
+		process.env.HOST_HEADER = 'wrong-bare-header';
 		server = await startRealRuntime({
 			variant: 'hookcrashproxy',
 			env: {
 				HOST_HEADER: 'x-forwarded-host',
 				PORT_HEADER: 'x-forwarded-port',
-				PROTOCOL_HEADER: 'x-forwarded-proto'
+				PROTOCOL_HEADER: 'x-forwarded-proto',
+				ADDRESS_HEADER: 'x-forwarded-for',
+				XFF_DEPTH: '2'
 			}
 		});
 		warn = vi.spyOn(console, 'warn');
@@ -58,7 +64,16 @@ describeUWS('the configured proxy headers on the built runtime', () => {
 
 	afterAll(async () => {
 		warn?.mockRestore();
-		if (server) await server.stop();
+		try {
+			if (server) await server.stop();
+			expect(process.env.TEST_PROXY_BODY_SIZE_LIMIT).toBe('1');
+			expect(process.env.HOST_HEADER).toBe('wrong-bare-header');
+		} finally {
+			if (originalPrefixedBodyLimit === undefined) delete process.env.TEST_PROXY_BODY_SIZE_LIMIT;
+			else process.env.TEST_PROXY_BODY_SIZE_LIMIT = originalPrefixedBodyLimit;
+			if (originalBareHostHeader === undefined) delete process.env.HOST_HEADER;
+			else process.env.HOST_HEADER = originalBareHostHeader;
+		}
 	});
 
 	/** @returns {string[]} */
@@ -86,7 +101,7 @@ describeUWS('the configured proxy headers on the built runtime', () => {
 		expect(warnings()).toHaveLength(1);
 		const [first] = warnings();
 		expect(first).toContain('The x-forwarded-host header');
-		expect(first).toContain('HOST_HEADER names it');
+		expect(first).toContain('TEST_PROXY_HOST_HEADER names it');
 		expect(first, 'never the value').not.toContain('__realtime');
 
 		// 400, not the 500 a page answered before, and no second warning.
@@ -102,4 +117,24 @@ describeUWS('the configured proxy headers on the built runtime', () => {
 		}
 		expect(warnings(), 'still the one warning').toHaveLength(1);
 	});
+	it('names the prefixed address settings in SSR client-address errors', async () => {
+		const missing = await fetch(server.httpUrl + '/client-address');
+		expect(missing.status).toBe(500);
+		expect((await missing.json()).error).toContain('TEST_PROXY_ADDRESS_HEADER=x-forwarded-for');
+		const shallow = await fetch(server.httpUrl + '/client-address', { headers: { 'x-forwarded-for': '192.0.2.1' } });
+		expect(shallow.status).toBe(500);
+		expect((await shallow.json()).error).toContain('TEST_PROXY_XFF_DEPTH is 2');
+		const valid = await fetch(server.httpUrl + '/client-address', { headers: { 'x-forwarded-for': '192.0.2.1, 192.0.2.2' } });
+		expect(valid.status).toBe(200);
+		expect((await valid.json()).address).toBe('192.0.2.1');
+	});
+
+	it('scrubs an inherited prefixed body limit while leaving the bare namespace alone', async () => {
+		const response = await fetch(server.httpUrl + '/ssr-echo', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: 'several-bytes' });
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('several-bytes');
+		expect(process.env.TEST_PROXY_BODY_SIZE_LIMIT).toBeUndefined();
+		expect(process.env.HOST_HEADER).toBe('wrong-bare-header');
+	});
+
 });

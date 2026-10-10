@@ -26,6 +26,15 @@ export const POSTURE_EXPORT_PATH = process.platform === 'win32'
 	: join(tmpdir(), 'svelte-adapter-uws-fixture-posture.sock');
 
 export const FIXTURE_VARIANTS = {
+	// The resolved SvelteKit adapter supplies this prefix to the dev plugin.
+	envprefix: {
+		out: 'build-env-prefix',
+		configStyle: 'consolidated',
+		envPrefix: 'TEST_APP_',
+		handler: null,
+		websocket: { allowedOrigins: 'same-origin', upgradeRateLimit: 100 }
+	},
+
 	// The long-standing default. Several suites already boot `build/`, so this
 	// entry must keep both its output directory and its options unchanged.
 	default: {
@@ -187,12 +196,12 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
-	// Byte-identical to `hookcrash`, in its own output directory so its own
-	// module, for the reason given at `addrhdr` below: its suite boots with
-	// HOST_HEADER, PORT_HEADER and PROTOCOL_HEADER set, which the runtime reads at
-	// module eval, and the suites booting `hookcrash` need them absent.
+	// The same hooks as `hookcrash`, with a prefixed environment and its own
+	// module graph: its suite boots with proxy header settings, which the
+	// runtime reads at module eval, and other suites need them absent.
 	hookcrashproxy: {
 		out: 'build-hook-crash-proxy',
+		envPrefix: 'TEST_PROXY_',
 		handler: './src/hooks.ws.hookcrash.js',
 		websocket: {
 			allowedOrigins: '*',

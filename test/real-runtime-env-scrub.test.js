@@ -151,6 +151,13 @@ describe('the post-import guard compares values, not merely presence', () => {
 		).toEqual([]);
 	});
 
+	it('compares the prefixed namespace and names it in mismatches', () => {
+		const prefixed = { TEST_PROXY_ADDRESS_HEADER: 'x-real-ip', ADDRESS_HEADER: 'wrong-bare-header' };
+		expect(evalTimeEnvMismatches(booted({ address_header: 'x-real-ip' }), prefixed, 'TEST_PROXY_')).toEqual([]);
+		const mismatches = evalTimeEnvMismatches(booted({ address_header: 'wrong-bare-header' }), prefixed, 'TEST_PROXY_');
+		expect(mismatches.join(' | ')).toContain('TEST_PROXY_ADDRESS_HEADER: asked for x-real-ip');
+	});
+
 	// A knob left unset reads back as its DEFAULT. Comparing against absence
 	// instead would make every ordinary boot look like a mismatch, which is the
 	// trap that pushed the original version to presence-only in the first place.
