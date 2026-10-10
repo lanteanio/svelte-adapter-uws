@@ -1462,7 +1462,7 @@ Two policy notes:
 
 ### Static file behavior
 
-All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Browser-encoded names match indexed filenames, including Unicode names with a tilde on Windows. Large responses advance through the cached buffer as each socket becomes writable, so a slow reader does not retain a separate copy of the unsent body. Full responses and open-ended ranges retain their complete requested length. Each response automatically includes:
+All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Browser-encoded names match indexed filenames, including Unicode names with a tilde on Windows. Large responses advance through the cached buffer as each socket becomes writable, so a slow reader does not retain a separate copy of the unsent body. Full responses and open-ended ranges retain their complete requested length. Prerendered clean URLs also accept a composed Unicode alias when it remains non-ASCII and does not conflict with a real name; directory-style aliases keep their trailing slash. Each response automatically includes:
 
 - `Content-Type`: detected from the file extension, with `charset=utf-8` for plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML. XML and RTF retain their in-band encoding declarations.
 - `Vary: Accept-Encoding`: required for correct CDN/proxy caching when serving precompressed variants

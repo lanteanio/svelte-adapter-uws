@@ -136,6 +136,43 @@ function variantHeaders(base, variantEtag, encoding) {
 	return out;
 }
 
+// Only generated clean-path aliases need ownership metadata. If a real name
+// is indexed later, remove its alias and the alias's redirect style together;
+// otherwise a decomposed directory could make a real composed file redirect.
+/** @type {Map<string, { entry: NegotiatedStaticEntry, directory: boolean }>} */
+const cleanAliases = new Map();
+
+/** @param {string} name */
+function removeCleanAlias(name) {
+	const previous = cleanAliases.get(name);
+	if (previous !== undefined) {
+		const key = previous.directory ? name + '/' : name;
+		if (staticCache.get(key) === previous.entry) staticCache.delete(key);
+		if (previous.directory) prerenderedDirStyle.delete(name);
+		cleanAliases.delete(name);
+	}
+}
+
+/**
+ * Register a prerendered page's canonical clean path and optional NFC alias.
+ * @param {string} name - bare directory path, or canonical file-style path
+ * @param {NegotiatedStaticEntry} entry
+ * @param {boolean} directory
+ */
+function cacheCleanPath(name, entry, directory) {
+	removeCleanAlias(name);
+	staticCache.set(directory ? name + '/' : name, entry);
+	if (directory) prerenderedDirStyle.add(name);
+
+	const composed = name.normalize('NFC');
+	if (composed === name || !NON_ASCII.test(composed) ||
+		staticCache.has(composed) || staticCache.has(composed + '/') ||
+		prerenderedDirStyle.has(composed)) return;
+	staticCache.set(directory ? composed + '/' : composed, entry);
+	if (directory) prerenderedDirStyle.add(composed);
+	cleanAliases.set(composed, { entry, directory });
+}
+
 /**
  * Load a directory into the static cache.
  * @param {string} dir
@@ -220,6 +257,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			}
 		}
 
+		removeCleanAlias(urlPath);
 		staticCache.set(urlPath, entry);
 		// Also under its composed form, as SvelteKit's Node adapter keys its
 		// files: a name written decomposed, as some macOS tools write it, is found
@@ -248,20 +286,18 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			if (relPath === 'index.html') {
 				if (urlPrefix) {
 					// Base root with non-empty base: /base/ is canonical
-					staticCache.set(urlPrefix + '/', entry);
-					prerenderedDirStyle.add(urlPrefix);
+					cacheCleanPath(urlPrefix, entry, true);
 				} else {
 					// Site root: / is already canonical
-					staticCache.set('/', entry);
+					cacheCleanPath('/', entry, false);
 				}
 			} else if (relPath.endsWith('/index.html')) {
 				// Directory-style: trailing slash is canonical
 				const cleanPath = `${urlPrefix}/${relPath.slice(0, -'/index.html'.length)}`;
-				staticCache.set(cleanPath + '/', entry);
-				prerenderedDirStyle.add(cleanPath);
+				cacheCleanPath(cleanPath, entry, true);
 			} else if (relPath.endsWith('.html')) {
 				// File-style: bare path is canonical
-				staticCache.set(`${urlPrefix}/${relPath.slice(0, -'.html'.length)}`, entry);
+				cacheCleanPath(`${urlPrefix}/${relPath.slice(0, -'.html'.length)}`, entry, false);
 			}
 		}
 	});

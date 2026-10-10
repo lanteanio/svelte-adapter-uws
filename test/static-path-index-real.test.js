@@ -87,4 +87,97 @@ describeUWS('encoded static and prerendered names on the built runtime', () => {
 		expect((await request(server.port, canonical, 'POST')).status).toBe(400);
 	});
 
+	for (const directory of [false, true]) {
+		it('serves the composed clean ' + (directory ? 'directory' : 'file') + ' path with its canonical slash policy', async () => {
+			const prefix = directory ? '/clean-directory' : '/clean-file';
+			const body = directory ? 'decomposed-directory-body' : 'decomposed-file-body';
+			index(prefix, { [decomposed + (directory ? '/index.html' : '.html')]: body });
+			const bare = prefix + '/' + composed;
+			prerendered.add(bare);
+			const canonical = encodeURI(bare + (directory ? '/' : ''));
+			const response = await request(server.port, canonical);
+			expect(response.status).toBe(200);
+			expect(response.body).toBe(body);
+			const head = await request(server.port, canonical, 'HEAD');
+			expect(head.status).toBe(200);
+			expect(head.body).toBe('');
+			expect(head.headers['content-length']).toBe(String(Buffer.byteLength(body)));
+			const alternate = encodeURI(bare + (directory ? '' : '/')) + '?keep=%2F';
+			const redirect = await request(server.port, alternate);
+			expect(redirect.status).toBe(308);
+			expect(redirect.headers.location).toBe(canonical + '?keep=%2F');
+			expect(state.staticCache.get(prefix + '/' + decomposed + (directory ? '/' : '')).buffer.toString()).toBe(body);
+			expect(state.prerenderedDirStyle.has(bare)).toBe(directory);
+		});
+	}
+
+	it('composes the clean path and slash marker of a nonempty base root', async () => {
+		const rawBase = '/base-' + decomposed;
+		const base = '/base-' + composed;
+		index(rawBase, { 'index.html': 'base-root-body' });
+		prerendered.add(base);
+		const redirect = await request(server.port, encodeURI(base));
+		expect(redirect.status).toBe(308);
+		expect(redirect.headers.location).toBe(encodeURI(base + '/'));
+		const response = await request(server.port, encodeURI(base + '/'));
+		expect(response.status).toBe(200);
+		expect(response.body).toBe('base-root-body');
+		expect(state.staticCache.get(rawBase + '/').buffer.toString()).toBe('base-root-body');
+	});
+
+	for (const rawDirectory of [false, true]) {
+		for (const aliasDirectory of [false, true]) {
+			for (const aliasFirst of [false, true]) {
+				it('keeps the real clean name over an NFC alias: raw directory=' + rawDirectory + ', alias directory=' + aliasDirectory + ', alias first=' + aliasFirst, async () => {
+					const prefix = '/clean-collision-' + Number(rawDirectory) + Number(aliasDirectory) + Number(aliasFirst);
+					const real = { [composed + (rawDirectory ? '/index.html' : '.html')]: 'real-composed-body' };
+					const alias = { [decomposed + (aliasDirectory ? '/index.html' : '.html')]: 'alias-decomposed-body' };
+					for (const files of aliasFirst ? [alias, real] : [real, alias]) index(prefix, files);
+					const bare = prefix + '/' + composed;
+					prerendered.add(bare);
+					const canonical = encodeURI(bare + (rawDirectory ? '/' : ''));
+					const response = await request(server.port, canonical);
+					expect(response.status).toBe(200);
+					expect(response.body).toBe('real-composed-body');
+					const alternate = await request(server.port, encodeURI(bare + (rawDirectory ? '' : '/')));
+					expect(alternate.status).toBe(308);
+					expect(alternate.headers.location).toBe(canonical);
+					expect(state.prerenderedDirStyle.has(bare)).toBe(rawDirectory);
+					expect(state.staticCache.get(prefix + '/' + decomposed + (aliasDirectory ? '/' : '')).buffer.toString()).toBe('alias-decomposed-body');
+				});
+			}
+		}
+	}
+
+	for (const aliasDirectory of [false, true]) {
+		for (const aliasFirst of [false, true]) {
+			it('keeps a literal extensionless file over a clean alias: alias directory=' + aliasDirectory + ', alias first=' + aliasFirst, async () => {
+				const prefix = '/literal-collision-' + Number(aliasDirectory) + Number(aliasFirst);
+				const literal = { [composed]: 'literal-file-body' };
+				const alias = { [decomposed + (aliasDirectory ? '/index.html' : '.html')]: 'prerendered-alias-body' };
+				for (const files of aliasFirst ? [alias, literal] : [literal, alias]) index(prefix, files);
+				const bare = prefix + '/' + composed;
+				prerendered.add(bare);
+				const response = await request(server.port, encodeURI(bare));
+				expect(response.status).toBe(200);
+				expect(response.body).toBe('literal-file-body');
+				expect(state.prerenderedDirStyle.has(bare)).toBe(false);
+				const alternate = await request(server.port, encodeURI(bare + '/'));
+				expect(alternate.status).toBe(308);
+				expect(alternate.headers.location).toBe(encodeURI(bare));
+			});
+		}
+	}
+
+	it('adds neither a clean alias nor a slash marker when NFC becomes plain ASCII', async () => {
+		index('/clean-kelvin-file', { '\u212aey.html': 'kelvin-file' });
+		index('/clean-kelvin-dir', { '\u212aey/index.html': 'kelvin-directory' });
+		for (const prefix of ['/clean-kelvin-file', '/clean-kelvin-dir']) {
+			expect(state.staticCache.has(prefix + '/Key')).toBe(false);
+			expect(state.staticCache.has(prefix + '/Key/')).toBe(false);
+			expect(state.prerenderedDirStyle.has(prefix + '/Key')).toBe(false);
+		}
+		expect((await request(server.port, '/clean-kelvin-file/%E2%84%AAey')).body).toBe('kelvin-file');
+		expect((await request(server.port, '/clean-kelvin-dir/%E2%84%AAey/')).body).toBe('kelvin-directory');
+	});
 });

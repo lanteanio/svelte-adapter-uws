@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Unindexed short names and alternate streams remain refused, as do encoded entries into reserved adapter paths.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: decomposed prerendered names keep their composed clean URLs.** Prerendered filenames written with decomposed Unicode now receive composed clean-path aliases and the matching trailing-slash policy, so their browser URLs serve the indexed page through either file-style or directory-style prerendered output.
+  - **Affects:** Deployments whose prerendered output uses decomposed Unicode filenames or directory names.
+  - **Action:** Rebuild the application.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
   - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
   - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
@@ -764,6 +770,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows reserved mount checks and precedes prerendered routing; unindexed
   short names and alternate streams still receive 400. Real HTTP checks cover
   Unicode tilde names, encoded tildes, HEAD, methods and reserved admin paths.
+- Prerendered clean paths receive collision-safe composed aliases together
+  with directory-style redirect metadata. A later real name removes any
+  generated alias and its slash policy. Real disk indexing and HTTP requests
+  cover file and directory output, base roots, both collision orders and
+  normalization to plain ASCII.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as
