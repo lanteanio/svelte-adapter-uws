@@ -677,6 +677,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.
 
+- The raw subscription-accounting control removes its deliberately uncharged membership before closing, so it leaves the worker counters balanced.
+
 - Synthetic subscription-registry tests isolate their accounting callback, preserving real server counters when the suites run together.
 
 - Vite subscriber iteration passes the adapter socket and its user data to callbacks, so matching subscribers can be inspected and sent messages without throwing.

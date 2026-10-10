@@ -197,6 +197,7 @@ export function message(ws, ctx) {
 		if (msg.mode === 'tracked') trackedSubscribe(ws, msg.topic);
 		else if (msg.mode === 'tracked-leave') trackedUnsubscribe(ws, msg.topic);
 		else if (msg.mode === 'raw') { ws.subscribe(msg.topic); subs.add(msg.topic); }
+		else if (msg.mode === 'raw-leave') { ws.unsubscribe(msg.topic); subs.delete(msg.topic); }
 		platform.send(ws, 'probe', 'membership-done', { nonce: msg.nonce });
 		return;
 	}

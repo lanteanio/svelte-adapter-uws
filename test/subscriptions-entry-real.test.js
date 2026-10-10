@@ -119,7 +119,16 @@ describeUWS('accounted membership through svelte-adapter-uws/subscriptions', () 
 			expect(summed()).toBe(baseSum + 1);
 			expect(state.counters.totalSubscriptions).toBe(baseTotal);
 		} finally {
-			client.close();
+			try {
+				// Undo the deliberately uncharged entry before close releases the
+				// remaining, accounted memberships.
+				await probe(client, 'raw-leave', '__probe:raw', 4);
+				expect(state.counters.totalSubscriptions).toBe(summed());
+			} finally {
+				if (client.ws.readyState !== 3) await new Promise((resolve) => { client.ws.once('close', resolve); client.close(); });
+			}
 		}
+		expect(state.counters.totalSubscriptions, 'close leaves the worker balanced').toBe(summed());
+		expect(state.counters.totalSubscriptions).toBeGreaterThanOrEqual(0);
 	});
 });
