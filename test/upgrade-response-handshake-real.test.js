@@ -36,6 +36,12 @@ describeUWS('101 handshake header injection (built runtime)', () => {
 
 	afterAll(async () => { await server?.stop(); });
 
+	it('writes the explicit 101 status before helper-provided response headers', async () => {
+		const { raw } = await rawUpgrade(server.port, { 'x-fixture-vector': 'helper-status' });
+		expect(raw.split('\r\n')[0]).toBe('HTTP/1.1 101 Switching Protocols');
+		expect(raw.toLowerCase()).toContain('\r\nx-fixture: upgrade\r\n');
+	});
+
 	for (const { name, value, why } of SAFE_VECTORS) {
 		it(`completes the handshake for the ${name} vector (${why})`, async () => {
 			// Control: proves the response-header path is actually reached, so a

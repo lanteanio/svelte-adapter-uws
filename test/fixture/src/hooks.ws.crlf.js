@@ -16,10 +16,12 @@
 // rejects CR, LF, obs-fold and NUL before a hook ever sees them, so a
 // client-supplied value would arrive already sanitized.
 
+import { upgradeResponse } from 'svelte-adapter-uws/upgrade-response';
 import { VECTORS_BY_NAME, buildShapeHeaders } from './handshake-vectors.js';
 
 export function upgrade({ headers }) {
 	const name = headers['x-fixture-vector'];
+	if (name === 'helper-status') return upgradeResponse({}, { 'x-fixture': 'upgrade' });
 	// Shape vectors need a whole object built a particular way (a getter that
 	// rewrites an already-read key, an own `__proto__` key), so they are built
 	// rather than looked up.
