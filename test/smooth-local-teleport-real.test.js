@@ -178,4 +178,27 @@ describe('local smooth corrections over actual socket acknowledgements', () => {
 		expect(channel.stats().correcting).toBe(true);
 	});
 
+	it('emits the final sweep position once before returning to idle', async () => {
+		await warm();
+		await ack(await submit(160), 168);
+		const count = rendered.length;
+		mono += 100;
+		expect(frame()).toEqual({ x: 168, y: 0 });
+		expect(rendered.length).toBe(count + 1);
+		mono += 16; frame();
+		expect(rendered.length).toBe(count + 1);
+	});
+	it('emits the final correction position once before returning to idle', async () => {
+		await warm({ snapSpeedPerSec: 0 });
+		await ack(await submit(), 12);
+		expect(channel.stats().correcting).toBe(true);
+		const count = rendered.length;
+		mono += 1000;
+		expect(frame()).toEqual({ x: 12, y: 0 });
+		expect(channel.stats().correcting).toBe(false);
+		expect(rendered.length).toBe(count + 1);
+		mono += 16; frame();
+		expect(rendered.length).toBe(count + 1);
+	});
+
 });

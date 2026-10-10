@@ -298,6 +298,7 @@ export function createSmoothChannel(options) {
 	let smoothName = null;
 	let destroyed = false;
 	let dirty = true;
+	let localMotionPending = false;
 	let wasOverflowed = false;
 	/** The resolved wire topic, learned from the first sync reply. */
 	let wireTopic = null;
@@ -682,7 +683,9 @@ export function createSmoothChannel(options) {
 		const hadMotion = smoother.motionPending;
 		const renderTime = smoother.beginFrame(mono);
 		const localMotion = predictor.renderInto(localPoint, mono);
-		if (!dirty && !hadMotion && !localMotion) return;
+		// Retain the preceding local verdict so the settling frame is painted.
+		if (!dirty && !hadMotion && !localMotion && !localMotionPending) return;
+		localMotionPending = localMotion;
 		dirty = false;
 		if (frameCb === null) return;
 
