@@ -2875,10 +2875,11 @@ export interface Platform {
 	 * }
 	 * ```
 	 *
-	 * @returns `true` when delivered locally or relayed; `false` with no
-	 *   subscribers - and `false` when a configured `websocket.egress`
-	 *   ceiling refused the publish, in which case nothing was delivered,
-	 *   relayed, or sequence-stamped.
+	 * @returns `true` when native local fan-out found subscribers or worker
+	 *   relay was scheduled. Neither confirms delivery to a client. Returns
+	 *   `false` with no local subscribers and no relay, or when a configured
+	 *   `websocket.egress` ceiling refused the publish. An egress refusal
+	 *   delivers, relays, and sequence-stamps nothing.
 	 */
 	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): boolean;
 
@@ -3314,9 +3315,11 @@ export interface Platform {
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
 	 *
-	 * Returns the uWS send result: `0` = SUCCESS, `1` = BACKPRESSURE
-	 * (queued, will flush on drain), `2` = DROPPED (frame discarded
-	 * because the socket has closed or its queue is over the limit).
+	 * Returns the uWS send result: `0` = BACKPRESSURE (accepted into the
+	 * local buffer), `1` = SUCCESS, `2` = DROPPED (frame refused because
+	 * the socket has closed or its queue is over the limit). These are local
+	 * transport statuses, not acknowledgements from the remote application;
+	 * even an accepted write can be lost if the connection closes.
 	 *
 	 * Closed-WS safe: if the socket has already closed, returns `2`
 	 * (DROPPED) and bumps `platform.closedWsAborts` rather than

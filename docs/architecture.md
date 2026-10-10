@@ -87,6 +87,57 @@ and client acknowledgement cross separate failure boundaries unless the
 application introduces one authoritative transaction/outbox and an idempotent
 consumer.
 
+## Publish and send outcomes
+
+### Existing return values
+
+`platform.publish()` keeps its boolean return. In the JavaScript adapter,
+`true` means native local fan-out found subscribers or worker relay was
+scheduled. A subscribed socket can still drop the message under backpressure,
+and scheduling a relay does not confirm admission or delivery on another
+worker. `false` means no local subscribers and no relay, or refusal by a
+configured egress ceiling. The boolean cannot distinguish those cases.
+
+`platform.send()` keeps its numeric uWS result: `0` is `BACKPRESSURE` (accepted
+into the local buffer), `1` is `SUCCESS`, and `2` is `DROPPED`. The platform
+also maps a send on an already closed socket to `2`. Test the numeric value,
+not its truthiness. A buffered or successful local write does not prove the
+remote application received or processed the event; disconnects can still
+lose accepted writes.
+
+These results are local to their implementation boundary. The native C++
+follower predicts a send result from its connection mirror before the owning
+transport executes the write, so that prediction can differ from the later
+transport result. Wire and batch methods retain their own documented return
+contracts; no result is an aggregate receipt from every recipient or worker.
+The `delivered` label in the publish-outcome metric also classifies local
+fan-out, not remote acknowledgements.
+
+### Decision on asynchronous receipts
+
+The family rejects a separate asynchronous publish/send receipt API. There is
+no new method, option, receipt store, or change to legacy return values.
+Transport outcomes help diagnose pressure, but do not establish whether it is
+safe to retry an application operation. A publish may reach some recipients
+before another drops it; retrying the publication can duplicate that prefix.
+Use the adapter's bounded pressure/drop signals for operations, and an
+application acknowledgement with stable event identity and idempotent
+handling when processing confirmation is required.
+
+Exact per-publication transport counts would require instrumentation below the
+native broadcast boolean and a new response path from every participating
+worker or engine. The existing relay forwards events without a per-operation
+outcome reply. A count taken from current membership or buffered bytes cannot
+reconstruct which recipients a previous write reached. A correct receipt
+contract would also need to distinguish transport admission, queued writes,
+drops, closed recipients, and unknown outcomes after worker loss or timeout;
+cancellation could stop observation but could not undo an admitted write.
+
+Those costs are not justified by the existing diagnostic and processing needs.
+This decision preserves native broadcast and relay behavior without adding a
+second acknowledgement mechanism that applications could mistake for
+processing confirmation. It does not strengthen any delivery guarantee.
+
 ## Observability flow
 
 The adapter owns transport, listener, worker, backpressure, and connection

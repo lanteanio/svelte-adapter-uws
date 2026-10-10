@@ -77,6 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: send and publish documentation distinguishes local status from delivery.** The send reference reversed the numeric success and backpressure results, while the publish reference called local fan-out delivery, so the corrected descriptions now explain the existing values and their limits without changing any runtime return.
+  - **Affects:** Applications interpreting `platform.send()` or `platform.publish()` results.
+  - **Action:** Compare send results explicitly: `0` is backpressure, `1` is success, and `2` is dropped. Use an application acknowledgement when processing confirmation is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only. Return types, values, and truthiness stay unchanged; no asynchronous receipt API is introduced.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
@@ -659,6 +665,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replies totaling 490,383 bytes (59.9x). Longer refs can amplify further.
   Counts exclude welcome and transport framing; the 4 MiB per 10-second
   ceiling and close code 4429 do not change.
+
+- **Publish and send return contracts describe local outcomes.** Corrected
+  `platform.send`'s reversed 0/1 status names and `platform.publish`'s delivery
+  wording in the declarations. `docs/architecture.md` records the decision
+  against a separate asynchronous receipt API and distinguishes native local
+  status, worker relay scheduling, and application acknowledgements. Runtime
+  behavior and signatures are unchanged.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as
