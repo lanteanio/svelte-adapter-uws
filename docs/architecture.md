@@ -312,3 +312,20 @@ connection, including a truncated first request. node:http, and therefore
 pins synchronous responses, waiting routes, and the Linux large-static case;
 `test/static-backpressure-real.test.js` pins bounded memory and complete delivery
 for slow clients without pipelining.
+
+The native close flag also has a narrower meaning than a request-dispatch
+boundary. With uWebSockets.js 20.69, `end(body, true)` sends `Connection: close`
+and ends the connection after writing, but the parser can still dispatch a
+following request already buffered in that read. This includes bytes behind an
+ambiguous-framing 400 response. The 400 and server hangup therefore do not prove
+that buffered following bytes were never interpreted as another request. Stopping
+that dispatch requires a native parser change; the adapter does not claim that
+property for this runtime version.
+
+A native cork can span multiple synchronous request callbacks in the same read.
+If a later handler calls `res.close()`, it can discard corked bytes belonging to
+an earlier response that the application already completed. A large earlier
+response may have overflowed the cork and reached the socket, so the amount
+retained by the client depends on what was flushed before the close. The adapter
+does not promise preservation of an earlier completed response across that later
+close; per-request cork ownership requires a native change.
