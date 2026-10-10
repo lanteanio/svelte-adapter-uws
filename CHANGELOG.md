@@ -621,6 +621,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A revoked subscribe cannot disclose recover history through membership installed by its own hook. Single and batch recover paths retain legitimate server re-grants.
 
+- The test server checks the final subscribe gate before recording a grant, matching production and development when authorization changes during an async hook.
+
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup

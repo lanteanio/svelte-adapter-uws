@@ -3235,11 +3235,6 @@ export async function createTestServer(options = {}) {
 							// discard the grant rather than subscribing, and answer the
 							// client's ref'd frame with a denial so its awaited subscribe
 							// resolves truthfully.
-							if (!settlePendingSubscribe(pendingUd, msg.topic, pendingToken, true)) {
-								if (_cap) discardResumeCaptureT(_cap);
-								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
-								return;
-							}
 							// Re-check the server-grant gate against the CURRENT grant set,
 							// not the reading taken before the awaits: the tombstone above
 							// fires only for revocation paths that bump the epoch. Mirrors
@@ -3248,6 +3243,12 @@ export async function createTestServer(options = {}) {
 							// server-side path that MINTS grants - a grant check there would
 							// refuse every server-initiated subscribe.
 							if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT() && !SUBSCRIBE_AUTHZ_STRICT_T, held: subs.has(msg.topic), topic: msg.topic })) {
+								settlePendingSubscribe(pendingUd, msg.topic, pendingToken);
+								if (_cap) discardResumeCaptureT(_cap);
+								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
+								return;
+							}
+							if (!settlePendingSubscribe(pendingUd, msg.topic, pendingToken, true)) {
 								if (_cap) discardResumeCaptureT(_cap);
 								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;

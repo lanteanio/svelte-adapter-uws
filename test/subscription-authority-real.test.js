@@ -114,5 +114,41 @@ for (const surface of ['built', 'testing', 'vite']) {
 			client.close();
 		});
 
+		it('does not let a refused fresh landing preserve a revoked sibling install', async () => {
+			const installed = [];
+			for (const [recover, batch] of [[false, false], [true, false], [true, true]]) {
+				const pending = await connect();
+				await parked(pending, 0, recover, batch);
+				await install(pending, 0);
+				installed.push(pending);
+			}
+			const client = await connect();
+			await parked(client, 0);
+			await command(client, 'revoke', 'revoked');
+			await parked(client, 1);
+			await command(client, 'arm', 'armed');
+			for (const pending of installed) {
+				expect(await finish(pending, 0)).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+				expect(await command(pending, 'probe', 'state')).toMatchObject({ resumed: [], held: false });
+				pending.close();
+			}
+			expect(await finish(client, 1)).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+			await install(client, 0);
+			client.send({ type: 'subscribe', topic, ref: 3 });
+			const single = await client.waitFor((value) => value?.ref === 3);
+			expect(single?.parsed).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+			client.send({ type: 'subscribe-batch', topics: [topic], ref: 4 });
+			const batch = await client.waitFor((value) => value?.ref === 4);
+			expect(batch?.parsed).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+			expect((await command(client, 'observe', 'observed')).denial).toBe('FORBIDDEN');
+			client.send({ type: 'resume', sessionId: 'previous-session', lastSeenSeqs: { [topic]: 0 }, lastSeenEpochs: { [topic]: 1 } });
+			const history = await client.waitFor((value) => value?.event === 'history');
+			expect(history?.parsed.data).toMatchObject({ topics: [], epochTopics: [] });
+			expect(await finish(client, 0)).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+			expect((await command(client, 'probe', 'state')).held).toBe(false);
+			const published = await command(client, 'publish', 'published');
+			expect(client.frames.map((frame) => JSON.parse(frame)).some((frame) => frame?.event === 'delivery' && frame.data?.nonce === published.nonce)).toBe(false);
+			client.close();
+		});
 	});
 }
