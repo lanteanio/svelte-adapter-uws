@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as acorn from 'acorn';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { send400, send413, send500 } from '../src/runtime/handler/http-helpers.js';
 import { writeChunkWithBackpressure } from '../src/runtime/utils/backpressure.js';
 import { buildBinaryFrame, parseBinaryFrame } from '../src/runtime/wire.js';
@@ -1081,7 +1081,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The synchronous guard and timer continuation add no binary byte copies.
 	// Subscription authority reads the pending grant/epoch before admitting
 	// held memberships and history. These guards add no byte copies.
-	ingress: '295448b728818da434ff116a1c2cb52df7ecae6edb98e6c93f17627a88e20e72',
+	// Subscription rollback changes membership, grants and cohort bookkeeping
+	// through ws-symbols. It adds no frame byte access or copy primitive.
+	ingress: '8e5407261dd1f322989d648da8037a913bb55941f3e282c920a5464889f82047',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -2040,7 +2042,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The synchronous guard and timer continuation add no binary byte copies.
 	// Subscription authority reads the pending grant/epoch before admitting
 	// held memberships and history. These guards add no byte copies.
-	platform: 'b8d197a9bfac3ef15f3951956f0cf428711b27f0c754c254cb46ab34facc8ffe',
+	// Subscription rollback adds native unsubscribe and logical-set cleanup,
+	// without changing any frame construction or byte ownership. Canonical
+	// host aliases are parsed from configuration at startup; the new config
+	// dependency reads host strings only and introduces no frame copy.
+	platform: '4f528f19d8dc1d105c85ab13e5e98aa7da5cc076a5be8bfa45757ffbfb254ce4',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2438,7 +2444,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Queue identity checks and continuation state add no binary byte copies.
 	// Its shared subscription-state module now reads pending authority;
 	// no payload construction, copy, or fan-out write changes.
-	'wire-fanout': '6170dc5144254e64b348764d5f349386ac36a15789694bebf177c81ef90a30c5',
+	// Membership rollback is also reachable through this module's utils barrel.
+	// It changes grants and subscription bookkeeping, not frame byte ownership.
+	'wire-fanout': '35706e26666a036bfc83f63a2a849103954c51fbea549f3b8d75020a65c6eea4',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
@@ -4829,6 +4837,10 @@ function measureStatefulBatch(entryCount) {
 }
 
 describe('deterministic production WebSocket fan-out budgets', () => {
+	// A cold fixture build has its own setup deadline, separate from the
+	// already-loaded production operation whose exact I/O counts we assert.
+	beforeAll(async () => { await productionModules(); }, 400000);
+
 	it('6x stateless subscribers do not multiply production encode, frame-build, allocation, or copy counts', async () => {
 		const small = await measureProductionStatelessFanout(1);
 		const large = await measureProductionStatelessFanout(6);
