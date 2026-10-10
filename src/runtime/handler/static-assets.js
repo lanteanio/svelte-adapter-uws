@@ -8,6 +8,7 @@ import { manifest, prerendered } from '../manifest-bridge.js';
 import { excludedDotPath } from '../utils/dot-path.js';
 import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl, contentDispositionValue } from '../utils.js';
 import { parseRange } from '../utils/byte-range.js';
+import { parseHttpDate } from '../utils/http-date.js';
 import { negotiateEncoding } from '../utils/content-coding.js';
 import { locationTarget } from '../utils/location-target.js';
 import { revalidationHeaders } from '../utils/revalidation-headers.js';
@@ -39,6 +40,7 @@ const NON_ASCII = /[^\x00-\x7f]/;
  * only has to pick one of them.
  * @typedef {StaticEntry & {
  *   lastModifiedMs?: number,
+ *   lastModified?: string,
  *   revalidationHeaders: [string, string][],
  *   brEtag?: string,
  *   gzEtag?: string,
@@ -189,7 +191,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 
 		const merged = mergeStaticHeaders(headers, staticHeaders);
 		/** @type {NegotiatedStaticEntry} */
-		const entry = { buffer, contentType, etag, lastModifiedMs, headers: merged, revalidationHeaders: revalidationHeaders(merged) };
+		const entry = { buffer, contentType, etag, lastModifiedMs, lastModified, headers: merged, revalidationHeaders: revalidationHeaders(merged) };
 
 		if (PRECOMPRESS) {
 			const brPath = absPath + '.br';
@@ -360,13 +362,13 @@ export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, 
 			(entry.gzEtag !== undefined && etagListHas(ifMatch, entry.gzEtag));
 		if (!held) return 412;
 	} else if (ifUnmodifiedSince !== '' && entry.lastModifiedMs !== undefined) {
-		const t = Date.parse(ifUnmodifiedSince);
+		const t = ifUnmodifiedSince === entry.lastModified ? entry.lastModifiedMs : parseHttpDate(ifUnmodifiedSince);
 		if (!Number.isNaN(t) && entry.lastModifiedMs > t) return 412;
 	}
 	if (ifNoneMatch !== '') {
 		if (etagListHas(ifNoneMatch, repEtag)) return 304;
 	} else if (ifModifiedSince !== '' && entry.lastModifiedMs !== undefined) {
-		const t = Date.parse(ifModifiedSince);
+		const t = ifModifiedSince === entry.lastModified ? entry.lastModifiedMs : parseHttpDate(ifModifiedSince);
 		if (!Number.isNaN(t) && entry.lastModifiedMs <= t) return 304;
 	}
 	return 0;
