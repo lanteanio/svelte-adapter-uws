@@ -36,6 +36,8 @@ export interface ConnectOptions {
 
 	/**
 	 * Maximum number of reconnection attempts before giving up.
+	 * Throttling increases the delay without spending extra attempts.
+	 * Auth preflights and socket opening each have a 15-second timeout.
 	 * @default Infinity
 	 */
 	maxReconnectAttempts?: number;

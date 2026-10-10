@@ -986,6 +986,8 @@ function createConnection(options) {
 	let offlineSimulated = false;
 
 	let attempt = 0;
+	// Delay escalation is independent of the number of actual retries.
+	let backoffAttempt = 0;
 	let intentionallyClosed = false;
 	// Set when the server permanently rejects us (terminal close code) or when
 	// retries are exhausted. Distinct from intentionallyClosed (user-initiated).
@@ -1747,7 +1749,10 @@ function createConnection(options) {
 	function clearReconnect(refundAttempt = false) {
 		if (reconnectTimer !== null) clearTimer(reconnectTimer);
 		reconnectTimer = null;
-		if (refundAttempt && reconnectAttemptReserved && attempt > 0) attempt--;
+		if (refundAttempt && reconnectAttemptReserved && attempt > 0) {
+			attempt--;
+			if (backoffAttempt > 0) backoffAttempt--;
+		}
 		reconnectAttemptReserved = false;
 	}
 
@@ -1811,7 +1816,7 @@ function createConnection(options) {
 						...failureDiagnosticText(result.reason)
 					});
 					if (!currentAttempt(generation)) return;
-					attempt = Math.max(attempt, 5);
+					backoffAttempt = Math.max(backoffAttempt, 5);
 					statusStore.set('disconnected');
 					if (currentAttempt(generation)) scheduleReconnect(undefined, result.retryAfterMs);
 					return;
@@ -1885,7 +1890,7 @@ function createConnection(options) {
 			if (socketAttemptTimer === attemptTimer) socketAttemptTimer = null;
 			if (ws !== sock) return;
 			reconnectAttemptReserved = false;
-			attempt = 0;
+			attempt = backoffAttempt = 0;
 			// A fresh connection supersedes any pending drain advisory from the old
 			// socket - clear it so a stale advisory cannot disperse a future reconnect.
 			reconnectAdvisory = null;
@@ -2341,7 +2346,7 @@ function createConnection(options) {
 			if (advisory && now() < advisory.deadline) {
 				failureStore.set({ kind: 'ws-close', class: 'DRAIN', code, ...failureDiagnosticText(reason) });
 				if (!currentAttempt(generation)) return;
-				attempt = 0;
+				attempt = backoffAttempt = 0;
 				statusStore.set('disconnected');
 				if (currentAttempt(generation)) scheduleReconnect(dispersedReconnectDelay(advisory.afterMs, advisory.windowMs));
 				return;
@@ -2349,7 +2354,7 @@ function createConnection(options) {
 
 			if (cls === 'THROTTLE') {
 				// Jump ahead in the backoff curve to avoid hammering a rate-limited server.
-				attempt = Math.max(attempt, 5);
+				backoffAttempt = Math.max(backoffAttempt, 5);
 				failureStore.set({ kind: 'ws-close', class: 'THROTTLE', code, ...failureDiagnosticText(reason) });
 			} else {
 				failureStore.set({ kind: 'ws-close', class: 'RETRY', code, ...failureDiagnosticText(reason) });
@@ -2390,8 +2395,9 @@ function createConnection(options) {
 			// migrating to a fresh node, not backing off a failure.
 			delay = overrideDelayMs;
 		} else {
-			delay = Math.max(nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt), floorMs || 0);
+			delay = Math.max(nextReconnectDelay(reconnectInterval, maxReconnectInterval, backoffAttempt), floorMs || 0);
 			attempt++;
+			backoffAttempt++;
 			reconnectAttemptReserved = true;
 		}
 		const generation = connectionGeneration;
@@ -2774,7 +2780,7 @@ function createConnection(options) {
 				if (ws?.readyState === WebSocket.OPEN) {
 					if (gapAtHide > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
 						if (debug) console.log('[ws] suspend gap detected at hide, reconnecting');
-						attempt = 0;
+						attempt = backoffAttempt = 0;
 						disconnectSocket();
 						return;
 					}
@@ -2798,7 +2804,7 @@ function createConnection(options) {
 					// survived the sleep, so that case is trusted as-is.
 					if (debug) console.log('[ws] suspend gap detected on resume, reconnecting');
 					hiddenDisconnect = false;
-					attempt = 0;
+					attempt = backoffAttempt = 0;
 					disconnectSocket();
 					return;
 				}
@@ -2809,7 +2815,7 @@ function createConnection(options) {
 			}
 			// Connection did not survive (or was never open) - force a reconnect.
 			hiddenDisconnect = false;
-			attempt = 0;
+			attempt = backoffAttempt = 0;
 			clearReconnect();
 			doConnect();
 		};
@@ -2842,7 +2848,7 @@ function createConnection(options) {
 			if (debug) console.log('[ws] browser reported online, reconnecting now');
 			// Connectivity is back: skip the remaining backoff and reconnect now,
 			// mirroring the tab-visible recovery branch.
-			attempt = 0;
+			attempt = backoffAttempt = 0;
 			clearReconnect();
 			doConnect();
 		};
