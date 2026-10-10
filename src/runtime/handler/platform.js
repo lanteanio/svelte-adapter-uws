@@ -1746,10 +1746,15 @@ export const platform = {
 	 * - the caller decides how to surface the denial to the client (e.g.
 	 * an error reply on the RPC frame).
 	 *
-	 * Idempotent: calling `subscribe(ws, topic)` twice for the same
-	 * `(ws, topic)` returns `null` both times and does not double-charge
-	 * the per-worker `counters.totalSubscriptions` counter or trigger the hook a
-	 * second time. The cap check fires only on the first subscribe.
+	 * Once a subscription is granted, repeating `subscribe(ws, topic)`
+	 * returns `null` without double-charging `counters.totalSubscriptions`
+	 * or triggering the hook again. Only new membership consumes the topic cap.
+	 *
+	 * Membership installed by an awaiting hook is unconfirmed until an
+	 * authorized attempt completes. A call for that held topic must pass
+	 * authorization again and can resolve a denial, including
+	 * `'RATE_LIMITED'`; await and check its result. A successful call records
+	 * a fresh grant that an older revoked attempt cannot remove.
 	 *
 	 * Updates `WS_SUBSCRIPTIONS` and `counters.totalSubscriptions` so observability
 	 * (`platform.subscribers(topic)`, `platform.pressure`, the close-hook

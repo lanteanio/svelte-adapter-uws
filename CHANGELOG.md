@@ -423,6 +423,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Other application headers are preserved. Vite continues to use an application-supplied Date because its HTTP server does not add a second one.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: pending subscription installs no longer authorize access.** Revoked subscribe attempts can no longer use membership installed by their own hooks to bypass authorization or receive recovery history, while server-side calls reauthorize unconfirmed held topics, so transient membership alone no longer proves a completed server grant.
+  - **Affects:** Applications whose subscription hooks install membership before asynchronous authorization finishes, including plugin joins and recovery flows.
+  - **Action:** Await and check every `platform.subscribe` result; a call over unconfirmed held membership can rerun the hook and return a denial.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Confirmed grants remain idempotent, and a legitimate re-grant still permits recovery. Strict gates, and armed gates without a deciding hook, reject unconfirmed ordinary membership; a revoked recover attempt is denied before its history hook runs unless authority has been restored.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -822,8 +829,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `releaseSubscription` in the subscriptions subpath removes failed framework admissions, including derived and publish access, while independently pending authorizations can still complete. Explicit unsubscribe continues to cancel pending attempts.
 
 - Pending hook-installed subscriptions no longer count as completed server grants. Server re-grants authorize the membership before acknowledging it, and wire, observer and resume gates reject unconfirmed membership.
+- Subscription API documentation distinguishes confirmed idempotent grants from held membership installed by an awaiting hook, which requires another authorization decision.
 
 - A revoked subscribe cannot disclose recover history through membership installed by its own hook. Single and batch recover paths retain legitimate server re-grants.
+- Consumer release notes document the revoked-recovery history boundary and the continued recovery behavior after a legitimate server re-grant.
 
 - The test server checks the final subscribe gate before recording a grant, matching production and development when authorization changes during an async hook.
 

@@ -3733,12 +3733,18 @@ export interface Platform {
 	 * string returned from the user's subscribe hook). On denial, no
 	 * subscription is created and internal state is unchanged.
 	 *
-	 * Idempotent: calling twice with the same `(ws, topic)` returns `null`
-	 * both times and does not double-charge counters or trigger the hook
-	 * a second time. Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions`
-	 * so observability stays consistent with client-initiated subscribes.
+	 * Once a subscription is granted, repeating the same `(ws, topic)` call
+	 * returns `null` without double-charging counters or triggering the hook
+	 * again. Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions` so
+	 * observability stays consistent with client-initiated subscribes.
 	 *
-	 * One exception, and it is a revocation rather than a race: if
+	 * Membership installed by an awaiting hook is unconfirmed until an
+	 * authorized attempt completes. A call for that held topic must pass
+	 * authorization again and can resolve a denial, including
+	 * `'RATE_LIMITED'`; await and check its result. A successful call records
+	 * a fresh grant that an older revoked attempt cannot remove.
+	 *
+	 * Revocation is a separate exception to success on a held topic: if
 	 * {@link Platform.unsubscribe} cancels this call while its hook is still
 	 * awaiting, and the topic is nonetheless held afterwards only because that
 	 * cancelled hook installed membership itself (a plugin join), the call

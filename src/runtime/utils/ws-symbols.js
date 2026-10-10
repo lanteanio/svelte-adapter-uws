@@ -111,8 +111,9 @@ export function heldLandingWouldAck(ud, topic, token) {
 }
 
 /**
- * The wire grant gate accepts a completed grant, or the current attempt's
- * plugin-owned join. An ordinary hook install cannot mint a server grant.
+ * The wire grant gate accepts a completed grant, or a plugin-owned topic held
+ * when the current attempt's landing remains valid. Membership does not identify
+ * which attempt installed it. An ordinary hook install cannot mint a server grant.
  * @param {any} ud
  * @param {string} topic
  * @param {number} token
