@@ -645,7 +645,7 @@ describe('the dev plugin over HTTP/2', () => {
 	});
 
 	it('keeps the hook\'s answer when a header value or cookie is one HTTP/1.1 refuses', async () => {
-		for (const [lane, status] of [['value', 200], ['set-cookie', 200], ['implicit-expires', 204]]) {
+		for (const [lane, status] of [['value', 200], ['set-cookie', 200]]) {
 			const res = await h2Exchange(server.h2Port, {
 				':method': 'POST',
 				':path': '/__ws/auth',
@@ -659,6 +659,18 @@ describe('the dev plugin over HTTP/2', () => {
 				expect(res.headers['a-first'], lane).toBe('1');
 			}
 		}
+	});
+
+	it('rejects a cookie whose Expires is not a Date over HTTP/2', async () => {
+		const res = await h2Exchange(server.h2Port, {
+			':method': 'POST',
+			':path': '/__ws/auth',
+			':authority': `127.0.0.1:${server.h2Port}`,
+			'x-requested-with': 'XMLHttpRequest',
+			'x-refused': 'implicit-expires'
+		});
+		expect(res.status).toBe(500);
+		expect(res.headers['set-cookie']).toBeUndefined();
 	});
 
 	it('answers 413 as the body crosses 64 KiB, before the client has sent it all', async () => {
