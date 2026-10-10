@@ -99,7 +99,7 @@ export async function bootViteDev({ pluginOptions = {}, handler = {}, ready, h2 
 			await new Promise((resolve) => h2Server.listen(0, '127.0.0.1', () => resolve(undefined)));
 			h2Port = /** @type {import('node:net').AddressInfo} */ (h2Server.address()).port;
 		}
-		return { port, h2Port, close };
+		return { port, h2Port, httpServer, close };
 	} catch (err) {
 		await close();
 		throw err;

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Existing callers can ignore the return value; serialization and transport exceptions still propagate, and `true` confirms local admission only.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
+  - **Affects:** Applications using the Vite WebSocket plugin, including `server.https`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
   - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
   - **Action:** None. Update the adapter client with the server package.
@@ -678,6 +685,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport exceptions propagate. Late callbacks cannot overwrite a replacement
   connection's state or subscription retries.
 
+
+- **Vite upgrade lifetime.** The real HTTP upgrade listener routes by the raw
+  target, refuses malformed targets and path aliases with 400, and owns socket
+  errors before awaiting handler loading or the application hook. Disconnects
+  stop admission after either await; the event callback contains other failures
+  to that socket. Raw TCP and TLS tests verify refusals followed by successful
+  upgrades, and TCP resets during both asynchronous waits leave the server serving.
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup

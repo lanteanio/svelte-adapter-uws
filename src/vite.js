@@ -2760,154 +2760,160 @@ export default function uws(options = {}) {
 			}
 
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
-				const { pathname } = new URL(req.url || '', 'http://localhost');
-				if (pathname !== wsPath) return;
-				// Mirror production: a handshake no one could complete is refused
-				// before anything else looks at it. Read from `rawHeaders`, which
-				// keeps the repeated lines `headers` joins. The target is part of the
-				// handshake: node's parser has already refused one with raw bytes,
-				// but hands a `#` on, and the URL parse above reads `/ws#x` and
-				// `/x/../ws` as the path. Production routes on the raw spelling, so
-				// it upgrades neither.
-				const target = req.url || '';
-				const queryAt = target.indexOf('?');
-				const rawPath = queryAt === -1 ? target : target.slice(0, queryAt);
-				const handshakeRefusal = invalidRequestTarget(target, undefined) || rawPath !== wsPath
-					? 400
-					: webSocketHandshakeRefusal(readRawHandshake(req.rawHeaders));
-				if (handshakeRefusal !== null) {
-					socket.end(handshakeRefusal === 400
-						? 'HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request'
-						: 'HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: ' + WEBSOCKET_VERSION +
-							'\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nUpgrade Required');
-					return;
-				}
-				// The missing-Origin branch delegates trust to an app upgrade hook.
-				// Resolve the handler before reading that authority: configureServer
-				// starts module loading without awaiting it, so an upgrade arriving in
-				// that window used to observe an empty userHandlers object and get 403,
-				// even though the same request is accepted once the hook has loaded (and
-				// by production, whose handler is static before it begins listening).
-				await handlerReady;
-
-				// Mirror production: enforce allowedOrigins on the dev WSS
-				// upgrade. The dev plugin runs on a localhost port that is
-				// reachable from any other process on the machine - a hostile
-				// page in another browser tab can connect just like it can to
-				// the production endpoint, so we apply the same gate. Apps
-				// that need to accept dev connections from arbitrary origins
-				// can set `allowedOrigins: '*'` or pass `devSkipOriginCheck:
-				// true` to the plugin.
-				if (!options.devSkipOriginCheck) {
-					/** @type {Record<string, string>} */
-					const upgHeaders = {};
-					for (const [k, v] of Object.entries(req.headers)) {
-						if (typeof v === 'string') upgHeaders[k] = v;
-						else if (Array.isArray(v)) upgHeaders[k] = v.join(', ');
+				// Node releases its socket error listener before an upgrade await.
+				socket.on('error', () => socket.destroy());
+				try {
+					const target = req.url || '';
+					const rawPath = targetPath(target);
+					let refusedTarget = invalidRequestTarget(target, undefined) || target[0] !== '/';
+					if (!refusedTarget && rawPath !== wsPath) {
+						// Route by the raw spelling. Keep refusing aliases that only
+						// resolve onto our path; other upgrade routes remain their owner's.
+						try {
+							if (new URL(target, 'http://localhost').pathname !== wsPath) return;
+						} catch { /* an unparseable target receives the same 400 */ }
+						refusedTarget = true;
 					}
-					if (!isOriginAllowed(upgHeaders['origin'], upgHeaders, {
-						allowedOrigins: ALLOWED_ORIGINS_V,
-						// See the auth-path check above: production honours ORIGIN as
-						// the authoritative host pin, and dev must not be looser.
-						pinnedOrigin: PINNED_ORIGIN_V,
-						isTls: !!req.socket?.encrypted,
-						hasUpgradeHook: !!userHandlers.upgrade
-					})) {
-						socket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nOrigin not allowed');
-						socket.destroy();
+					const handshakeRefusal = refusedTarget ? 400 : webSocketHandshakeRefusal(readRawHandshake(req.rawHeaders));
+					if (handshakeRefusal !== null) {
+						socket.end(handshakeRefusal === 400
+							? 'HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request'
+							: 'HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: ' + WEBSOCKET_VERSION +
+								'\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nUpgrade Required');
 						return;
 					}
-				}
+					// The missing-Origin branch delegates trust to an app upgrade hook.
+					// Resolve the handler before reading that authority: configureServer
+					// starts module loading without awaiting it, so an upgrade arriving in
+					// that window used to observe an empty userHandlers object and get 403,
+					// even though the same request is accepted once the hook has loaded (and
+					// by production, whose handler is static before it begins listening).
+					await handlerReady;
+					if (socket.destroyed) return;
 
-				// If user has an upgrade handler, run it for auth
-				let userData = {};
-				// If the handler file exists but failed to load, reject the
-				// upgrade so a broken auth handler does not silently degrade
-				// to open access.
-				if (handlerFailed) {
-					socket.write(
-						'HTTP/1.1 500 Internal Server Error\r\n' +
-						'Content-Type: text/plain\r\n\r\n' +
-						'WebSocket handler failed to load - check the server console'
-					);
-					socket.destroy();
-					return;
-				}
-
-				/** @type {Record<string, string>} */
-				const upgradeHeaders = {};
-				for (const [key, value] of Object.entries(req.headers)) {
-					if (typeof value === 'string') upgradeHeaders[key] = value;
-					else if (Array.isArray(value)) upgradeHeaders[key] = value.join(', ');
-				}
-				const wsRequestId = resolveRequestId(upgradeHeaders['x-request-id']) || randomUUID();
-
-				if (userHandlers.upgrade) {
-					try {
-						const result = await Promise.resolve(
-							userHandlers.upgrade({
-								headers: upgradeHeaders,
-								cookies: parseCookies(upgradeHeaders['cookie']),
-								url: req.url || pathname,
-								remoteAddress: req.socket?.remoteAddress || '',
-								requestId: wsRequestId
-							})
-						);
-						if (result === false) {
-							socket.write('HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nUnauthorized');
+					// Mirror production: enforce allowedOrigins on the dev WSS
+					// upgrade. The dev plugin runs on a localhost port that is
+					// reachable from any other process on the machine - a hostile
+					// page in another browser tab can connect just like it can to
+					// the production endpoint, so we apply the same gate. Apps
+					// that need to accept dev connections from arbitrary origins
+					// can set `allowedOrigins: '*'` or pass `devSkipOriginCheck:
+					// true` to the plugin.
+					if (!options.devSkipOriginCheck) {
+						/** @type {Record<string, string>} */
+						const upgHeaders = {};
+						for (const [k, v] of Object.entries(req.headers)) {
+							if (typeof v === 'string') upgHeaders[k] = v;
+							else if (Array.isArray(v)) upgHeaders[k] = v.join(', ');
+						}
+						if (!isOriginAllowed(upgHeaders['origin'], upgHeaders, {
+							allowedOrigins: ALLOWED_ORIGINS_V,
+							// See the auth-path check above: production honours ORIGIN as
+							// the authoritative host pin, and dev must not be looser.
+							pinnedOrigin: PINNED_ORIGIN_V,
+							isTls: !!req.socket?.encrypted,
+							hasUpgradeHook: !!userHandlers.upgrade
+						})) {
+							socket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nOrigin not allowed');
 							socket.destroy();
 							return;
 						}
-						if (result && result.__upgradeResponse === true) {
-							userData = result.userData || {};
-							// Validated exactly as production validates it, so a malformed
-							// header name or value throws here rather than reaching the
-							// handshake - an app cannot verify a broken upgrade in dev and
-							// fail only in production. The snapshot is what gets written, so
-							// what was checked is what goes out.
-							const responseHeaders = snapshotUpgradeHeaders(result.headers);
-							if (responseHeaders && Object.keys(responseHeaders).length > 0) {
-								// The same advisory production gives, from the same shared
-								// helper and once per process, so the dev warning cannot
-								// drift from the production one.
-								warnSetCookieOnUpgradeOnce(responseHeaders);
-								pendingUpgradeHeaders.set(req, responseHeaders);
-							}
-						} else {
-							userData = result || {};
-						}
-					} catch (err) {
-						emitOperationalEvent({
-							source: 'svelte-adapter-uws',
-							component: 'runtime.websocket-upgrade',
-							event: 'runtime.websocket-upgrade.failed',
-							severity: 'error',
-							dataClass: 'pseudonymous',
-							message: 'The WebSocket upgrade hook failed.',
-							attributes: { requestId: wsRequestId, error: diagnosticError(err) }
-						});
+					}
+
+					// If user has an upgrade handler, run it for auth
+					let userData = {};
+					// If the handler file exists but failed to load, reject the
+					// upgrade so a broken auth handler does not silently degrade
+					// to open access.
+					if (handlerFailed) {
 						socket.write(
-							'HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n' +
-							(wsRequestId ? 'X-Request-ID: ' + wsRequestId + '\r\n' : '') +
-							'\r\nInternal Server Error'
+							'HTTP/1.1 500 Internal Server Error\r\n' +
+							'Content-Type: text/plain\r\n\r\n' +
+							'WebSocket handler failed to load - check the server console'
 						);
 						socket.destroy();
 						return;
 					}
-				}
 
-				wss.handleUpgrade(req, socket, head, (ws) => {
-					// Ensure remoteAddress is always present in userData, matching
-					// what the production handler injects. Plugins like ratelimit
-					// depend on ws.getUserData().remoteAddress for per-IP keying.
-					const remoteAddress = /** @type {any} */ (userData).remoteAddress
-						|| req.socket?.remoteAddress
-						|| '';
-					const merged = { remoteAddress, .../** @type {any} */ (userData) };
-					merged[CARRY_REQUEST_ID] = wsRequestId;
-					/** @type {any} */ (ws).__userData = merged;
-					wss.emit('connection', ws, req);
-				});
+					/** @type {Record<string, string>} */
+					const upgradeHeaders = {};
+					for (const [key, value] of Object.entries(req.headers)) {
+						if (typeof value === 'string') upgradeHeaders[key] = value;
+						else if (Array.isArray(value)) upgradeHeaders[key] = value.join(', ');
+					}
+					const wsRequestId = resolveRequestId(upgradeHeaders['x-request-id']) || randomUUID();
+
+					if (userHandlers.upgrade) {
+						try {
+							const result = await Promise.resolve(
+								userHandlers.upgrade({
+									headers: upgradeHeaders,
+									cookies: parseCookies(upgradeHeaders['cookie']),
+									url: target,
+									remoteAddress: req.socket?.remoteAddress || '',
+									requestId: wsRequestId
+								})
+							);
+							if (socket.destroyed) return;
+							if (result === false) {
+								socket.write('HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nUnauthorized');
+								socket.destroy();
+								return;
+							}
+							if (result && result.__upgradeResponse === true) {
+								userData = result.userData || {};
+								// Validated exactly as production validates it, so a malformed
+								// header name or value throws here rather than reaching the
+								// handshake - an app cannot verify a broken upgrade in dev and
+								// fail only in production. The snapshot is what gets written, so
+								// what was checked is what goes out.
+								const responseHeaders = snapshotUpgradeHeaders(result.headers);
+								if (responseHeaders && Object.keys(responseHeaders).length > 0) {
+									// The same advisory production gives, from the same shared
+									// helper and once per process, so the dev warning cannot
+									// drift from the production one.
+									warnSetCookieOnUpgradeOnce(responseHeaders);
+									pendingUpgradeHeaders.set(req, responseHeaders);
+								}
+							} else {
+								userData = result || {};
+							}
+						} catch (err) {
+							emitOperationalEvent({
+								source: 'svelte-adapter-uws',
+								component: 'runtime.websocket-upgrade',
+								event: 'runtime.websocket-upgrade.failed',
+								severity: 'error',
+								dataClass: 'pseudonymous',
+								message: 'The WebSocket upgrade hook failed.',
+								attributes: { requestId: wsRequestId, error: diagnosticError(err) }
+							});
+							socket.write(
+								'HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n' +
+								(wsRequestId ? 'X-Request-ID: ' + wsRequestId + '\r\n' : '') +
+								'\r\nInternal Server Error'
+							);
+							socket.destroy();
+							return;
+						}
+					}
+
+					wss.handleUpgrade(req, socket, head, (ws) => {
+						// Ensure remoteAddress is always present in userData, matching
+						// what the production handler injects. Plugins like ratelimit
+						// depend on ws.getUserData().remoteAddress for per-IP keying.
+						const remoteAddress = /** @type {any} */ (userData).remoteAddress
+							|| req.socket?.remoteAddress
+							|| '';
+						const merged = { remoteAddress, .../** @type {any} */ (userData) };
+						merged[CARRY_REQUEST_ID] = wsRequestId;
+						/** @type {any} */ (ws).__userData = merged;
+						wss.emit('connection', ws, req);
+					});
+				} catch {
+					// No rejection may escape the HTTP server's event callback.
+					socket.destroy();
+				}
 			});
 
 			wss.on('connection', (ws) => {
