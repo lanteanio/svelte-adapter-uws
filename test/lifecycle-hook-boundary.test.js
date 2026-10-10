@@ -130,9 +130,9 @@ const SURFACES = [
 ];
 
 describe.each(SURFACES)('lifecycle hook boundary on $label', ({ boot }) => {
-	for (const lane of ['throws', 'rejects']) {
-		it(`an open hook that ${lane} closes that connection 1011 and the next one is served`, async () => {
-			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	for (const [lane, loggerThrows] of ['throws', 'rejects'].flatMap(lane => [false, true].map(loggerThrows => [lane, loggerThrows]))) {
+		it(`an open hook that ${lane} closes that connection 1011 and the next one is served (logger throws: ${loggerThrows})`, async () => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 			const mode = { open: lane, close: null };
 			const seen = {};
 			const url = await boot(lifecycleHandler(mode, seen));
@@ -148,8 +148,8 @@ describe.each(SURFACES)('lifecycle hook boundary on $label', ({ boot }) => {
 			await servesNewConnection(url, mode);
 		});
 
-		it(`a close hook that ${lane} is logged, the connection is released, and the next one is served`, async () => {
-			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		it(`a close hook that ${lane} is logged, the connection is released, and the next one is served (logger throws: ${loggerThrows})`, async () => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 			const mode = { open: null, close: lane };
 			const seen = {};
 			const url = await boot(lifecycleHandler(mode, seen));

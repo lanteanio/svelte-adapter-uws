@@ -16,7 +16,7 @@
 // bound application publishes and never see an ack; and `maxBackpressure` bounds
 // the queue in MEMORY, which is why this is a CPU and bandwidth problem.
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
 import { createByteBudget, controlFrameBytes } from '../src/runtime/utils/byte-budget.js';
@@ -27,6 +27,8 @@ import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
 import { expectStatement, expectStatementBlock } from './helpers/source-pins.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
+
+afterEach(() => vi.restoreAllMocks());
 
 // Spelled out rather than imported from the module under test. These two are
 // the documented contract - the budget an operator reads and the close code the
@@ -100,7 +102,9 @@ describeUWS('the control-egress budget against the real runtime', () => {
 		if (server) await server.stop();
 	});
 
-	it('cuts a connection that drives the amplifier past its window', async () => {
+	it.each([false, true])('cuts a connection past its window (logger throws: %s)', async (loggerThrows) => {
+		const warning = loggerThrows ? vi.spyOn(console, 'warn').mockImplementation(() => { throw new Error('warning logger unavailable'); }) : null;
+		const error = loggerThrows ? vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('error logger unavailable'); }) : null;
 		const { ws, state } = await connect(server.wsUrl);
 
 		// A twelvefold legal shape, built to sit just under the 8 KiB control-frame
@@ -143,6 +147,13 @@ describeUWS('the control-egress budget against the real runtime', () => {
 		expect(state.last.join(' ')).not.toContain('CONTROL_EGRESS_EXHAUSTED');
 		expect(state.bytes, 'the cut must land near the budget, not far past it')
 			.toBeLessThan(MAX_CONTROL_EGRESS_BYTES * 2);
+		if (loggerThrows) {
+			expect(warning.mock.calls.some(call => String(call[0]).includes('control-egress.exhausted'))).toBe(true);
+			expect(error).toHaveBeenCalled();
+		}
+		const fresh = await connect(server.wsUrl);
+		expect(fresh.ws.readyState).toBe(WebSocket.OPEN);
+		fresh.ws.close();
 	}, 60000);
 
 	it('leaves a full legitimate resubscribe alone', async () => {

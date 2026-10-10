@@ -80,6 +80,10 @@ export function message(ws, { data, platform }) {
 	} catch {
 		return;
 	}
+	if (msg?.type === 'message-hook-failure' && process.env.HOOK_CRASH_DRILL_TOKEN && msg.token === process.env.HOOK_CRASH_DRILL_TOKEN) {
+		if (msg.mode === 'throws') throw new Error('__MESSAGE_HOOK_THROWS__');
+		if (msg.mode === 'rejects') return Promise.reject(new Error('__MESSAGE_HOOK_REJECTS__'));
+	}
 	if (
 		msg?.type !== 'sendto-async-drill' ||
 		!process.env.HOOK_CRASH_DRILL_TOKEN ||

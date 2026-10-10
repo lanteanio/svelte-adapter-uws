@@ -55,10 +55,10 @@ const CASES = [
 ];
 
 describe('message-hook exception containment', () => {
-	for (const testCase of CASES) {
-		it(`contains ${testCase.name} to the offending connection`, async () => {
+	for (const [testCase, loggerThrows] of CASES.flatMap(testCase => [false, true].map(loggerThrows => [testCase, loggerThrows]))) {
+		it(`contains ${testCase.name} to the offending connection (logger throws: ${loggerThrows})`, async () => {
 			const { createTestServer } = await import('../src/testing.js');
-			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 			server = await createTestServer({
 				handler: { message: testCase.message }
 			});
@@ -75,6 +75,11 @@ describe('message-hook exception containment', () => {
 				reason: 'Message handler error'
 			});
 			expect(peer.readyState, 'an unrelated connection must remain open').toBe(peer.OPEN);
+			const replies = [];
+			peer.on('message', data => replies.push(JSON.parse(data.toString())));
+			peer.send(JSON.stringify({ type: 'subscribe', topic: 'healthy', ref: 7 }));
+			await vi.waitFor(() => expect(replies.some(message => message.type === 'subscribed' && message.ref === 7)).toBe(true));
+			expect((await connect(server.wsUrl)).readyState).toBe(peer.OPEN);
 			expect(
 				error.mock.calls.some((call) => String(call[0]).includes('message hook threw')),
 				'the server log must retain the actual hook failure'

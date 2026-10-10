@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. Return types, values, and truthiness stay unchanged; no asynchronous receipt API is introduced.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: a failed logger no longer lets a WebSocket hook failure escape.** When an app or APM replaced `console.error` with a throwing function, the hook boundary could stop before closing the failing connection or completing close cleanup, so logging failures are now contained while normal hook failure handling continues.
+  - **Affects:** Applications with custom logging around failing WebSocket message, open, drain or close hooks.
+  - **Action:** None; repair the custom logger to restore error output.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Hook failures keep their existing 1011 close codes and reasons. A failed close hook still allows connection cleanup, even when logging also fails. Healthy hooks are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
@@ -698,6 +705,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GET and HEAD requests cover identity, brotli and gzip, conditional metadata,
   unchanged normal responses, precedence and missing date validators.
 
+
+- **Hook containment survives a throwing console logger.** The message and
+  lifecycle failure paths guard their diagnostic calls independently of closing
+  the connection. Real built-runtime, test-server and dev-server regressions
+  exercise synchronous throws and rejected hooks with a failing logger; the
+  built drain case uses actual socket backpressure. A real control flood also
+  verifies the existing protected diagnostic path still closes with 4429 when
+  both warning and error logging throw.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

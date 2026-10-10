@@ -222,9 +222,28 @@ describeUWS('the hook-failure entries against the built runtime', () => {
 		}
 	}
 
-	for (const [lane, cause] of [['open-throws', '__OPEN_HOOK_CRASH__'], ['open-rejects', '__OPEN_HOOK_REJECT__']]) {
-		it(`OPEN-HOOK (${lane}): that connection closes 1011, the worker keeps serving`, async () => {
-			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	for (const mode of ['throws', 'rejects']) {
+		it.each([false, true])(`MESSAGE-HOOK (${mode}, logger throws: %s): closes only the failing connection`, async (loggerThrows) => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
+			const bystander = await connectRealClient(server.wsUrl);
+			const offender = await connectRealClient(server.wsUrl);
+			try {
+				const closed = new Promise(resolve => offender.ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
+				offender.send({ type: 'message-hook-failure', token, mode });
+				expect(await within(closed, 3000)).toEqual({ code: 1011, reason: 'Message handler error' });
+				const line = await consoleLine(error, 'ADAPTER-ERR-MESSAGE-HOOK');
+				expect(line?.[1]?.message).toBe('__MESSAGE_HOOK_' + mode.toUpperCase() + '__');
+				await workerStillServes(bystander, 14);
+			} finally {
+				offender.close();
+				bystander.close();
+			}
+		});
+	}
+
+	for (const [lane, cause, loggerThrows] of [['open-throws', '__OPEN_HOOK_CRASH__'], ['open-rejects', '__OPEN_HOOK_REJECT__']].flatMap(([lane, cause]) => [false, true].map(loggerThrows => [lane, cause, loggerThrows]))) {
+		it(`OPEN-HOOK (${lane}, logger throws: ${loggerThrows}): that connection closes 1011, the worker keeps serving`, async () => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 			// The entry says the close hook runs for the failed connection as for
 			// any other close; the fixture's close hook reports its lane here.
 			const closedLanes = [];
@@ -251,8 +270,8 @@ describeUWS('the hook-failure entries against the built runtime', () => {
 		});
 	}
 
-	it('DRAIN-HOOK: that connection closes 1011 after its queued bytes, the worker keeps serving', async () => {
-		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	it.each([false, true])('DRAIN-HOOK (logger throws: %s): closes 1011 after queued bytes, the worker keeps serving', async (loggerThrows) => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 		const bystander = await connectRealClient(server.wsUrl);
 		try {
 			const client = await laneClient('drain-throws', { stall: true });
@@ -272,9 +291,9 @@ describeUWS('the hook-failure entries against the built runtime', () => {
 		}
 	}, 30000);
 
-	for (const [lane, cause] of [['close-throws', '__CLOSE_HOOK_CRASH__'], ['close-rejects', '__CLOSE_HOOK_REJECT__']]) {
-		it(`CLOSE-HOOK (${lane}): only the line, and the worker keeps serving`, async () => {
-			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	for (const [lane, cause, loggerThrows] of [['close-throws', '__CLOSE_HOOK_CRASH__'], ['close-rejects', '__CLOSE_HOOK_REJECT__']].flatMap(([lane, cause]) => [false, true].map(loggerThrows => [lane, cause, loggerThrows]))) {
+		it(`CLOSE-HOOK (${lane}, logger throws: ${loggerThrows}): only the line, and the worker keeps serving`, async () => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => { if (loggerThrows) throw new Error('logger unavailable'); });
 			const bystander = await connectRealClient(server.wsUrl);
 			try {
 				const client = await laneClient(lane);

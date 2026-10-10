@@ -6,8 +6,9 @@ async function invokeMessageHook(hook, ws, context, span) {
 		await hook(ws, context);
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
-		// Preserve the cause server-side without exposing it to the client.
-		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.MESSAGE_HOOK), err);
+		// Logging must not prevent the close when a host replaces console.error.
+		try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.MESSAGE_HOOK), err); }
+		catch { /* logger unavailable */ }
 		try {
 			if (typeof ws.end === 'function') ws.end(1011, 'Message handler error');
 			else if (typeof ws.close === 'function') ws.close(1011, 'Message handler error');
@@ -57,7 +58,7 @@ function reportCloseHook(err) {
 }
 
 function lifecycleHookFailed(ws, report, closeReason, err) {
-	report(err);
+	try { report(err); } catch { /* logger unavailable; still close the connection */ }
 	if (closeReason === null) return;
 	try {
 		ws.end(1011, closeReason);
