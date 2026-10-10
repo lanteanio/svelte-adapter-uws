@@ -346,6 +346,12 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	reusedata: {
+		out: 'build-reuse-data',
+		handler: './src/hooks.ws.reuse-data.js',
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
+	},
+
 	// Handshake header injection: the handler echoes a client-supplied value
 	// into a response header on the 101, using the duck-typed shape that skips
 	// the helper's construction-time validation, so the runtime's own pre-write
