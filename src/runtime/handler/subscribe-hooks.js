@@ -4,7 +4,6 @@ import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook,
 import { counters } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { sendControl } from './control-egress.js';
-import { envelopePrefix } from './envelope-cache.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
@@ -257,17 +256,19 @@ export function flushCoalescedFor(ws, callerEntry) {
 		if (aborted) return 2;
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
-		let body;
+		let payload;
 		let failure;
-		try { body = JSON.stringify(msg.data ?? null); }
+		try {
+			const body = JSON.stringify(msg.data ?? null);
+			if (typeof body === 'string') payload = msg.prefix + body + '}';
+		}
 		catch (err) { failure = err; }
-		if (typeof body !== 'string') {
+		if (payload === undefined) {
 			const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 			if (msg === callerEntry) callerError = err;
 			else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
 			return 1;
 		}
-		const payload = envelopePrefix(msg.topic, msg.event) + body + '}';
 		let result;
 		try { result = ws.send(payload, false, false); }
 		catch {

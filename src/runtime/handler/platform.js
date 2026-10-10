@@ -1334,6 +1334,7 @@ export const platform = {
 		let userData;
 		try { userData = ws.getUserData(); }
 		catch { counters.closedWsAborts++; return; }
+		const prefix = envelopePrefix(topic, event);
 		let pending = userData[WS_COALESCED];
 		if (!pending) {
 			pending = new Map();
@@ -1350,7 +1351,7 @@ export const platform = {
 			const oldest = pending.keys().next().value;
 			if (oldest !== undefined) pending.delete(oldest);
 		}
-		const entry = { topic, event, data };
+		const entry = { topic, event, data, prefix };
 		pending.set(key, entry);
 		flushCoalescedFor(ws, entry);
 	},

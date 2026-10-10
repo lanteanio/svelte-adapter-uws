@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
-import { coalescedBadValue } from './fixture/src/coalesced-probe.js';
+import { coalescedBadValue, coalescedNameProbe } from './fixture/src/coalesced-probe.js';
 
 let teardown = [];
 
@@ -30,6 +30,7 @@ function probeHandler(seen) {
 	return {
 		message(ws, { data, platform }) {
 			const msg = JSON.parse(Buffer.from(data).toString());
+			if (msg.type === 'coalesce-name-probe') { coalescedNameProbe(ws, platform, msg); return; }
 			if (msg.type === 'coalesce-probe') {
 				const chunk = new Uint8Array(1024 * 1024);
 				for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
@@ -101,6 +102,22 @@ const SURFACES = [
 ];
 
 describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
+	it.each(['topic', 'event'].flatMap((field) => ['quote"', 'slash\\', 'control\n'].flatMap((name) => [false, true].map((stall) => ({ field, name, stall })))))('rejects $field with $name before queueing, stalled=$stall', async ({ field, name, stall }) => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const { url } = await boot();
+		const c = await client(url, { stall });
+		c.ws.send(JSON.stringify({ type: 'coalesce-name-probe', field, name, stall }));
+		if (stall) { await new Promise((r) => setTimeout(r, 300)); c.resume(); }
+		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesced-name-report"')))).toBe(true);
+		const frames = c.state.frames.map((f) => JSON.parse(f));
+		expect(frames.find((f) => f.event === 'coalesced-name-report').data.threw).toBe(true);
+		expect(frames.filter((f) => f.event === 'coalesced-keep').map((f) => f.data)).toEqual(['original']);
+		if (stall) expect(c.state.binaryBytes).toBeGreaterThan(1024 * 1024);
+		expect(error.mock.calls.some((call) => String(call[0]).includes('COALESCED-UNSERIALIZABLE'))).toBe(false);
+		c.ws.send(JSON.stringify({ type: 'echo', payload: { after: true } }));
+		expect(await until(() => c.state.frames.some((f) => f.includes('"after":true')))).toBe(true);
+	}, 30000);
+
 	it('continues draining when the error reporter throws', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('reporter failed'); });
 		const { url } = await boot();

@@ -2029,7 +2029,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Coalesced serialization keeps a caught value in a separate local,
 	// classifies errors without traps, and contains reporter failures.
 	// No serialization, payload allocation, or byte-copy boundary changes.
-	platform: '6f68fff4542690a57396abb63d55739bc1590d4e29d66f09486e3534e1c3af2d',
+	// Coalesced sends build their existing string prefix before queueing and
+	// retain it on the entry. Flush joins the same strings inside its catch.
+	// No byte-copy producer or binary payload boundary changes.
+	platform: 'e3ae56334fbae7d0276df5d579f58dd9659ab86ff93f6ace27433118070da4c7',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

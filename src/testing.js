@@ -735,17 +735,20 @@ export async function createTestServer(options = {}) {
 		if (!pending || pending.size === 0) return;
 		let callerError = null;
 		drainCoalesced(pending, (msg) => {
-			let body;
+			let payload;
 			let failure;
-			try { body = JSON.stringify(msg.data ?? null); }
+			try {
+				const body = JSON.stringify(msg.data ?? null);
+				if (typeof body === 'string') payload = msg.prefix + body + '}';
+			}
 			catch (err) { failure = err; }
-			if (typeof body !== 'string') {
+			if (payload === undefined) {
 				const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 				if (msg === callerEntry) callerError = err;
 				else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
 				return 1;
 			}
-			return sendOutboundT(ws, '{"topic":' + esc(msg.topic) + ',"event":' + esc(msg.event) + ',"data":' + body + '}');
+			return sendOutboundT(ws, payload);
 		});
 		if (callerError !== null) throw callerError;
 	}
@@ -1736,6 +1739,7 @@ export async function createTestServer(options = {}) {
 			let userData;
 			try { userData = ws.getUserData(); }
 			catch { closedWsAbortsT++; return; }
+			const prefix = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":';
 			let pending = userData[WS_COALESCED];
 			if (!pending) {
 				pending = new Map();
@@ -1745,7 +1749,7 @@ export async function createTestServer(options = {}) {
 				const oldest = pending.keys().next().value;
 				if (oldest !== undefined) pending.delete(oldest);
 			}
-			const entry = { topic, event, data };
+			const entry = { topic, event, data, prefix };
 			pending.set(key, entry);
 			flushCoalescedForT(ws, entry);
 		},

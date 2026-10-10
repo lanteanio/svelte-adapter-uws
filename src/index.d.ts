@@ -3353,6 +3353,9 @@ export interface Platform {
 	 * overwrites the same `key` 1000 times before a single drain pays one
 	 * `JSON.stringify`, not 1000.
 	 *
+	 * Topic and event names containing quotes, backslashes or control
+	 * characters throw before queueing, leaving any pending value unchanged.
+	 *
 	 * The flush attempts immediately and again on every uWS drain event.
 	 * On backpressure or drop from the underlying socket, pumping stops
 	 * and resumes when the connection drains. A value JSON cannot carry

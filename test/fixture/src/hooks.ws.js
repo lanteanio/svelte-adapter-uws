@@ -1,7 +1,7 @@
 import { threadId, workerData as threadWorkerData } from 'node:worker_threads';
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 import { trackedSubscribe, trackedUnsubscribe } from 'svelte-adapter-uws/subscriptions';
-import { coalescedBadValue } from './coalesced-probe.js';
+import { coalescedBadValue, coalescedNameProbe } from './coalesced-probe.js';
 
 const cursors = createCursor({
 	throttle: 0,
@@ -200,6 +200,7 @@ export function message(ws, ctx) {
 		platform.send(ws, 'probe', 'membership-done', { nonce: msg.nonce });
 		return;
 	}
+	if (msg.type === 'coalesce-name-probe') { coalescedNameProbe(ws, platform, msg); return; }
 	if (msg.type === 'coalesce-probe') {
 		// The client has stopped reading: back the socket up past the 1 MB
 		// maxBackpressure so sendCoalesced holds its values, then queue one JSON

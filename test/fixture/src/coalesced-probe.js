@@ -15,3 +15,16 @@ export function coalescedBadValue(kind) {
 		}
 	};
 }
+
+export function coalescedNameProbe(ws, platform, msg) {
+	if (msg.stall) {
+		const chunk = new Uint8Array(1024 * 1024);
+		for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
+	}
+	platform.sendCoalesced(ws, { key: 'keep', topic: 'probe', event: 'coalesced-keep', data: 'original' });
+	let threw = false;
+	try {
+		platform.sendCoalesced(ws, { key: 'keep', topic: 'probe', event: 'invalid', data: 'replacement', [msg.field]: msg.name });
+	} catch { threw = true; }
+	platform.sendCoalesced(ws, { key: 'report', topic: 'probe', event: 'coalesced-name-report', data: { threw, buffered: ws.getBufferedAmount() } });
+}
