@@ -666,7 +666,9 @@ describe('documentation map', () => {
 			'<body onload="document.documentElement.hidden=true">'
 		]) {
 			expect(README_HTML + markdown.render(fragment)).toBe(markdown.render(normalizeSource(README) + '\n\n' + fragment));
-			expect(appendedInterferenceFailures(fragment)).toEqual(ownershipFailures(README + '\n\n' + fragment));
+			expect(appendedInterferenceFailures(fragment)).toEqual(
+				interferenceFailures(strictRenderedShapes(normalizeSource(README) + '\n\n' + fragment))
+			);
 		}
 	}, 10_000);
 
