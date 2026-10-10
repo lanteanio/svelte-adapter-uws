@@ -8,7 +8,7 @@ import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
-import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal } from './runtime/handler/http-helpers.js';
+import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal, assertResponseStatus } from './runtime/handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './runtime/utils/ws-handshake.js';
 import { invalidRequestTarget, invalidHost } from './runtime/utils/request-target.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
@@ -3962,6 +3962,7 @@ export async function createTestServer(options = {}) {
 					.then((response) => {
 						if (adminAborted) return;
 						if (!(response instanceof Response)) { failAdmin(500); return; }
+						assertResponseStatus(response.status);
 						writeAdmin(response);
 					})
 					.catch(() => failAdmin(500));

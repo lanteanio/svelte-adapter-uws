@@ -1,5 +1,5 @@
 import { origin, get_origin, body_size_limit, ADMIN_PATH } from './config.js';
-import { METHODS, FORBIDDEN_METHODS, send405, endBodyless } from './http-helpers.js';
+import { METHODS, FORBIDDEN_METHODS, send405, endBodyless, assertResponseStatus } from './http-helpers.js';
 import { readBody } from './ssr.js';
 import { openRequestSignal, closeRequestSignal } from './state-pool.js';
 import { collectRequestHeaders, isFramingHeader } from '../utils/request-headers.js';
@@ -16,6 +16,7 @@ function runAdminHandler(request, res, state, span, headOnly) {
 				sendAdminError(res, 500, 'internal error', headOnly);
 				return;
 			}
+			assertResponseStatus(response.status);
 			return writeAdminResponse(res, response, state, headOnly);
 		})
 		.catch((err) => {
