@@ -101,6 +101,8 @@ export function onReplay(topic, options) {
 
 	function startListening() {
 		cancelled = false;
+		let replayPending = false;
+		let truncated = false;
 		const liveStore = on(topic);
 		const replayStore = on(TOPIC_PREFIX + topic);
 
@@ -112,7 +114,7 @@ export function onReplay(topic, options) {
 
 		// Subscribe to the replay topic for missed messages + end marker
 		replayUnsub = replayStore.subscribe((event) => {
-			if (event === null) return;
+			if (event === null || !replayPending || replayDone) return;
 
 			// If the server embedded a reqId, ignore responses for other requests.
 			// Servers that don't embed reqId (old deployments) omit the field and
@@ -120,10 +122,19 @@ export function onReplay(topic, options) {
 			const d = /** @type {any} */ (event.data);
 			if (d != null && 'reqId' in d && d.reqId !== reqId) return;
 
+			if (event.event === 'truncated') {
+				if (!truncated) {
+					truncated = true;
+					output.set({ topic, event: 'truncated', data: null });
+				}
+				return;
+			}
+
 			if (event.event === 'end') {
 				// If the server's buffer was overwritten before we connected, signal
 				// truncation so the app can show a warning or reload all data.
-				if (d != null && d.truncated) {
+				if (d != null && d.truncated && !truncated) {
+					truncated = true;
 					output.set({ topic, event: 'truncated', data: null });
 				}
 				replayDone = true;
@@ -150,7 +161,10 @@ export function onReplay(topic, options) {
 		// before open, ready() rejects - swallow the error so it does not become
 		// an unhandled rejection. The store will simply receive no replay messages.
 		ready().then(() => {
-			if (!cancelled) connect().send({ type: 'replay', topic, since, reqId });
+			if (!cancelled) {
+				replayPending = true;
+				if (!connect().send({ type: 'replay', topic, since, reqId })) replayPending = false;
+			}
 		}).catch(() => {});
 	}
 
