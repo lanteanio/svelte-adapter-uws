@@ -202,15 +202,27 @@ describe('the process-wide slots are defined, not assigned', () => {
 	});
 
 	it('a settled registry stays settled across calls', () => {
-		underAccessor(Symbol.for('adapter-uws.settled-subscription-registries'), (stolen) => {
-			const subs = new Set(['room:3']);
-			// The close path settles the registry; a second release must find it
-			// settled, or the membership is charged twice. Under an assignment
-			// every call builds a fresh WeakSet and nothing is ever settled.
-			expect(accountClosedLogicalSubscriptions(subs)).toBe(1);
-			expect(stolen).toEqual([]);
-			expect(isSettledSubscriptionRegistry(subs)).toBe(true);
-			expect(accountClosedLogicalSubscriptions(subs), 'a settled registry releases nothing twice').toBe(0);
-		});
+		// This registry was never charged to a running server. Record its
+		// synthetic release locally and restore any live runtime's accountant.
+		const accountingKey = Symbol.for('adapter-uws.subscription-accounting-hook');
+		const before = Object.getOwnPropertyDescriptor(globalThis, accountingKey);
+		const deltas = [];
+		setSubscriptionAccountingHook((delta, topic) => { deltas.push([delta, topic]); });
+		try {
+			underAccessor(Symbol.for('adapter-uws.settled-subscription-registries'), (stolen) => {
+				const subs = new Set(['room:3']);
+				// The close path settles the registry; a second release must find it
+				// settled, or the membership is charged twice. Under an assignment
+				// every call builds a fresh WeakSet and nothing is ever settled.
+				expect(accountClosedLogicalSubscriptions(subs)).toBe(1);
+				expect(stolen).toEqual([]);
+				expect(isSettledSubscriptionRegistry(subs)).toBe(true);
+				expect(accountClosedLogicalSubscriptions(subs), 'a settled registry releases nothing twice').toBe(0);
+				expect(deltas).toEqual([[-1, 'room:3']]);
+			});
+		} finally {
+			if (before) Object.defineProperty(globalThis, accountingKey, before);
+			else delete globalThis[accountingKey];
+		}
 	});
 });
