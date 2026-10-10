@@ -1,0 +1,5 @@
+# Subscription rollback
+
+For framework rollback after an admitted loader or setup fails, import `releaseSubscription(ws, topic)` from `svelte-adapter-uws/subscriptions`. It removes native and logical membership, registered derived subscriptions, shared-codec cohorts and the topic's publish grant immediately, while independently pending subscribe attempts can still finish their own authorization. It returns `true` when membership or a publish grant was removed, and `false` when already released, missing or closed. It does not revive previously revoked attempts. The caller performs its own application cleanup; no application unsubscribe hook runs. This operation removes physical membership, so coordinate already-completed concurrent admissions before calling it. Use `platform.unsubscribe` or `trackedUnsubscribe` for explicit unsubscribe, kicks and revocations that must also cancel pending attempts.
+
+See the [plugin authorization model](../README.md#authorization-model) for the application authorization boundary.
