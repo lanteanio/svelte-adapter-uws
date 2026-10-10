@@ -1,3 +1,5 @@
+import { isDate } from 'node:util/types';
+
 /**
  * Parse cookies from a Cookie header string.
  *
@@ -72,27 +74,31 @@ const VALID_SAMESITE = new Set(['strict', 'lax', 'none']);
  * @returns {string}
  */
 export function serializeCookie(name, value, options = {}) {
-	if (typeof name !== 'string' || name.length === 0 || COOKIE_NAME_INVALID.test(name)) {
+	if (typeof name !== 'string' || name.length === 0 || !name.isWellFormed() || COOKIE_NAME_INVALID.test(name)) {
 		throw new Error(`Invalid cookie name: '${name}'`);
 	}
 	const encoded = options.encode === false ? value : encodeURIComponent(value);
-	if (COOKIE_VALUE_INVALID.test(encoded)) {
+	if (typeof encoded !== 'string' || !encoded.isWellFormed() || COOKIE_VALUE_INVALID.test(encoded)) {
 		throw new Error(`Invalid cookie value for '${name}'`);
 	}
 	if (options.domain !== undefined) {
-		if (typeof options.domain !== 'string' || COOKIE_ATTR_INVALID.test(options.domain)) {
+		if (typeof options.domain !== 'string' || !options.domain.isWellFormed() || COOKIE_ATTR_INVALID.test(options.domain)) {
 			throw new Error(`Invalid Domain attribute for cookie '${name}'`);
 		}
 	}
 	if (options.path !== undefined) {
-		if (typeof options.path !== 'string' || COOKIE_ATTR_INVALID.test(options.path)) {
+		if (typeof options.path !== 'string' || !options.path.isWellFormed() || COOKIE_ATTR_INVALID.test(options.path)) {
 			throw new Error(`Invalid Path attribute for cookie '${name}'`);
 		}
+	}
+	const expires = options.expires;
+	if (expires !== undefined && (!isDate(expires) || !Number.isFinite(Date.prototype.getTime.call(expires)))) {
+		throw new Error(`Invalid Expires attribute for cookie '${name}'`);
 	}
 	let out = name + '=' + encoded;
 	if (options.domain !== undefined) out += '; Domain=' + options.domain;
 	if (options.path !== undefined) out += '; Path=' + options.path;
-	if (options.expires !== undefined) out += '; Expires=' + options.expires.toUTCString();
+	if (expires !== undefined) out += '; Expires=' + Date.prototype.toUTCString.call(expires);
 	if (options.maxAge !== undefined) {
 		if (!Number.isFinite(options.maxAge)) {
 			throw new Error(`Invalid Max-Age for cookie '${name}': ${options.maxAge}`);
@@ -173,6 +179,9 @@ export function createCookies(cookieHeader, requestUrl) {
 		set(name, value, options) {
 			requirePath(options);
 			const resolved = { ...defaults, ...options };
+			if (typeof resolved.path === 'string' && !resolved.path.isWellFormed()) {
+				throw new Error(`Invalid Path attribute for cookie '${name}'`);
+			}
 			// SvelteKit resolves a relative path against the request URL
 			// before serializing; without this, `Path=sub` reaches the
 			// browser, which discards it for the RFC 6265 default path -

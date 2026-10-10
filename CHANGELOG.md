@@ -409,6 +409,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Documentation and comments only; the per-connection 4 MiB control-frame budget per 10-second window and close code 4429 are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: cookie attribute integrity.** Authentication hooks now reject malformed Unicode and invalid expiry objects before writing cookie headers, while valid dates use their native UTC representation so applications can keep existing cookie scopes and encoded values without risking silently changed identifiers or injected response headers.
+  - **Affects:** Production and Vite authentication hooks that set or delete cookies.
+  - **Action:** Supply well-formed strings and finite Date expiry values; repair invalid inputs instead of relying on coercion.
+  - **Requires:** No configuration changes for valid cookies.
+  - **Compatibility:** Malformed strings and invalid expiry objects now fail authentication before a cookie is written; Date instance formatting overrides are ignored.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -748,6 +755,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The release-note CLI now rejects consumer summaries whose categories are not grouped in Added, Changed, Fixed order, so the standard repository checks enforce the same ordering as the copy regression suite.
+
+- Cookie serialization rejects unpaired UTF-16 surrogates in names, raw values, domains and paths before relative URL normalization. Expires accepts only finite native Date values and formats them through the native Date method, preventing duck-typed or overridden formatters from supplying header bytes. Valid paired Unicode and normal cookie defaults remain unchanged.
 
 - Request body cancellation stops both preallocated and streaming native upload callbacks before they copy or enqueue later chunks. Payload-limit errors use a private identity brand so hostile application rejection objects cannot throw during auth or SSR failure classification.
 
