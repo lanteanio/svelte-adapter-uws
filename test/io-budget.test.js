@@ -1079,7 +1079,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// only; no bytes are copied or written differently.
 	// Coalesced drains bound reentrant queue work and retain newer values.
 	// The synchronous guard and timer continuation add no binary byte copies.
-	ingress: 'e3cb6a0ecc5cb17823f45078bd7e6e2cde5db1afbfca9d3dc79246127c421713',
+	// Subscription authority reads the pending grant/epoch before admitting
+	// held memberships and history. These guards add no byte copies.
+	ingress: '295448b728818da434ff116a1c2cb52df7ecae6edb98e6c93f17627a88e20e72',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -2036,7 +2038,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// No byte-copy producer or binary payload boundary changes.
 	// Coalesced drains bound reentrant queue work and retain newer values.
 	// The synchronous guard and timer continuation add no binary byte copies.
-	platform: '5901ecd1ae350c0ef6695b5360f13c830c20972fd708aae4d1b6728360664f95',
+	// Subscription authority reads the pending grant/epoch before admitting
+	// held memberships and history. These guards add no byte copies.
+	platform: 'b8d197a9bfac3ef15f3951956f0cf428711b27f0c754c254cb46ab34facc8ffe',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2432,7 +2436,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// valid payloads reach the same builder and sends with no additional copy.
 	// The shared backpressure module bounds reentrant coalesced drains.
 	// Queue identity checks and continuation state add no binary byte copies.
-	'wire-fanout': '15e09da4da45a4a8e975505f7eb5bec7f53f4e52257aa07dc6d3430ea1154b48',
+	// Its shared subscription-state module now reads pending authority;
+	// no payload construction, copy, or fan-out write changes.
+	'wire-fanout': '6170dc5144254e64b348764d5f349386ac36a15789694bebf177c81ef90a30c5',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

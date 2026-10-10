@@ -8,7 +8,7 @@ await handler.start('127.0.0.1', Number(process.argv[3]));
 process.send({ ready: true });
 process.on('message', async ({ id, op }) => {
 	if (op === 'memory') {
-		global.gc();
+		globalThis.gc();
 		process.send({ id, rss: process.memoryUsage().rss });
 	} else if (op === 'stop') {
 		await handler.shutdown();
