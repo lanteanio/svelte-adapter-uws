@@ -628,6 +628,18 @@ export interface WSConnection {
 	send(data: unknown): void;
 
 	/**
+	 * Send a complete JSON message already encoded as text, unchanged.
+	 * The caller validates and serializes it; this method never parses or
+	 * serializes the text. Non-string input throws a TypeError.
+	 *
+	 * Returns false unless the underlying socket is OPEN, including during
+	 * reconnect and SSR. Never retains a message for reconnect. Returns true
+	 * after WebSocket.send accepts the text, not after server acknowledgement;
+	 * transport errors propagate. Available since 0.6.0-next.96.
+	 */
+	sendSerialized(text: string): boolean;
+
+	/**
 	 * Send a message, queuing it if not currently connected.
 	 * Queued messages flush automatically on reconnect (FIFO order).
 	 *

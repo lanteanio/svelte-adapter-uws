@@ -2439,6 +2439,22 @@ function createConnection(options) {
 	}
 
 	/**
+	 * Send a complete JSON message already encoded as text, without queuing.
+	 * The caller validates and serializes the message; no JSON parsing or
+	 * serialization happens here. A successful send is transport acceptance,
+	 * not an acknowledgement from the server. Transport errors propagate.
+	 *
+	 * @param {string} text
+	 * @returns {boolean} Whether an open socket accepted the text.
+	 */
+	function sendSerialized(text) {
+		if (typeof text !== 'string') throw new TypeError('sendSerialized requires a string');
+		if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+		ws.send(text);
+		return true;
+	}
+
+	/**
 	 * Send a message, queuing it if not currently connected.
 	 * Queued messages flush automatically on reconnect (FIFO).
 	 *
@@ -2670,6 +2686,7 @@ function createConnection(options) {
 		subscribe,
 		unsubscribe,
 		send,
+		sendSerialized,
 		sendQueued,
 		// Bytes the browser has accepted via `ws.send` but not yet flushed
 		// to the OS socket buffer. Mirrors the native WebSocket property.

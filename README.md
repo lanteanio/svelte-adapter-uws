@@ -3417,7 +3417,7 @@ In SSR (no browser WebSocket and no explicit `url`), `ready()` resolves immediat
 
 ### `connect(options?)` - power-user API
 
-Most users don't need this - `on()` and `status` auto-connect. Use `connect()` when you need `close()`, `send()`, or custom options.
+Most users don't need this - `on()` and `status` auto-connect. Use `connect()` when you need `close()`, `send()`, or custom options. `connect().sendSerialized(text): boolean` sends a complete JSON message that you have already encoded, without parsing or serializing it again. It returns `true` after the open WebSocket accepts the text and `false` when the socket is absent, connecting, closing or closed, including during SSR. It never queues a message for reconnect. A `true` result is local transport acceptance, not confirmation from the server. Pass a primitive string containing valid JSON; non-string input throws `TypeError`, and errors from `WebSocket.send` propagate. Available since `0.6.0-next.96`.
 
 **If you pass custom options** (like a non-default `path`), call `connect()` before any `on()`, `status`, `ready()`, or `once()` calls. Those functions auto-connect with defaults, and the connection is locked once created. A console warning will fire if your options are ignored due to ordering:
 

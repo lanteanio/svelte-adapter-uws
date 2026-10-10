@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** A request whose response completes never sees the signal abort, and neither does one whose client leaves after its body arrived, so a form action that has its data finishes what it started, as with the Node adapter. A response the server itself cuts off mid-stream aborts it like a disconnect. On disconnect the reason is an `AbortError`; at shutdown it is an `AbortError` whose message names the shutdown, admin requests included. Code that ignores the signal runs exactly as before. Each rendered request allocates one `AbortController`, about 2 microseconds on its `Request`; built assets and prerendered pages are served without one.
   - **Detail:** [Added engineering detail](#added).
+- **Added: send already serialized JSON without retaining it for reconnect.** `connect().sendSerialized(text): boolean` passes a complete JSON text message directly to an open WebSocket, so callers can validate and serialize once before allocating request state, with a false result whenever a connecting or closed socket cannot accept the message immediately.
+  - **Affects:** Client libraries and apps that construct serialized messages and manage their own request lifetime.
+  - **Action:** Call `sendSerialized(text)` with a primitive string containing valid JSON. A `false` result means no open socket accepted it; the method never queues it for reconnect.
+  - **Requires:** `svelte-adapter-uws` 0.6.0-next.96 or later on the 0.6 line.
+  - **Compatibility:** Additive. `send` and `sendQueued` keep JSON-quoting strings and passing binary values through. `true` means local transport acceptance, not server acknowledgement. Non-string input throws `TypeError`; transport errors propagate.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: closing a socket refuses a code it cannot send and never splits a character in the reason.** On uWS, `ws.end()` sent an unsendable code as an empty close the client read as 1005 and cut a long reason mid-character, so the client failed the connection; one rule now applies everywhere.
   - **Affects:** Apps that close sockets with a computed code or a long or non-ASCII reason, suites passing a code to `platform.__chaos({ scenario: 'worker-flap' })`, and `svelte-adapter-uws/sim` scenarios that close with an explicit code.
   - **Action:** Close with a code from 1000-1003, 1007-1014 or 3000-4999 (4000-4999 is the range for application codes), and give a reason only together with a code.
@@ -209,6 +216,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pre-serialized client text sends.** `WSConnection.sendSerialized(text): boolean`
+  validates the primitive-string input and calls `WebSocket.send` only when the
+  actual socket is open. It neither parses nor serializes the text and never
+  enters the reconnect queue. The caller owns JSON validation and retries.
+  Real WebSocket tests cover byte-preserving text delivery, sends during
+  connection transitions, reconnect non-retention, existing string and binary
+  sends, SSR, and transport errors; a TypeScript consumer pins the string input
+  and boolean return.
 - **A signal for every rendered and admin request.** The SSR lane opens an
   `AbortController` per request (`openRequestSignal`, handler/state-pool.js)
   and passes its signal into the `Request`. `onAborted` aborts it until
