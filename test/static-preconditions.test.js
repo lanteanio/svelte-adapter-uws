@@ -10,7 +10,7 @@
 // by opaque equality against ANY validator the lane issued for the asset
 // (which representation the client holds is a property of an earlier
 // negotiation, not of today's Accept-Encoding); If-None-Match compares against
-// the SELECTED representation, as the 304 always did. Both take the list form
+// the SELECTED representation using weak comparison. Both take the list form
 // and `*`. An unparseable date is an ignored header, never a refusal, at the
 // whole-second precision HTTP dates carry.
 

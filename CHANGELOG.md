@@ -642,6 +642,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Static `If-None-Match` uses weak comparison against the selected representation, so its quoted tag revalidates with or without `W/`, including lists. `If-Match` retains exact issued-tag matching across codings; real GET and HEAD regressions cover the independent policies and precedence.
+
 - Large static responses resume from the shared cache under socket backpressure, avoiding a full unsent-body copy for every slow reader while preserving complete ranges and encoded bytes.
 
 - Static plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML responses declare UTF-8 so non-ASCII text decodes correctly. XML and RTF retain their own encoding declarations.

@@ -335,6 +335,37 @@ function etagListHas(header, tag) {
 }
 
 /**
+ * If-None-Match uses weak comparison: only the quoted opaque tag matters.
+ * The common echoed validator avoids list parsing. Walk quoted members on the
+ * list path because a different valid opaque tag can itself contain commas.
+ * If-Match retains the independent exact-issued-validator policy above.
+ * @param {string} header
+ * @param {string} tag
+ * @returns {boolean}
+ */
+function weakEtagListHas(header, tag) {
+	if (header === '*') return true;
+	if (!tag) return false;
+	if (header === tag) return true;
+	const opaque = tag.startsWith('W/') ? tag.slice(2) : tag;
+	if (header === opaque) return true;
+	let start = 0;
+	while (start < header.length) {
+		while (header[start] === ' ' || header[start] === '\t' || header[start] === ',') start++;
+		if (header.startsWith('W/', start)) start += 2;
+		if (header[start] !== '"') return false;
+		const end = header.indexOf('"', start + 1);
+		if (end === -1) return false;
+		let next = end + 1;
+		while (header[next] === ' ' || header[next] === '\t') next++;
+		if (next < header.length && header[next] !== ',') return false;
+		if (header.slice(start, end + 1) === opaque) return true;
+		start = next + 1;
+	}
+	return false;
+}
+
+/**
  * Evaluate the request's preconditions against an existing entry, in the RFC's
  * order (RFC 9110 13.2.2): If-Match first, If-Unmodified-Since only in its
  * absence, then If-None-Match, then If-Modified-Since only when no entity
@@ -345,7 +376,7 @@ function etagListHas(header, tag) {
  * (identity, br, gzip): the client may hold whichever representation an
  * earlier negotiation gave it, and which one this request would select is a
  * property of today's Accept-Encoding, not of what the client holds.
- * If-None-Match compares against the SELECTED representation's validator, as
+ * If-None-Match weakly compares the SELECTED representation's validator, as
  * the existing 304 did - a 304 updates a stored response, so it must validate
  * the representation this request would receive. Both take the list form and
  * `*`. An unparseable date is an ignored header, never a refusal, and dates
@@ -402,7 +433,7 @@ export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, 
 		if (!Number.isNaN(t) && entry.lastModifiedMs > t) return 412;
 	}
 	if (ifNoneMatch !== '') {
-		if (etagListHas(ifNoneMatch, repEtag)) return 304;
+		if (weakEtagListHas(ifNoneMatch, repEtag)) return 304;
 	} else if (ifModifiedSince !== '' && entry.lastModifiedMs !== undefined) {
 		const t = ifModifiedSince === entry.lastModified ? entry.lastModifiedMs : parseHttpDate(ifModifiedSince);
 		if (!Number.isNaN(t) && entry.lastModifiedMs <= t) return 304;
