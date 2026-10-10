@@ -114,7 +114,19 @@ for (const surface of ['built', 'testing', 'vite']) {
 			client.close();
 		});
 
-		it('does not let a refused fresh landing preserve a revoked sibling install', async () => {
+		it('admits an unrevoked subscription after an awaited resume completes', async () => {
+			const client = await connect();
+			await command(client, 'park-resume', 'resume-configured');
+			await parked(client, 0, true);
+			client.send({ type: 'finish', index: 0 });
+			expect(await client.waitFor((value) => value?.event === 'resume-parked')).not.toBeNull();
+			client.send({ type: 'finish-resume' });
+			expect((await client.waitFor((value) => value?.ref === 1))?.parsed).toMatchObject({ type: 'subscribed' });
+			expect((await command(client, 'probe', 'state')).held).toBe(true);
+			client.close();
+		});
+
+		it('refuses fresh landings after strict policy arms during authorization or resume', async () => {
 			const installed = [];
 			for (const [recover, batch] of [[false, false], [true, false], [true, true]]) {
 				const pending = await connect();
@@ -122,11 +134,22 @@ for (const surface of ['built', 'testing', 'vite']) {
 				await install(pending, 0);
 				installed.push(pending);
 			}
+			// Park a not-yet-held recover subscription inside its resume hook.
+			// The worker-wide arm below must also re-check this post-await landing.
+			const recovering = await connect();
+			await command(recovering, 'park-resume', 'resume-configured');
+			await parked(recovering, 0, true);
+			recovering.send({ type: 'finish', index: 0 });
+			expect(await recovering.waitFor((value) => value?.event === 'resume-parked')).not.toBeNull();
 			const client = await connect();
 			await parked(client, 0);
 			await command(client, 'revoke', 'revoked');
 			await parked(client, 1);
 			await command(client, 'arm', 'armed');
+			recovering.send({ type: 'finish-resume' });
+			expect((await recovering.waitFor((value) => value?.ref === 1))?.parsed).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+			expect((await command(recovering, 'probe', 'state')).held).toBe(false);
+			recovering.close();
 			for (const pending of installed) {
 				expect(await finish(pending, 0)).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
 				expect(await command(pending, 'probe', 'state')).toMatchObject({ resumed: [], held: false });

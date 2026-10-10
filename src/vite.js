@@ -12,7 +12,7 @@ import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
 import { closeFrameReason } from './runtime/utils/close-frame.js';
-import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -3214,6 +3214,14 @@ export default function uws(options = {}) {
 										return;
 									}
 								}
+								// The resume hook can await while strict authorization arms.
+								// Re-check a fresh landing after every user await, as production does.
+								if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV() && !SUBSCRIBE_AUTHZ_STRICT_V, held: subs.has(msg.topic), topic: msg.topic })) {
+									settlePendingSubscribe(pendingUdV, msg.topic, pendingTokenV);
+									if (_cap) discardResumeCaptureV(_cap);
+									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
+									return;
+								}
 								// Landing settle. A revocation that bumped this subscribe's
 								// epoch while the hook was parked means the grant must be
 								// discarded rather than installed, and the client's ref'd
@@ -3282,6 +3290,10 @@ export default function uws(options = {}) {
 								const subs = subscriptions.get(ws);
 								const topics = msg.topics.slice(0, 256);
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
+								if (deniesRefLessRecoverBatch({ hasResumeHook: userHandlers.resume, recover: msg.recover, ref })) {
+									sendControlV(ws, recoverRequiresRefFrame(null));
+									return;
+								}
 								for (let i = 256; i < msg.topics.length; i++) {
 									if (typeof msg.topics[i] === 'string') {
 										sendDenied(ws, msg.topics[i], ref, 'BATCH_OVERFLOW');

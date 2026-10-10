@@ -14,7 +14,7 @@ import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake 
 import { invalidRequestTarget, invalidHost } from './runtime/utils/request-target.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
-import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE, WS_COHORT_JOIN, WS_COHORT_LEAVE, WS_RELEASE_MEMBERSHIP } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
@@ -3272,6 +3272,10 @@ export async function createTestServer(options = {}) {
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
+							if (deniesRefLessRecoverBatch({ hasResumeHook: handler.resume, recover: msg.recover, ref })) {
+								sendControlT(ws, recoverRequiresRefFrame(null));
+								return;
+							}
 							// Topics past the 256 cap are denied loudly, never silently
 							// dropped (same rule as the production runtime).
 							for (let i = 256; i < msg.topics.length; i++) {

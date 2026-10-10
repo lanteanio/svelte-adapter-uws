@@ -28,7 +28,13 @@ export async function subscribe(ws, topic, { platform }) {
 	return finishing;
 }
 
-export function resume(ws, { platform, lastSeenSeqs, lastSeenEpochs }) {
+export async function resume(ws, { platform, lastSeenSeqs, lastSeenEpochs }) {
+	const current = state(ws);
+	if (current.parkResume) {
+		const paused = new Promise((resolve) => { current.finishResume = resolve; });
+		platform.send(ws, 'probe', 'resume-parked', {});
+		await paused;
+	}
 	const topics = Object.keys(lastSeenSeqs);
 	state(ws).resumed.push(...topics);
 	platform.send(ws, 'probe', 'history', { topics, epochTopics: Object.keys(lastSeenEpochs || {}), value: 'private-history' });
@@ -37,6 +43,11 @@ export function resume(ws, { platform, lastSeenSeqs, lastSeenEpochs }) {
 export async function message(ws, { data, platform }) {
 	const msg = JSON.parse(Buffer.from(data).toString());
 	const current = state(ws);
+	if (msg.type === 'park-resume') {
+		current.parkResume = true;
+		platform.send(ws, 'probe', 'resume-configured', { nonce: msg.nonce });
+	}
+	if (msg.type === 'finish-resume') current.finishResume?.();
 	if (msg.type === 'install') current.attempts[msg.index].install(true);
 	if (msg.type === 'finish') {
 		current.attempts[msg.index].install(false);
@@ -76,6 +87,7 @@ export async function message(ws, { data, platform }) {
 }
 
 export function close(ws) {
+	states.get(ws)?.finishResume?.();
 	for (const attempt of states.get(ws)?.attempts || []) {
 		attempt.install(false);
 		attempt.finish('FORBIDDEN');
