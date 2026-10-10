@@ -14,7 +14,7 @@ import { invalidRequestTarget, invalidHost } from './runtime/utils/request-targe
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { carriesPreParsedEnvelope, deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
-import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE, WS_COHORT_JOIN, WS_COHORT_LEAVE } from './runtime/utils/ws-symbols.js';
+import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE, WS_COHORT_JOIN, WS_COHORT_LEAVE, WS_RELEASE_MEMBERSHIP } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
@@ -1134,6 +1134,10 @@ export async function createTestServer(options = {}) {
 		// trackedSubscribe / trackedUnsubscribe join and leave THIS server's shared
 		// cohorts through these slots, as production does through its own. See
 		// WS_COHORT_JOIN.
+		[WS_RELEASE_MEMBERSHIP](ws, ud, topic) {
+			try { ws.unsubscribe(topic); } catch { return null; }
+			return ud[WS_SUBSCRIPTIONS].delete(topic);
+		},
 		[WS_COHORT_JOIN](ws, ud, topic) {
 			if (sharedTopicsT.has(topic)) joinCohortT(ws, ud, topic, sharedTopicsT.get(topic));
 		},

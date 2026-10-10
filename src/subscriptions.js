@@ -13,4 +13,4 @@
 // global hook, so a copy of this module loaded by another package reaches the
 // same connection state as the runtime that owns it.
 
-export { trackedSubscribe, trackedUnsubscribe } from './runtime/utils/ws-symbols.js';
+export { trackedSubscribe, trackedUnsubscribe, releaseSubscription } from './runtime/utils/ws-symbols.js';

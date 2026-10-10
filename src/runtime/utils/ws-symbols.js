@@ -513,6 +513,10 @@ export const WS_PUBLISH_GRANT = Symbol.for('adapter-uws.ws.publish-grant');
 export const WS_COHORT_JOIN = Symbol.for('adapter-uws.platform.cohort-join');
 export const WS_COHORT_LEAVE = Symbol.for('adapter-uws.platform.cohort-leave');
 
+// Each surface owns its membership accounting. Returns null for a closed
+// handle, otherwise whether native/logical membership was removed.
+export const WS_RELEASE_MEMBERSHIP = Symbol.for('adapter-uws.platform.release-membership');
+
 // Logical-subscription accounting has a duplicated-bundle constraint: the
 // bundler gives a plugin package and the runtime SEPARATE instances of this
 // module, while every copy mutates the same connection Set. One slot on
@@ -750,6 +754,51 @@ export function trackedUnsubscribe(ws, topic) {
 		ud[WS_PLATFORM]?.[WS_COHORT_LEAVE]?.(ws, ud, topic);
 	} catch { /* socket died; close cleanup owns the registry */ }
 	return ok;
+}
+
+/**
+ * Remove admitted membership without cancelling independent subscribe awaits.
+ * Framework rollback owns its application cleanup and does not run the app's
+ * unsubscribe hook. Explicit revocation still uses trackedUnsubscribe or
+ * platform.unsubscribe, which advance the pending attempt's epoch.
+ * @param {any} ws
+ * @param {string} topic
+ * @returns {boolean} whether any membership or publish grant was removed
+ */
+export function releaseSubscription(ws, topic) {
+	let ud;
+	try { ud = ws.getUserData(); } catch { return false; }
+	const subs = ud[WS_SUBSCRIPTIONS];
+	if (!(subs instanceof Set) || isSettledSubscriptionRegistry(subs)) return false;
+	let removed = releaseMembership(ws, ud, topic);
+	for (const prefix of _derivedTopicPrefixes) {
+		if (topic.startsWith(prefix)) continue;
+		if (releaseMembership(ws, ud, prefix + topic)) removed = true;
+	}
+	return removed;
+}
+
+/** @param {any} ws @param {any} ud @param {string} topic */
+function releaseMembership(ws, ud, topic) {
+	// Withdraw completed authority without changing the epoch that an
+	// independently pending authorization must present when it lands.
+	const pending = ud[WS_PENDING_SUBSCRIBES]?.get(topic);
+	if (pending) pending.granted = false;
+	const release = ud[WS_PLATFORM]?.[WS_RELEASE_MEMBERSHIP];
+	let removed;
+	if (typeof release === 'function') {
+		removed = release(ws, ud, topic);
+		if (removed === null) return false;
+	} else {
+		try { ws.unsubscribe(topic); } catch { return false; }
+		removed = removeLogicalSubscription(ud[WS_SUBSCRIPTIONS], topic);
+	}
+	if (ud[WS_PUBLISH_GRANT] === topic) {
+		ud[WS_PUBLISH_GRANT] = undefined;
+		removed = true;
+	}
+	ud[WS_PLATFORM]?.[WS_COHORT_LEAVE]?.(ws, ud, topic);
+	return removed;
 }
 
 /**

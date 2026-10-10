@@ -31,3 +31,21 @@ export function trackedSubscribe(ws: SubscribableConnection, topic: string): boo
  * @returns false when the socket was already closed.
  */
 export function trackedUnsubscribe(ws: SubscribableConnection, topic: string): boolean;
+
+/**
+ * Release a framework's admitted membership after its loader or setup fails.
+ * Removes native and logical membership, registered derived subscriptions,
+ * shared-codec cohorts and the topic's publish grant, with accounted cleanup.
+ * Independently pending subscribe attempts remain eligible to complete their
+ * own authorization. This does not revive an attempt already revoked.
+ *
+ * This removes the physical membership, not an ownership reference. The caller
+ * must coordinate already-completed concurrent admissions and perform its own
+ * application cleanup. No application unsubscribe hook runs. For an explicit
+ * unsubscribe, kick or revocation that must cancel pending attempts, use
+ * `platform.unsubscribe` or `trackedUnsubscribe` instead.
+ *
+ * @returns true when membership or a publish grant was removed; false when
+ *   already released, missing, or closed. Safe to repeat.
+ */
+export function releaseSubscription(ws: SubscribableConnection, topic: string): boolean;

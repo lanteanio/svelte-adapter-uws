@@ -683,6 +683,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Vite subscriber iteration passes the adapter socket and its user data to callbacks, so matching subscribers can be inspected and sent messages without throwing.
 
+- `releaseSubscription` in the subscriptions subpath removes failed framework admissions, including derived and publish access, while independently pending authorizations can still complete. Explicit unsubscribe continues to cancel pending attempts.
+
 - Pending hook-installed subscriptions no longer count as completed server grants. Server re-grants authorize the membership before acknowledging it, and wire, observer and resume gates reject unconfirmed membership.
 
 - A revoked subscribe cannot disclose recover history through membership installed by its own hook. Single and batch recover paths retain legitimate server re-grants.

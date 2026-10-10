@@ -7,7 +7,7 @@ import { authRequestBody } from './vite-request-body.js';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
-import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE, WS_RELEASE_MEMBERSHIP } from './runtime/utils/ws-symbols.js';
 import { runUnsubscribeHook } from './runtime/utils/unsubscribe-hook.js';
 import { runOpenHook, runCloseHook } from './runtime/utils/hook-boundary.js';
 import { closeFrameReason } from './runtime/utils/close-frame.js';
@@ -2918,6 +2918,11 @@ export default function uws(options = {}) {
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
 				const wsPlatform = Object.create(platform);
+				wsPlatform[WS_RELEASE_MEMBERSHIP] = (_wrapped, ud, topic) => {
+					if (ws.readyState !== 1) return null;
+					subscriptions.get(ws)?.delete(topic);
+					return ud[WS_SUBSCRIPTIONS].delete(topic);
+				};
 				const carriedRequestId = userData[CARRY_REQUEST_ID];
 				assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
 				wsPlatform.requestId = typeof carriedRequestId === 'string' ? carriedRequestId : randomUuid();
