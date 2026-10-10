@@ -29,21 +29,6 @@
 import { isPluginOwnedTopic } from './ws-symbols.js';
 
 /**
- * Whether the wire-level system-topic guard must refuse `topic`.
- *
- * Registered plugin namespaces are the one narrow exception to the default
- * `__` block. They have to reach their own subscribe hook in order to establish
- * membership; {@link deniesWireSubscribeLanding} then requires that membership
- * even when the global grant gate is off or an app hook is present. This is
- * deliberately a policy decision shared by every socket surface, not another
- * inline prefix check for the mirrors to drift on.
- *
- * @param {object} input
- * @param {boolean} input.allowSystem - the broad system-topic opt-out is enabled
- * @param {string} input.topic
- * @returns {boolean}
- */
-/**
  * Whether a parsed control-prefixed frame is the envelope `MessageContext.msg`
  * is declared to carry, which is a plain object.
  *
@@ -62,6 +47,21 @@ export function carriesPreParsedEnvelope(parsed) {
 	return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
 }
 
+/**
+ * Whether the wire-level system-topic guard must refuse `topic`.
+ *
+ * Registered plugin namespaces are the one narrow exception to the default
+ * `__` block. They have to reach their own subscribe hook in order to establish
+ * membership; {@link deniesWireSubscribeLanding} then requires that membership
+ * even when the global grant gate is off or an app hook is present. This is
+ * deliberately a policy decision shared by every socket surface, not another
+ * inline prefix check for the mirrors to drift on.
+ *
+ * @param {object} input
+ * @param {boolean} input.allowSystem - the broad system-topic opt-out is enabled
+ * @param {string} input.topic
+ * @returns {boolean}
+ */
 export function deniesWireSystemTopicSubscribe({ allowSystem, topic }) {
 	if (allowSystem || typeof topic !== 'string') return false;
 	if (topic.charCodeAt(0) !== 95 || topic.charCodeAt(1) !== 95) return false;

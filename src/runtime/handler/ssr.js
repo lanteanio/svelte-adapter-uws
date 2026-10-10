@@ -66,7 +66,7 @@ const COMPRESSIBLE_TYPES = new Set([
  */
 export function readBody(res, limit, state, contentLength) {
 	// Fast path: pre-allocate one buffer when size is known and small.
-	// Eliminates N allocations for chunked bodies  - one allocation + in-place fills.
+	// Avoids per-chunk allocations for incoming chunks: one buffer + in-place fills.
 	const usePrealloc = contentLength >= 0 && contentLength <= SMALL_BODY_THRESHOLD &&
 		(limit === Infinity || contentLength <= limit);
 
@@ -89,9 +89,12 @@ export function readBody(res, limit, state, contentLength) {
 				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
 				return;
 			}
-			// Lazy: only register res.onData() when SvelteKit actually reads
-			// the body. For redirects / actions that ignore the body, this
-			// avoids the onData registration + per-chunk copy entirely.
+			// The default highWaterMark (1) schedules this first pull after start,
+			// even before SvelteKit reads the body. Register onData eagerly: uWS
+			// does not retain chunks that arrive without a callback, so waiting
+			// for a reader would lose bytes while an async route is suspended.
+			// Both paths copy incoming bytes because uWS reuses each chunk after
+			// its callback; preallocation only avoids allocating per-chunk buffers.
 			if (initialized) return;
 			initialized = true;
 
@@ -110,7 +113,7 @@ export function readBody(res, limit, state, contentLength) {
 						controller.error(new PayloadTooLargeError());
 						return;
 					}
-					// Zero-copy fill into pre-allocated buffer (no new Buffer per chunk)
+					// Copy into the preallocated buffer without allocating per chunk.
 					buf.set(view, offset);
 					offset += view.byteLength;
 					if (isLast) {

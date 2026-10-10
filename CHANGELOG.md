@@ -277,6 +277,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Source comment accuracy and unused projection cleanup.** Redirect encoding
+  now cites Location's URI-reference grammar; request-body comments describe
+  eager registration and chunk copying; socket-policy JSDoc attaches to its
+  function. Projection comments describe current matching rules and no longer
+  promise drop warnings, and the unused warning helper and state are removed.
+  A real runtime regression pins full POST bodies when the route delays reading.
+  Runtime matching and request-body behavior are unchanged.
 - **Section 15 carries empty messages and WebSocket closes.** PROTOCOL.md
   15.1, 15.3, 15.4 and 15.6, appendices C.6, D and E,
   `protocol.schema.json#x-webtransport`, and

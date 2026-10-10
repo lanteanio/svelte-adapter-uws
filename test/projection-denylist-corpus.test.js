@@ -1,17 +1,10 @@
 // Scores the default projection denylist against GENERATED corpora rather than
 // hand-picked names, in both directions.
 //
-// The sibling suite pins individual judgements and reads as prose. This one
-// exists because hand-picked cases hid two whole classes of defect for several
-// rounds: an entry that only matched a WHOLE name (so one qualifier defeated
-// every compound in the set), and a rule that scanned every word (so one
-// ordinary adjective condemned 616 canonical key-shaped identifiers). Both were
-// invisible to a list of names chosen by the person who wrote the rule, and both
-// showed up the moment the names were generated instead.
-//
-// Keep the two directions balanced. A denylist that drops everything scores
-// perfectly on the first block and is useless, which is exactly how the design
-// that preceded this one was measured and rejected.
+// The sibling suite pins individual judgements. Generated names exercise both
+// qualified sensitive compounds and ordinary key-shaped identifiers, so broad
+// rejection cannot hide accidental loss of benign fields. Both directions
+// matter: a matcher that rejects every field fails the benign corpus.
 
 import { describe, it, expect } from 'vitest';
 import {
@@ -45,8 +38,8 @@ describe('credentials never ride a broadcast projection', () => {
 	}
 
 	// Supabase's service role key bypasses row-level security, and the GCP
-	// service account key is its equivalent. Both rode the roster in every
-	// spelling until `service` became a credential qualifier.
+	// service account key is its equivalent. Both require sensitive verdicts
+	// in every spelling.
 	it('drops the admin service credentials in every spelling', () => {
 		for (const name of [
 			'serviceRoleKey', 'service_role_key', 'servicerolekey', 'SERVICE_ROLE_KEY',
@@ -70,8 +63,7 @@ describe('credentials never ride a broadcast projection', () => {
 
 describe('personal data never rides a broadcast projection', () => {
 	// Taken from mainstream auth, session and payment payload shapes rather than
-	// from the rule. Measured against the previous design, 20 of these passed -
-	// including a social security number, a bank account number and a card CVV.
+	// from the rule, including social security and bank account numbers and CVVs.
 	const PII = [
 		'ssn', 'userSsn', 'ssnLast4', 'socialSecurityNumber', 'social_security_number',
 		'dob', 'userDob', 'dateOfBirth', 'birthDate', 'birthdate', 'date_of_birth',
@@ -119,10 +111,8 @@ describe('personal data never rides a broadcast projection', () => {
 	// THE FLAT SPELLING OF A QUALIFIED COMPOUND, which is the shape a plain SQL
 	// select produces: Postgres folds an unquoted identifier to lowercase, so
 	// `select u.userTaxId` returns the key `usertaxid`. The compound pass anchors
-	// to a word start, and a flat name has exactly one - offset 0 - so anything
-	// in front of the compound defeated every entry in the set. Measured across
-	// the set and six qualifiers, 243 of 252 families diverged, every one of them
-	// in the leak direction.
+	// to a word start for tokenized names. A flat name has only offset 0, so
+	// it needs an unanchored scan to recognize a compound after its qualifier.
 	it('drops a qualified compound in its FLAT spelling too', () => {
 		const cases = [
 			'usertaxid', 'usercardnumber', 'customerdateofbirth', 'userpassportnumber',
@@ -137,9 +127,8 @@ describe('personal data never rides a broadcast projection', () => {
 		}
 	});
 
-	// A trailing ordinal made a word match nothing, because the tokenizer counts
-	// digits as word characters. `phone1` and `phone2` are the standard CRM
-	// column pair and both rode the roster while `phone` dropped.
+	// The tokenizer keeps digits within a word; ordinal suffixes still need
+	// the same sensitive verdict as the base name, as in `phone1` and `phone2`.
 	it('drops a sensitive word carrying an ordinal suffix', () => {
 		for (const name of ['phone1', 'phone2', 'telephone2', 'pin1', 'cc2', 'address1', 'address2', 'ssn1']) {
 			expect(dropped(name), name).toBe(true);
@@ -234,10 +223,9 @@ describe('ordinary product fields keep riding a roster', () => {
 });
 
 describe('a key-shaped identifier survives an environment qualifier', () => {
-	// THE CROSS PRODUCT, and the measurement that killed the any-word scan. A
-	// canonical key-noun qualified by an ordinary environment, tier or role
-	// adjective is a real product field: `clientSortKey` is the client's sort key,
-	// not a client key. Scanning every word dropped 616 of these 616.
+	// Cross product of canonical key nouns with environment, tier and role
+	// adjectives: `clientSortKey` is the client's sort key. The adjacent noun
+	// identifies the key kind even when another word is a credential qualifier.
 	const KEY_NOUNS = [
 		'sort', 'hash', 'range', 'partition', 'cache', 'translation', 'primary',
 		'foreign', 'row', 'column', 'locale', 'message', 'route', 'list', 'tab',
@@ -280,9 +268,8 @@ describe('a key-shaped identifier survives an environment qualifier', () => {
 	});
 
 	it('drops owner-qualified credential keys in their flat spelling', () => {
-		// The two-word case was covered (`streamkey`), but adding any owner
-		// reopened the flat-only leak: `deviceStreamKey` was tokenized and
-		// dropped while the SQL/JSON spelling `devicestreamkey` rode.
+		// Owner-qualified flat names such as `devicestreamkey` must agree with
+		// the sensitive camelCase spelling `deviceStreamKey`.
 		const owners = [
 			'device', 'team', 'organization', 'org', 'member', 'owner', 'author',
 			'bot', 'peer', 'vendor', 'provider', 'integration', 'environment',
@@ -341,11 +328,9 @@ describe('a key-shaped identifier survives an environment qualifier', () => {
 });
 
 describe('every spelling of one datum gets one verdict', () => {
-	// The defect this catches is DISAGREEMENT, not a particular answer. Three
-	// separate rounds shipped a rule where the same value dropped in camelCase and
-	// rode the roster flat - `apiKey` against `apikey`, `userPwd` against
-	// `userpwd`, `authorId` against `authorid`. A flat lowercase name is a single
-	// word, so any rule that reads words is blind to it unless it is told.
+	// Equivalent spellings must agree: `apiKey` with `apikey`, `userPwd` with
+	// `userpwd`, and `authorId` with `authorid`. A flat lowercase name is one
+	// word, so matching it requires more than token boundaries.
 	const BASES = [
 		['user', 'pwd'], ['user', 'ssn'], ['user', 'dob'], ['otp', 'code'],
 		['totp', 'hash'], ['mfa', 'secret'], ['api', 'key'], ['stream', 'key'],

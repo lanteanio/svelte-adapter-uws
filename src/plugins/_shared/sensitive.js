@@ -25,9 +25,8 @@
  * and `sessionCount` go too. That direction is deliberate: the alternative is
  * an allowlist of benign compounds that can never be complete, and a missed
  * entry there leaks a credential while a missed entry here loses a display
- * field. A caller that uses this matcher as a redactor can report such a drop
- * once by name via noteDroppedField; the identity-only defaults do not
- * enumerate non-identity fields and therefore do not emit drop warnings.
+ * field. The identity-only defaults do not enumerate non-identity fields
+ * and do not emit drop warnings; explicit selectors own their output.
  */
 const SENSITIVE_WORDS = new Set([
 	'token', 'tokens', 'secret', 'secrets', 'password', 'passwords', 'passwd', 'pwd',
@@ -55,12 +54,9 @@ const SENSITIVE_WORDS = new Set([
  * `CREDITCARD` all reduce to the same thing, while neither `credit` nor `card`
  * is sensitive on its own (`cardId` on a board is ordinary identity).
  *
- * MATCHED AT A WORD START, NOT AS A WHOLE NAME. An exact `Set.has(joined)` was
- * the original spelling and any qualifier defeated every entry in it:
- * `cardNumber` dropped while `userCardNumber` - the same card - rode the roster,
- * and `cardSecurityCode` defeated `securitycode`. Measured across ten qualifiers
- * and eleven suffixes, ten of the twelve entries leaked under all twenty-one
- * variants, which made the set decorative for every real payload shape.
+ * A match starts at a word boundary and may have qualifiers before it or
+ * suffixes after it: `cardNumber`, `userCardNumber` and `cardSecurityCode`
+ * all carry sensitive compounds.
  *
  * A plain substring scan overcorrects, because these compounds collide inside
  * ordinary words once separators are gone: `syntaxId` contains `taxid`,
@@ -117,13 +113,9 @@ const EXACT_SENSITIVE_NAMES = new Set([
 /**
  * Tokens matched as a SUBSTRING of the separator-free name.
  *
- * Word matching alone is not enough, and assuming it was reopened a hole the
- * substring rule it replaced had closed: a flat lowercase name is a single
- * word, so `apikey`, `sessionid`, `accesstoken`, `jwtsecret`, `dbpassword` and
- * `setcookie` matched nothing at all and were broadcast - while `apiKey` and
- * `api_key`, the same values with a hump or an underscore, were correctly
- * dropped. That is the third spelling of the same "same value, opposite
- * verdicts" defect this file already carried twice.
+ * A flat lowercase name is a single word, so `apikey`, `sessionid`,
+ * `accesstoken`, `jwtsecret`, `dbpassword` and `setcookie` need substring
+ * matching to agree with their camelCase and separator-delimited spellings.
  *
  * These are the long, unambiguous tokens only. `phone` is deliberately NOT
  * here - a substring match on it is what dropped `microphone`, `microphoneOn`
@@ -141,21 +133,15 @@ const SENSITIVE_SUBSTRINGS = [
 // stripped - `wifiBandwidth`, `apiBanner`, `midiBank` for one; `voicemail`,
 // `officeMail` for the other - and both are kept anyway, for the same reason.
 //
-// `iban` was removed once on the argument that the word pass already catches
-// it and the substring bought only a flat `useriban`. Counted, that was wrong
-// by a factor of fifty: `useriban`, `customeriban`, `payeeiban`, `accountiban`,
-// `ibannumber`, `ibanaccount`, `ibanlast4` and forty-odd more leaked, against
-// about five plausible roster fields on the other side. It is financial PII,
-// and this file's standing trade is that a miss which leaks personal data costs
-// more than a miss which drops a display name. Drops are reported by name, so
-// an app that hits a collision is told exactly which field to allow through
-// `select`; a leak tells nobody anything.
+// Flat names such as `useriban`, `customeriban`, `payeeiban`, `accountiban`,
+// `ibannumber` and `ibanlast4` need substring matching because their tokens
+// do not expose the credential word. These financial-PII matches take priority
+// over benign collisions; an explicit `select` can retain an intended field.
 
 /**
  * Qualifiers that make a `key` a CREDENTIAL.
  *
- * THE QUALIFIER DECIDES, NOT THE WORD `key`. That is the whole rule, and it
- * replaced two earlier attempts that both got it backwards.
+ * The qualifier decides whether a compound `key` name is sensitive.
  *
  * `key` is one of the most overloaded words in software. It is a database
  * identity (`primaryKey`, `sortKey`, `hashKey`, `rangeKey`), a lookup
@@ -164,21 +150,11 @@ const SENSITIVE_SUBSTRINGS = [
  * `tabKey`), a keyboard event (`keyCode`, `heldKeys`) and a musical one
  * (`musicKey`). None of those is a secret.
  *
- * An earlier rule inverted this into an ALLOWLIST of benign qualifiers, on the
- * reasoning that the space of credential qualifiers is open. That is true, but
- * so is the space of benign ones - and measuring it settled the argument:
- * the allowlist dropped 38 of 41 ordinary product field names, including the
- * canonical DynamoDB `hashKey` / `rangeKey` and the standard i18n family. A
- * default that breaks most apps is not a safe default, it is a broken one, and
- * the drop-everything direction was chosen on a premise that did not survive
- * being counted.
- *
- * So a `key` is benign unless something else in the name says otherwise. This
- * list is that something. It is a denylist and therefore cannot close; a novel
- * credential qualifier passes until it is added, exactly as `SENSITIVE_WORDS`
- * cannot close either. The compensating controls are the flat compounds below,
- * the unambiguous credential words (`secret`, `token`, `password`,
- * `credential`), and a reported drop naming any field the projection removes.
+ * A compound `key` name is benign unless another part of the name identifies
+ * a credential. This denylist cannot cover every application-specific name;
+ * flat compounds and unambiguous words such as `secret`, `token`, `password`
+ * and `credential` provide additional matches. Explicit selectors own their
+ * output, while the default projections retain only identity fields.
  */
 const CREDENTIAL_KEY_QUALIFIERS = new Set([
 	// Access and authentication.
@@ -188,7 +164,7 @@ const CREDENTIAL_KEY_QUALIFIERS = new Set([
 	'signing', 'sign', 'signature', 'crypto', 'hmac', 'encryption', 'decryption',
 	'cipher', 'symmetric', 'asymmetric', 'ssh', 'gpg', 'pgp', 'rsa', 'ecdsa',
 	'ed25519', 'tls', 'ssl', 'cert', 'certificate', 'seed', 'salt', 'nonce',
-	// Product-specific credential keys this projection is known to have leaked.
+	// Product-specific names for credential keys.
 	'stream', 'server', 'device', 'webhook', 'recovery', 'pairing', 'vapid',
 	'idempotency', 'license', 'licence', 'deploy', 'activation', 'client',
 	'consumer', 'publishable', 'restricted', 'live', 'test', 'sandbox',
@@ -204,15 +180,10 @@ const CREDENTIAL_KEY_QUALIFIERS = new Set([
  * Nouns that make a `key` an IDENTIFIER, and that therefore stop a credential
  * qualifier elsewhere in the name from firing.
  *
- * This is a narrow override, NOT a return to the rejected allowlist design
- * described above. A `key` with no credential qualifier anywhere still passes by
- * default; this list only decides what happens when one IS present but is
- * qualifying something else. The rule it repairs: scanning EVERY word meant one
- * ordinary environment or tier adjective condemned any key-shaped identifier, so
- * `clientSortKey`, `serverCacheKey`, `testHashKey` and `livePartitionKey` were
- * all dropped. Measured as a cross product of 22 canonical key-nouns against 28
- * such adjectives, 616 of 616 ordinary product names were dropped - by the
- * file's own stated metric, worse than the allowlist it replaced.
+ * A compound `key` name with no credential qualifier passes by default. This
+ * list applies when a qualifier describes an identifier noun, preserving
+ * ordinary names such as `clientSortKey`, `serverCacheKey`, `testHashKey`
+ * and `livePartitionKey`.
  *
  * So the qualifier must be the one attached to `key`: it decides only when no
  * identifier noun sits between it and the key. `apiUserKey` still drops, because
@@ -428,8 +399,7 @@ const AUTHOR_WORDS = new Set(['author', 'authors', 'authored', 'authoring']);
  *
  * A tokenizer rather than a cleverer regex: the boundary this needs is "a word
  * ended here", and a case-insensitive character class cannot see a camelCase
- * hump at all - which is exactly how `ccNumber` slipped through an earlier
- * anchored-regex attempt at this.
+ * hump such as the boundary between `cc` and `Number`.
  *
  * @param {string} name
  * @returns {string[]}
@@ -544,17 +514,16 @@ function matchesAtWordStart(joined, starts, needles) {
  *
  * The qualifier attached to the key decides. An identifier noun sitting between
  * a qualifier and the key means the qualifier is describing something else -
- * `clientSortKey` is a sort key belonging to the client, not a client key - and
- * that single distinction is what separates a credential from the 682 ordinary
- * product names the previous any-word scan condemned.
+ * `clientSortKey` is a sort key belonging to the client, not a client key.
+ * Matching the adjacent noun preserves that distinction.
  *
  * @param {string[]} words
  * @param {number} index
  * @returns {boolean}
  */
 function keyIsCredential(words, index) {
-	// A bare `key` / `keys` carries no information either way, and the safe
-	// reading of no information is to drop one field and name it in the warning.
+	// A bare `key` / `keys` has no qualifier to distinguish a credential,
+	// so the conservative verdict is sensitive.
 	if (words.length === 1) return true;
 
 	// `key` LEADING key material - `keyPair`, `keyVault`, `keyMaterial`.
@@ -616,10 +585,8 @@ export function isSensitiveFieldName(name) {
 				// Read the tokens either side of `key` and hand them to the same
 				// decision the word rule uses, so `clientsortkey` passes exactly as
 				// `clientSortKey` does and `servicerolekey` drops exactly as
-				// `serviceRoleKey` does. Generating flat `<qualifier>key` compounds
-				// instead - the previous design - was adjacency-only in the flat
-				// spelling while the word rule scanned every word, which is the
-				// divergence itself.
+				// `serviceRoleKey` does. Looking only for adjacent qualifier-key
+				// pairs would miss the qualifier in a flat owner-qualified name.
 				const head = flat.slice(0, keyAt);
 				const tail = flat.slice(keyAt + 3);
 				const ordinalHead = stripWordOrdinal(head);
@@ -660,24 +627,11 @@ export function isSensitiveFieldName(name) {
 
 	// The multi-word compounds, anchored to a word start.
 	//
-	// A FLAT name has no word starts to anchor to - it tokenizes to a single
-	// word, so `starts` is `[0]` and the anchor degenerates into
-	// `joined.startsWith(needle)`. Anything in front then defeated every entry:
-	// `userTaxId` dropped while `usertaxid` passed, and the same for
-	// `usercardnumber`, `customerdateofbirth`, `userpassportnumber` and
-	// `userhomeaddress`. That is the fourth appearance of this file's oldest
-	// defect - same value, two spellings, opposite verdicts - and it had been
-	// repaired for the short tokens and the `key` rule but never here, which is
-	// where every piece of regulated personal data lives. Postgres folds an
-	// unquoted identifier to lowercase, so the flat spelling is what a plain
-	// `select` hands an upgrade hook.
-	//
-	// With no boundary information there is nothing to anchor to, so the flat
-	// case scans unanchored and accepts the collisions that come with it
-	// (`syntaxid` drops with `taxid`). That is this file's standing trade,
-	// already taken for `iban` and the flat short tokens: a miss that leaks
-	// personal data costs more than a miss that drops a display name, and a drop
-	// is reported by name while a leak tells nobody anything.
+	// Flat lowercase names have no internal word starts, so compounds must
+	// match without an anchor: `usertaxid` and `userTaxId` describe the same
+	// field. Postgres folds unquoted identifiers to this lowercase spelling.
+	// The unanchored scan accepts benign collisions such as `syntaxid` with
+	// `taxid`; avoiding personal-data exposure takes priority here.
 	if (words.length === 1) {
 		for (let i = 0; i < SENSITIVE_COMPOUNDS.length; i++) {
 			if (joined.includes(SENSITIVE_COMPOUNDS[i])) return true;
@@ -696,10 +650,9 @@ export function isSensitiveFieldName(name) {
 		const word = words[i];
 		if (SENSITIVE_WORDS.has(word)) return true;
 		// ...and the same word carrying an ordinal suffix. The tokenizer treats
-		// digits as word characters, so `phone2` is ONE word and matched nothing:
-		// `phone` dropped while `phone1` and `phone2` - the standard CRM column
-		// pair - rode the roster, as did `pin1` and `cc2`. The digits are stripped
-		// rather than split off, because splitting would break the words that
+		// digits as word characters, so `phone2` is one word. Strip the ordinal
+		// to match names such as `phone1`, `phone2`, `pin1` and `cc2`.
+		// Stripping instead of splitting preserves the words that
 		// legitimately END in digits (`ipv4`, `ipv6`).
 		//
 		// Gated on the last character rather than stripping unconditionally: almost
@@ -804,15 +757,9 @@ const VERDICT_CACHE_MAX_NAME_LENGTH = 64;
 export function isUnsafeProjectionFieldName(name) {
 	const cached = VERDICT_CACHE.get(name);
 	if (cached !== undefined) return cached;
-	// A name too long to memoise is DROPPED, not computed. Declining to cache it
-	// while still answering it the expensive way turned the length cap into an
-	// amplifier instead of a short-circuit: presence asks this once per key of
-	// every update frame, so an uncachable name was recomputed at frame rate,
-	// and the compound scan re-walks the word starts once per needle occurrence.
-	// Measured through the real update path, one crafted key inside the ordinary
-	// byte cap cost 173.7 us per frame against 0.4 us for an ordinary frame.
-	// Nothing legitimate names a field this long; dropping is the cheap answer
-	// and the safe one, and it is reported by name like every other drop.
+	// Names beyond the length cap are sensitive without running the compound
+	// scan. They cannot enter the cache, so computing them on every frame would
+	// otherwise leave repeated client-influenced names with unbounded work.
 	//
 	// Tested AFTER the cache read, not before: an over-long name is never stored,
 	// so it reaches this line on every call regardless, while a normal name would
@@ -825,96 +772,6 @@ export function isUnsafeProjectionFieldName(name) {
 		VERDICT_CACHE.set(name, verdict);
 	}
 	return verdict;
-}
-
-/**
- * Warn-once state for {@link noteDroppedField}, held under a `Symbol.for` key
- * on `globalThis` rather than a module binding: the bundler gives a plugin
- * package and the runtime separate instances of this module, and a per-instance
- * Set would warn once PER INSTANCE for the same field.
- */
-const DROPPED_FIELD_WARNINGS = Symbol.for('adapter-uws.projection.dropped-field-warnings');
-
-/** Ceiling on distinct dropped names ever reported - see noteDroppedField. */
-const MAX_DROPPED_FIELD_WARNINGS = 32;
-
-/**
- * Report, once per field name, that a default projection dropped it.
- *
- * The name rules are deliberately biased toward dropping: a word that reads as
- * sensitive makes the whole field sensitive, so `tokenCount`, `emailVerified`
- * and `sessionCount` go too. That bias is only defensible if the app can SEE
- * it - a silently missing roster field is a bug an app debugs from the client
- * side, against a server that is working as designed.
- *
- * @param {string} name - the dropped field
- * @param {string} surface - which projection dropped it, for the message
- * @returns {void}
- */
-export function noteDroppedField(name, surface) {
-	let warned = /** @type {Set<string> | undefined} */ (
-		/** @type {any} */ (globalThis)[DROPPED_FIELD_WARNINGS]
-	);
-	if (!warned) {
-		warned = new Set();
-		// Defined rather than assigned, so an accessor on the key cannot swallow
-		// the set and turn the once-per-name warning into one per drop.
-		Object.defineProperty(globalThis, DROPPED_FIELD_WARNINGS, { value: warned, writable: true, enumerable: true, configurable: true });
-	}
-	// Cheapest test first, and a HARD CAP on how many distinct names will ever
-	// be reported. The names on a projected object can be client-influenced - an
-	// upgrade hook that spreads the request context puts header names there,
-	// which is the very case this denylist exists for - so an uncapped set keyed
-	// by them is unbounded memory driven from the wire, and an uncapped warning
-	// is an unbounded log driven from the wire. The same reasoning already
-	// governs the reserved-field warning in the presence tracker; it must govern
-	// this one too.
-	if (warned.size >= MAX_DROPPED_FIELD_WARNINGS) return;
-	// Bounded and stripped of anything that could forge a log line: an
-	// unescaped name carrying a newline writes whatever it likes into the log.
-	//
-	// TRUNCATE BEFORE ESCAPING, not after. Escaping first runs an O(name.length)
-	// regex on a name that is about to be cut to 64 characters anyway, and it
-	// runs on every join for the life of the process: the dedup key below is
-	// built from the TRUNCATED name, so names sharing a 64-character prefix
-	// collapse to one set entry and the cap above never engages to stop them.
-	// A projected object carrying long client-influenced keys therefore paid
-	// full-length escaping per field per join - a bounded log and a bounded set,
-	// but unbounded WORK. Cutting first makes the escape O(64) and leaves the
-	// dedup to absorb the rest.
-	const safeName = String(name).slice(0, 64).replace(/[^\x20-\x7e]/g, '?');
-	const id = `${surface}:${safeName}`;
-	if (warned.has(id)) return;
-	warned.add(id);
-
-	if (warned.size === MAX_DROPPED_FIELD_WARNINGS) {
-		console.warn(
-			`[svelte-adapter-uws] [${surface}] dropped the field '${safeName}' from the default projection, and has now ` +
-			`reported ${MAX_DROPPED_FIELD_WARNINGS} distinct dropped names - further ones are ` +
-			'suppressed. A flood of distinct names here means they are coming from the wire ' +
-			'(an upgrade hook spreading the request context), not from your own fields.'
-		);
-		return;
-	}
-	console.warn(
-		`[svelte-adapter-uws] [${surface}] dropped the field '${safeName}' from the default projection - its name reads ` +
-		'as credentials, personal data or transport metadata, and the default never broadcasts ' +
-		'those to peers. If this field is safe to share, pass an explicit select, e.g. ' +
-		// Always `key: ud.key`, never the `{ key }` shorthand. Shorthand reads as
-		// a free variable, so the suggestion this message invites the developer
-		// to paste threw a ReferenceError for every ordinary field name - the
-		// common case, since nearly every real name is a valid identifier.
-		//
-		// The quoted form is built with JSON.stringify rather than by wrapping
-		// the name in apostrophes: an apostrophe is printable ASCII, so it
-		// survives the escape above and would otherwise close the quote and let
-		// the rest of the field name read as code.
-		`select: (ud) => ({ ${
-			/^[A-Za-z_$][\w$]*$/.test(safeName)
-				? `${safeName}: ud.${safeName}`
-				: `${JSON.stringify(safeName)}: ud[${JSON.stringify(safeName)}]`
-		} }).`
-	);
 }
 
 /**
