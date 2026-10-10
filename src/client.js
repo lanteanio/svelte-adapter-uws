@@ -857,11 +857,21 @@ function createConnection(options) {
 
 	/** @type {ReturnType<typeof setTimer> | null} */
 	let reconnectTimer = null;
+	// A scheduled or in-flight retry is refundable until it has an outcome.
+	let reconnectAttemptReserved = false;
+	/** @type {ReturnType<typeof setTimer> | null} */
+	let socketAttemptTimer = null;
 	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let activityTimer = null;
 
-	/** @type {Promise<boolean> | null} deduped in-flight auth preflight */
+	/** @type {Promise<any> | null} deduped in-flight auth preflight */
 	let authInFlight = null;
+	/** @type {AbortController | null} */
+	let authAbort = null;
+	/** @type {ReturnType<typeof setTimer> | null} */
+	let authTimer = null;
+	let connectionGeneration = 0;
+	let offlineSimulated = false;
 
 	let attempt = 0;
 	let intentionallyClosed = false;
@@ -1420,7 +1430,10 @@ function createConnection(options) {
 		let step = attempts;
 		for (const n of rateLimitedTopics.values()) if (n < step) step = n;
 		const base = RATE_LIMITED_RETRY_MS * Math.pow(2, step - 1);
-		rateLimitedTimer = setTimer(flushRateLimitedRetries, base + dispersedReconnectDelay(0, base));
+		const generation = connectionGeneration;
+		rateLimitedTimer = setTimer(() => {
+			if (generation === connectionGeneration) flushRateLimitedRetries();
+		}, base + dispersedReconnectDelay(0, base));
 	}
 
 	// Cause of the most recent non-open status transition. Set on
@@ -1499,12 +1512,14 @@ function createConnection(options) {
 		const target = getAuthUrl();
 		if (!target) return Promise.resolve({ outcome: 'ok', status: 0, reason: '' });
 
-		authInFlight = (async () => {
+		const abort = typeof AbortController === 'function' ? new AbortController() : null;
+		const abortTimer = abort ? setTimer(() => abort.abort(), ATTEMPT_TIMEOUT_MS) : null;
+		authAbort = abort;
+		authTimer = abortTimer;
+		const pending = (async () => {
 			try {
 				// Bounded like the handshake: an abandoned preflight rejects, and
 				// the catch below treats it as a transient failure to retry.
-				const abort = typeof AbortController === 'function' ? new AbortController() : null;
-				const abortTimer = abort ? setTimer(() => abort.abort(), ATTEMPT_TIMEOUT_MS) : null;
 				let resp;
 				try {
 					resp = await fetch(target, {
@@ -1515,6 +1530,7 @@ function createConnection(options) {
 					});
 				} finally {
 					if (abortTimer !== null) clearTimer(abortTimer);
+					if (authTimer === abortTimer) authTimer = null;
 				}
 				if (debug) console.log('[ws] auth preflight status=%d', resp.status);
 				if (resp.ok) return { outcome: 'ok', status: resp.status, reason: '' };
@@ -1535,11 +1551,20 @@ function createConnection(options) {
 			} catch (err) {
 				if (debug) console.warn('[ws] auth preflight network error:', err);
 				return { outcome: 'transient', status: 0, reason: 'network error' };
-			} finally {
-				authInFlight = null;
 			}
 		})();
-		return authInFlight;
+		authInFlight = pending;
+		const clearAuth = () => {
+			if (authInFlight !== pending) return;
+			authInFlight = null;
+			authAbort = null;
+		};
+		pending.then(clearAuth, clearAuth);
+		return pending;
+	}
+
+	function currentAttempt(generation) {
+		return generation === connectionGeneration && !intentionallyClosed && !terminalClosed && !offlineSimulated;
 	}
 
 	function clearSubscriptionRetries() {
@@ -1548,34 +1573,63 @@ function createConnection(options) {
 		rateLimitedTopics.clear();
 	}
 
-	// The close event can arrive after the browser starts closing the socket.
+	function cancelAttempt() {
+		connectionGeneration++;
+		const abort = authAbort;
+		authAbort = null;
+		authInFlight = null;
+		if (authTimer !== null) clearTimer(authTimer);
+		authTimer = null;
+		if (socketAttemptTimer !== null) clearTimer(socketAttemptTimer);
+		socketAttemptTimer = null;
+		abort?.abort();
+	}
+
+	function clearReconnect(refundAttempt = false) {
+		if (reconnectTimer !== null) clearTimer(reconnectTimer);
+		reconnectTimer = null;
+		if (refundAttempt && reconnectAttemptReserved && attempt > 0) attempt--;
+		reconnectAttemptReserved = false;
+	}
+
+	// close() starts the browser closing handshake synchronously, but its close
+	// event can arrive much later. Consumers must see the drop during that gap.
 	function disconnectSocket() {
 		const sock = ws;
 		if (!sock) return;
 		sock.close();
-		if (ws === sock && !intentionallyClosed && !terminalClosed) statusStore.set('disconnected');
+		if (ws === sock && !intentionallyClosed && !terminalClosed && !offlineSimulated) {
+			statusStore.set('disconnected');
+		}
 	}
 
 	function doConnect() {
-		if (intentionallyClosed || terminalClosed) return;
+		if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 		if (!url && typeof window === 'undefined') return;
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+		if (authInFlight) return;
+		const generation = ++connectionGeneration;
 		if (ws) {
 			ws = null;
+			if (socketAttemptTimer !== null) clearTimer(socketAttemptTimer);
+			socketAttemptTimer = null;
 			clearSubscriptionRetries();
 			statusStore.set('disconnected');
-			if (intentionallyClosed || terminalClosed) return;
+			if (!currentAttempt(generation)) return;
 		}
 		statusStore.set('connecting');
-		if (intentionallyClosed || terminalClosed) return;
+		if (!currentAttempt(generation)) return;
 
 		if (authPath) {
 			runAuth().then((result) => {
-				if (intentionallyClosed || terminalClosed) return;
+				if (!currentAttempt(generation)) return;
+				if (result.outcome !== 'ok') reconnectAttemptReserved = false;
 				if (result.outcome === 'unauthorized') {
 					// Server rejected the request with a 4xx. The user is not
 					// authenticated and retrying won't help until they log in.
 					if (debug) console.warn('[ws] auth preflight rejected (4xx), not opening WebSocket');
+					terminalClosed = true;
+					permaClosedStore.set(true);
 					failureStore.set({
 						kind: 'auth-preflight',
 						class: 'AUTH',
@@ -1583,8 +1637,6 @@ function createConnection(options) {
 						...failureDiagnosticText(result.reason)
 					});
 					statusStore.set('failed');
-					terminalClosed = true;
-					permaClosedStore.set(true);
 					return;
 				}
 				if (result.outcome === 'throttled') {
@@ -1597,9 +1649,10 @@ function createConnection(options) {
 						status: result.status,
 						...failureDiagnosticText(result.reason)
 					});
-					statusStore.set('disconnected');
+					if (!currentAttempt(generation)) return;
 					attempt = Math.max(attempt, 5);
-					scheduleReconnect(undefined, result.retryAfterMs);
+					statusStore.set('disconnected');
+					if (currentAttempt(generation)) scheduleReconnect(undefined, result.retryAfterMs);
 					return;
 				}
 				if (result.outcome === 'transient') {
@@ -1612,11 +1665,12 @@ function createConnection(options) {
 						status: result.status,
 						...failureDiagnosticText(result.reason)
 					});
+					if (!currentAttempt(generation)) return;
 					statusStore.set('disconnected');
-					scheduleReconnect();
+					if (currentAttempt(generation)) scheduleReconnect();
 					return;
 				}
-				openSocket();
+				if (currentAttempt(generation)) openSocket();
 			});
 			return;
 		}
@@ -1627,6 +1681,7 @@ function createConnection(options) {
 		try {
 			ws = new WebSocket(getUrl());
 		} catch {
+			reconnectAttemptReserved = false;
 			scheduleReconnect();
 			return;
 		}
@@ -1646,6 +1701,7 @@ function createConnection(options) {
 				try { disconnectSocket(); } catch { /* already failing */ }
 			}
 		}, ATTEMPT_TIMEOUT_MS);
+		socketAttemptTimer = attemptTimer;
 		// Read inbound binary frames as ArrayBuffer (default is Blob, which is
 		// async to read). Cannot regress the realtime upload layer: that layer
 		// only EMITS binary (0x01/0x02) and receives upload results as JSON on
@@ -1665,14 +1721,18 @@ function createConnection(options) {
 
 		ws.onopen = () => {
 			clearTimer(attemptTimer);
+			if (socketAttemptTimer === attemptTimer) socketAttemptTimer = null;
 			if (ws !== sock) return;
+			reconnectAttemptReserved = false;
 			attempt = 0;
 			// A fresh connection supersedes any pending drain advisory from the old
 			// socket - clear it so a stale advisory cannot disperse a future reconnect.
 			reconnectAdvisory = null;
 			lastServerMessage = now();
 			failureStore.set(null);
+			if (ws !== sock) return;
 			setStatusOpen();
+			if (ws !== sock) return;
 			if (debug) console.log('[ws] connected');
 
 			// Advertise client capabilities. Server stores these on the
@@ -2068,11 +2128,14 @@ function createConnection(options) {
 
 		ws.onclose = (event) => {
 			clearTimer(attemptTimer);
-			// Replacement already cleared the old socket's retries. Its late close
-			// must not clear retries belonging to the new socket.
+			if (socketAttemptTimer === attemptTimer) socketAttemptTimer = null;
+			// Replacing or pausing a socket already cleared its retry state. A
+			// late close must not clear retries belonging to the new socket.
 			if (ws !== sock) return;
+			reconnectAttemptReserved = false;
 			clearSubscriptionRetries();
 			ws = null;
+			const generation = connectionGeneration;
 			if (debug) console.log('[ws] disconnected');
 			lastCloseCode = event?.code || 0;
 			lastCloseReason = event?.reason || '';
@@ -2112,9 +2175,10 @@ function createConnection(options) {
 			reconnectAdvisory = null;
 			if (advisory && now() < advisory.deadline) {
 				failureStore.set({ kind: 'ws-close', class: 'DRAIN', code, ...failureDiagnosticText(reason) });
-				statusStore.set('disconnected');
+				if (!currentAttempt(generation)) return;
 				attempt = 0;
-				scheduleReconnect(dispersedReconnectDelay(advisory.afterMs, advisory.windowMs));
+				statusStore.set('disconnected');
+				if (currentAttempt(generation)) scheduleReconnect(dispersedReconnectDelay(advisory.afterMs, advisory.windowMs));
 				return;
 			}
 
@@ -2126,8 +2190,9 @@ function createConnection(options) {
 				failureStore.set({ kind: 'ws-close', class: 'RETRY', code, ...failureDiagnosticText(reason) });
 			}
 
+			if (!currentAttempt(generation)) return;
 			statusStore.set('disconnected');
-			scheduleReconnect();
+			if (currentAttempt(generation)) scheduleReconnect();
 		};
 
 		ws.onerror = () => {
@@ -2140,8 +2205,10 @@ function createConnection(options) {
 	 * @param {number} [floorMs] the least delay the server asked for (Retry-After)
 	 */
 	function scheduleReconnect(overrideDelayMs, floorMs) {
-		if (reconnectTimer) return;
+		if (intentionallyClosed || terminalClosed || offlineSimulated || reconnectTimer !== null) return;
 		if (attempt >= maxReconnectAttempts) {
+			terminalClosed = true;
+			permaClosedStore.set(true);
 			failureStore.set({
 				kind: 'ws-close',
 				class: 'EXHAUSTED',
@@ -2149,8 +2216,6 @@ function createConnection(options) {
 				...failureDiagnosticText(lastCloseReason || 'max reconnect attempts exhausted')
 			});
 			statusStore.set('failed');
-			terminalClosed = true;
-			permaClosedStore.set(true);
 			return;
 		}
 		let delay;
@@ -2162,8 +2227,11 @@ function createConnection(options) {
 		} else {
 			delay = Math.max(nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt), floorMs || 0);
 			attempt++;
+			reconnectAttemptReserved = true;
 		}
+		const generation = connectionGeneration;
 		reconnectTimer = setTimer(() => {
+			if (generation !== connectionGeneration) return;
 			reconnectTimer = null;
 			doConnect();
 		}, delay);
@@ -2445,7 +2513,7 @@ function createConnection(options) {
 		if (sock && sock.readyState === WebSocket.OPEN) {
 			if (debug) console.log('[ws] send ->', data);
 			const serialized = serializeForSend(data);
-			// A caller's toJSON can close or replace the connection while serializing.
+			// A caller's toJSON can pause or close the connection while serializing.
 			if (ws !== sock || sock.readyState !== WebSocket.OPEN) return false;
 			sock.send(serialized);
 			return true;
@@ -2508,13 +2576,35 @@ function createConnection(options) {
 	/** @type {(() => void) | null} */
 	let onlineHandler = null;
 
+	function simulateOffline() {
+		if (intentionallyClosed || terminalClosed || offlineSimulated) return;
+		if (!url && typeof window === 'undefined') return;
+		offlineSimulated = true;
+		cancelAttempt();
+		clearReconnect(true);
+		clearSubscriptionRetries();
+		reconnectAdvisory = null;
+		const sock = ws;
+		ws = null;
+		statusStore.set('disconnected');
+		if (offlineSimulated && !intentionallyClosed && !terminalClosed) failureStore.set(null);
+		try { sock?.close(); } catch { /* already closing */ }
+	}
+
+	function resumeOnline() {
+		if (intentionallyClosed || terminalClosed || !offlineSimulated) return;
+		offlineSimulated = false;
+		readSuspendGap();
+		lastActivityTickWall = now();
+		doConnect();
+	}
+
 	function close() {
 		intentionallyClosed = true;
+		cancelAttempt();
+		clearReconnect();
+		clearSubscriptionRetries();
 		permaClosedStore.set(true);
-		if (reconnectTimer) {
-			clearTimer(reconnectTimer);
-			reconnectTimer = null;
-		}
 		if (activityTimer) {
 			clearIntervalTimer(activityTimer);
 			activityTimer = null;
@@ -2527,8 +2617,9 @@ function createConnection(options) {
 			if (offlineHandler) { window.removeEventListener('offline', offlineHandler); offlineHandler = null; }
 			if (onlineHandler) { window.removeEventListener('online', onlineHandler); onlineHandler = null; }
 		}
-		ws?.close();
+		const sock = ws;
 		ws = null;
+		sock?.close();
 		singleton = null;
 		singletonCreatedBy = '';
 		// Intentional termination is not a failure cause. Clear any prior
@@ -2556,7 +2647,7 @@ function createConnection(options) {
 				// detector tick could read it): act on it here, or the
 				// re-stamp would silently swallow it.
 				const gapAtHide = readSuspendGap();
-				if (intentionallyClosed || terminalClosed) return;
+				if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 				if (ws?.readyState === WebSocket.OPEN) {
 					if (gapAtHide > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
 						if (debug) console.log('[ws] suspend gap detected at hide, reconnecting');
@@ -2572,7 +2663,7 @@ function createConnection(options) {
 				return;
 			}
 			// Tab is visible.
-			if (intentionallyClosed || terminalClosed) return;
+			if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 			if (ws?.readyState === WebSocket.OPEN) {
 				if (readSuspendGap() > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
 					// The device slept through the hide. The socket still reads
@@ -2596,10 +2687,7 @@ function createConnection(options) {
 			// Connection did not survive (or was never open) - force a reconnect.
 			hiddenDisconnect = false;
 			attempt = 0;
-			if (reconnectTimer) {
-				clearTimer(reconnectTimer);
-				reconnectTimer = null;
-			}
+			clearReconnect();
 			doConnect();
 		};
 		document.addEventListener('visibilitychange', visibilityHandler);
@@ -2613,12 +2701,11 @@ function createConnection(options) {
 	// off these events so a drop is reflected at once and recovery is immediate.
 	if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
 		offlineHandler = () => {
-			if (intentionallyClosed || terminalClosed) return;
+			if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 			if (debug) console.log('[ws] browser reported offline, dropping the socket');
 			if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-				// Close now so onclose classifies RETRY, flips status to 'disconnected',
-				// and schedules the reconnect - which is also what arms the realtime
-				// offline queue. The `online` handler skips the backoff on recovery.
+				// Report the drop now; onclose classifies RETRY and schedules the
+				// reconnect. The online handler skips the backoff on recovery.
 				disconnectSocket();
 			} else {
 				// No live socket to close - surface the drop directly.
@@ -2626,17 +2713,14 @@ function createConnection(options) {
 			}
 		};
 		onlineHandler = () => {
-			if (intentionallyClosed || terminalClosed) return;
+			if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 			// The socket survived the drop (rare) - nothing to do.
 			if (ws?.readyState === WebSocket.OPEN) return;
 			if (debug) console.log('[ws] browser reported online, reconnecting now');
 			// Connectivity is back: skip the remaining backoff and reconnect now,
 			// mirroring the tab-visible recovery branch.
 			attempt = 0;
-			if (reconnectTimer) {
-				clearTimer(reconnectTimer);
-				reconnectTimer = null;
-			}
+			clearReconnect();
 			doConnect();
 		};
 		window.addEventListener('offline', offlineHandler);
@@ -2650,6 +2734,7 @@ function createConnection(options) {
 	// normal reconnect path takes over.
 	if (typeof window !== 'undefined') {
 		activityTimer = setIntervalTimer(() => {
+			if (intentionallyClosed || terminalClosed || offlineSimulated) return;
 			// The suspend check catches sleeps the visibility handler never
 			// sees (lid close on a visible tab, OS suspend without a hide):
 			// the first tick after wake reads the whole gap in one delta,
@@ -2736,6 +2821,8 @@ function createConnection(options) {
 			if (_onFlowDegraded) _onFlowDegraded(_flowDegraded);
 			return () => { _onFlowDegraded = null; };
 		},
+		simulateOffline,
+		resumeOnline,
 		close
 	};
 }

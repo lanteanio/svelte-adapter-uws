@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Added: reversible offline simulation on the client connection.** `simulateOffline()` pauses the socket and reconnect attempts while preserving subscriptions and queued messages; `resumeOnline()` reconnects with a fresh auth preflight when enabled, so an application can exercise its normal offline queue and recovery behavior.
+  - **Affects:** Applications and demos that exercise their offline state and recovery flow.
+  - **Action:** Use the two connection methods for temporary offline simulation.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Both methods are idempotent; permanent close, server refusal and retry exhaustion cannot be resumed.
+  - **Detail:** [Added engineering detail](#added).
 - **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
   - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
   - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
@@ -313,6 +320,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection transitions, reconnect non-retention, existing string and binary
   sends, SSR, and transport errors; a TypeScript consumer pins the string input
   and boolean return.
+
+- Client connections expose `simulateOffline()` and `resumeOnline()`. Pause
+  cancels socket and auth attempts, suppresses reconnect triggers and preserves
+  the retry budget, topics, listeners and queued messages. Resume authenticates
+  and reconnects without reviving a terminal connection. Delayed callback and
+  actual built-runtime client tests cover lifecycle ownership and restoration.
+
 - **A signal for every rendered and admin request.** The SSR lane opens an
   `AbortController` per request (`openRequestSignal`, handler/state-pool.js)
   and passes its signal into the `Request`. `onAborted` aborts it until
@@ -656,7 +670,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Self-initiated client socket closes report `disconnected` immediately, even
   while the browser's close event is pending. `send()` returns true for local
-  admission and false for a disconnected socket; serialization and
+  admission and false for a disconnected or paused socket; serialization and
   transport exceptions propagate. Late callbacks cannot overwrite a replacement
   connection's state or subscription retries.
 
