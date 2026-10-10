@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Types only. `introspect().assertions` keeps its plain-object type.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: sendWireBatch rejects invalid codec payloads before binary admission.** A codec returning an object, Promise or other non-byte value could announce a wire id before frame construction failed, or have its value coerced into unexpected bytes; the call now throws `TypeError` before announcing or constructing that frame.
+  - **Affects:** Custom stateful codec authors using `platform.sendWireBatch`, on the production runtime and under `createTestServer`.
+  - **Action:** Return `Uint8Array` bytes, or `null` to decline an encoding. Keep asynchronous work outside `encode`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid payloads, including `Buffer` and byte-array views from another JavaScript realm, retain their bytes. Nullish results keep their fallback behavior and codec exceptions propagate unchanged. A failure on a later entry leaves earlier entries sent.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: sendWireBatch reports a dropped last frame.** When the codec declined the batch and the frame for the final entry was dropped, the call returned 1, as if everything had gone out; it now returns 2, on the production runtime and under `createTestServer`.
   - **Affects:** Plugins and apps that read the return value of `platform.sendWireBatch` to decide whether to resend.
   - **Action:** None.
@@ -565,6 +571,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The handshake case-folding regression reaches the character comparison.**
   Its Kelvin-sign input has the same length as `websocket` and is explicitly
   shown to lowercase to that token, so a Unicode-folding implementation fails.
+
+- **sendWireBatch validates encoded payloads before allocating a wire id.**
+  `src/runtime/handler/platform.js` and `src/testing.js` reject non-nullish
+  results other than `Uint8Array` on the batch and per-entry paths. The check
+  accepts byte-array views across realms and `Buffer` without copying them.
+  Invalid results throw `TypeError`; codec exceptions, nullish fallback and
+  valid delivery keep their existing behavior. The isolated real-socket cases
+  in `test/send-wire-batch-payload.test.js` exercise both runtimes and check
+  the delivered binding, payload bytes, partial delivery and refusal boundary.
 
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;

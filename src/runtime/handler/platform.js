@@ -6,6 +6,7 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
+import { isUint8Array } from 'node:util/types';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_COHORT_JOIN, WS_COHORT_LEAVE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, envelopeData, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, assertStampableSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './egress-budget.js';
@@ -1271,6 +1272,7 @@ export const platform = {
 					bumpOut(ws, json);
 					continue;
 				}
+				if (!isUint8Array(p)) throw new TypeError('sendWireBatch: wire.encode must return Uint8Array or null');
 				const id = ensureWireId(ws, ud, topic);
 				if (id === -1) {
 					poisonWireState(ws, ud, wire.capability);
@@ -1286,6 +1288,7 @@ export const platform = {
 			}
 			return result;
 		}
+		if (!isUint8Array(payload)) throw new TypeError('sendWireBatch: wire.encode must return Uint8Array or null');
 		const id = ensureWireId(ws, ud, topic);
 		if (id === -1) {
 			// Dropped wire-id announce; the batch encode already advanced this

@@ -1,3 +1,4 @@
+import { isUint8Array } from 'node:util/types';
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders, framingRefusal, isFramingHeader } from './runtime/utils/request-headers.js';
@@ -1707,6 +1708,7 @@ export async function createTestServer(options = {}) {
 				for (let i = 0; i < count; i++) {
 					const p = wire.encode(event, datas[i], state);
 					if (p == null) { result = sendOutboundT(ws, envelope(topic, event, datas[i])); continue; }
+					if (!isUint8Array(p)) throw new TypeError('sendWireBatch: wire.encode must return Uint8Array or null');
 					const id = ensureWireIdT(ws, ud, topic);
 					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i, datas); }
 					result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, p));
@@ -1714,6 +1716,7 @@ export async function createTestServer(options = {}) {
 				}
 				return result;
 			}
+			if (!isUint8Array(payload)) throw new TypeError('sendWireBatch: wire.encode must return Uint8Array or null');
 			const id = ensureWireIdT(ws, ud, topic);
 			if (id === -1) {
 				poisonWireStateT(ws, ud, wire.capability);

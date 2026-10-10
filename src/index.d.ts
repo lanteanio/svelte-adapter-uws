@@ -3069,7 +3069,10 @@ export interface Platform {
 	 * per-entry JSON envelopes when the connection has no capability. The
 	 * per-subscriber twin for culled (per-viewer) delivery walks. No per-topic
 	 * seq is stamped (matches `send()` / `sendWire()`). Returns the uWS send
-	 * status of the last frame sent.
+	 * status of the last frame sent. A non-null codec result that is not a
+	 * Uint8Array throws TypeError before announcing a wire id or constructing
+	 * that frame. Codec exceptions propagate unchanged; entries already sent
+	 * remain sent.
 	 */
 	sendWireBatch(
 		ws: WebSocket<any>,

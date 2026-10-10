@@ -2019,7 +2019,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph handler/config.js's get_origin also calls originFromHeaders and warns
 	// once about a refused proxy header. Header strings are read and compared
 	// only; no bytes are copied or written differently.
-	platform: 'dc5c2d60b5efe0c4dff003a21ce6581cbe05167cf6d5ff23d6b7ecfc105c6791',
+	// Re-pinned for sendWireBatch codec-result validation: platform.js imports
+	// node:util/types isUint8Array and checks the batch/per-entry non-null
+	// result before wire-id admission and frame construction. The brand checks
+	// inspect no payload bytes, allocate no payload, and leave the valid frame
+	// builder and send path unchanged. No copy primitive entered the graph.
+	platform: '69bd4c8f12bbe99cbaf0ecdde2f22ac63d0fa44b8f195fb66386c2380387b681',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
