@@ -860,7 +860,7 @@ export function createPresence(options = {}) {
 	 * @returns {string}
 	 */
 	function resolveKey(data) {
-		if (data && keyField in data && data[keyField] != null) {
+		if (data && Object.prototype.hasOwnProperty.call(data, keyField) && data[keyField] != null) {
 			const key = String(data[keyField]);
 			// The resolved key is attacker-controlled (it stringifies whatever
 			// the select produced for the key field) and lands as a property
