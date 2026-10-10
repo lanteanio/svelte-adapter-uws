@@ -779,22 +779,23 @@ export async function createTestServer(options = {}) {
 	 *
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {string} payload
+	 * @param {boolean} [countStats] - false for topic broadcasts
 	 */
-	function sendOutboundT(ws, payload) {
+	function sendOutboundT(ws, payload, countStats = true) {
 		if (chaos.shouldDropOutbound()) return 0;
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
 			setTimer(() => {
 				try { ws.send(payload, false, false); }
 				catch { closedWsAbortsT++; return; }
-				bumpOutT(ws, payload);
+				if (countStats) bumpOutT(ws, payload);
 			}, delay);
 			return 1;
 		}
 		let result;
 		try { result = ws.send(payload, false, false); }
 		catch { closedWsAbortsT++; return 2; }
-		bumpOutT(ws, payload);
+		if (countStats) bumpOutT(ws, payload);
 		return result;
 	}
 
@@ -841,27 +842,30 @@ export async function createTestServer(options = {}) {
 	 * same chaos chokepoint so drop/slow-drain scenarios apply to `0x03` frames.
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {Uint8Array} frame
+	 * @param {boolean} [countStats] - false for topic broadcasts
 	 */
-	function sendOutboundBinaryT(ws, frame) {
+	function sendOutboundBinaryT(ws, frame, countStats = true) {
 		if (chaos.shouldDropOutbound()) return 0;
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
 			setTimer(() => {
 				try { ws.send(frame, true, false); }
 				catch { closedWsAbortsT++; return; }
-				bumpOutT(ws, frame);
+				if (countStats) bumpOutT(ws, frame);
 			}, delay);
 			return 1;
 		}
 		let result;
 		try { result = ws.send(frame, true, false); }
 		catch { closedWsAbortsT++; return 2; }
-		bumpOutT(ws, frame);
+		if (countStats) bumpOutT(ws, frame);
 		return result;
 	}
 
-	function sendWireFanoutT(ws, value, binary) {
-		return binary ? sendOutboundBinaryT(ws, value) : sendOutboundT(ws, value);
+	// Topic fan-out is excluded from per-connection close counters, as in
+	// production. Keep the typed send paths and their fault-injection behavior.
+	function sendWireFanoutT(ws, value, binary = false) {
+		return binary ? sendOutboundBinaryT(ws, value, false) : sendOutboundT(ws, value, false);
 	}
 
 	// Binary wire (0x03) capability accounting + topic-id assignment, mirroring
@@ -1248,7 +1252,7 @@ export async function createTestServer(options = {}) {
 				let delivered = false;
 				for (const ws of wsConnections) {
 					if (!ws.isSubscribed(topic)) continue;
-					sendOutboundT(ws, env);
+					sendWireFanoutT(ws, env);
 					delivered = true;
 				}
 				return delivered;
@@ -1272,20 +1276,20 @@ export async function createTestServer(options = {}) {
 					const subs = ud[WS_SUBSCRIPTIONS];
 					if (!subs || !subs.has(topic)) continue;
 					const caps = ud[WS_CAPS];
-					if (!caps || !caps.has(wire.capability)) { sendOutboundT(ws, env); delivered = true; continue; }
+					if (!caps || !caps.has(wire.capability)) { sendWireFanoutT(ws, env); delivered = true; continue; }
 					const state = ensureWireStateT(ws, ud, wire);
 					if (state == null) {
 						// A poisoned capability is served exactly like a caps-less
 						// connection: the shared JSON envelope, never binary.
-						if (wireStatePoisonedT(ud, wire.capability)) { sendOutboundT(ws, env); delivered = true; continue; }
+						if (wireStatePoisonedT(ud, wire.capability)) { sendWireFanoutT(ws, env); delivered = true; continue; }
 						if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
-						if (sharedPayload == null) { sendOutboundT(ws, env); delivered = true; continue; }
+						if (sharedPayload == null) { sendWireFanoutT(ws, env); delivered = true; continue; }
 						if (!isUint8Array(sharedPayload)) throw new TypeError('wire.encode must return Uint8Array or null');
 						const id = ensureWireIdT(ws, ud, topic);
 						if (id === -1) {
 							// Dropped wire-id announce: JSON for this frame + poison.
 							poisonWireStateT(ws, ud, wire.capability);
-							sendOutboundT(ws, env);
+							sendWireFanoutT(ws, env);
 							delivered = true;
 							continue;
 						}
@@ -1293,21 +1297,21 @@ export async function createTestServer(options = {}) {
 						if (!frame) { frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, sharedPayload); sharedFrameById.set(id, frame); }
 						// A dropped shared frame needs no poisoning: the payload
 						// carries no per-connection state.
-						sendOutboundBinaryT(ws, frame);
+						sendWireFanoutT(ws, frame, true);
 					} else {
 						const payload = wire.encode(event, data, state);
-						if (payload == null) { sendOutboundT(ws, env); delivered = true; continue; }
+						if (payload == null) { sendWireFanoutT(ws, env); delivered = true; continue; }
 						if (!isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
 						const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
 						const id = ensureWireIdT(ws, ud, topic);
 						if (id === -1) {
 							// Dropped wire-id announce: JSON for this frame + poison.
 							poisonWireStateT(ws, ud, wire.capability);
-							sendOutboundT(ws, env);
+							sendWireFanoutT(ws, env);
 							delivered = true;
 							continue;
 						}
-						const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, seqOnWire, payload));
+						const result = sendWireFanoutT(ws, buildBinaryFrame(sv, id, seqOnWire, payload), true);
 						// 2 = dropped past maxBackpressure (0 = enqueued or a chaos
 						// drop, NOT a drop here). The encode above already mutated
 						// this connection's dictionary for the dropped frame, so
@@ -1328,7 +1332,7 @@ export async function createTestServer(options = {}) {
 					let delivered = false;
 					for (const ws of wsConnections) {
 						if (!ws.isSubscribed(topic)) continue;
-						sendOutboundT(ws, env);
+						sendWireFanoutT(ws, env);
 						delivered = true;
 					}
 					return delivered;
@@ -1373,8 +1377,8 @@ export async function createTestServer(options = {}) {
 					// Chaos cannot intercept the app's C++-style fan-out, so degrade to a
 					// per-recipient walk through the chaos chokepoint, like every other path.
 					for (const ws of wsConnections) {
-						if (frame && ws.isSubscribed(bin)) sendOutboundBinaryT(ws, frame);
-						else if (ws.isSubscribed(json)) sendOutboundT(ws, env);
+						if (frame && ws.isSubscribed(bin)) sendWireFanoutT(ws, frame, true);
+						else if (ws.isSubscribed(json)) sendWireFanoutT(ws, env);
 					}
 				}
 				return true;
@@ -1589,7 +1593,7 @@ export async function createTestServer(options = {}) {
 			if (resumeBuffersT.size > 0) {
 				for (let i = 0; i < count; i++) captureResumeFrameT(topic, seqs[i] === 0 ? null : seqs[i], envs[i]);
 			}
-			const sendJsonT = (ws, list) => { for (let i = 0; i < list.length; i++) sendOutboundT(ws, list[i]); };
+			const sendJsonT = (ws, list) => { for (let i = 0; i < list.length; i++) sendWireFanoutT(ws, list[i]); };
 			if (!anyExclude && !capCountsT.has(wire.capability)) {
 				if (chaos.scenario === null) {
 					for (let i = 0; i < count; i++) app.publish(topic, envs[i], false, false);
