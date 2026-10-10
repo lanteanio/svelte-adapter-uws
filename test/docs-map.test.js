@@ -51,6 +51,7 @@ const EXPECTED_OWNERSHIP_ROWS = [
 ];
 
 const markdown = new MarkdownIt({ html: true, linkify: true, typographer: false });
+const README_HTML = markdown.render(normalizeSource(README));
 const NON_RENDERED_ELEMENTS = new Set(['code', 'head', 'noscript', 'pre', 'script', 'style', 'template']);
 const BLOCK_ELEMENTS = new Set([
 	'address', 'article', 'aside', 'blockquote', 'br', 'dd', 'details', 'div', 'dl', 'dt',
@@ -178,7 +179,10 @@ function renderedDocument(source) {
 }
 
 function strictRenderedShapes(source) {
-	const rendered = markdown.render(source);
+	return renderedShapes(markdown.render(source));
+}
+
+function renderedShapes(rendered) {
 	const root = parseFragment(rendered);
 	const fullDocument = parse(rendered);
 	const elements = [];
@@ -494,16 +498,28 @@ function aggregateOwnershipClaim(node, rendered, approved) {
 	return ownershipFragmentContradiction([context, ...partial].filter(Boolean).join(' '));
 }
 
-function ownershipFailures(document) {
+function interferenceFailures(shapes) {
 	const failures = [];
-	const source = normalizeSource(document);
-	const shapes = strictRenderedShapes(source);
 	if (shapes.styleInterference) {
 		failures.push('README contains rendered styling that can interfere with canonical routes');
 	}
 	if (shapes.executableOrNavigationInterference) {
 		failures.push('README contains rendered executable or navigation interference with canonical routes');
 	}
+	return failures;
+}
+
+// The unchanged README is checked separately. These self-contained appended
+// fixtures exercise the same classifier without repeating its ownership walk.
+// Full-document examples below also verify the Markdown and HTML context.
+function appendedInterferenceFailures(fragment) {
+	return interferenceFailures(strictRenderedShapes(fragment));
+}
+
+function ownershipFailures(document) {
+	const source = normalizeSource(document);
+	const shapes = strictRenderedShapes(source);
+	const failures = interferenceFailures(shapes);
 	const divider = source.indexOf('\n\n---\n');
 	const preface = divider === -1 ? '' : source.slice(0, divider);
 	const exactTopContract = occurrences(preface, EXPECTED_TOP_CONTRACT) === 1;
@@ -605,16 +621,7 @@ describe('documentation map', () => {
 		expect(ownershipFailures(tableDrift)).toContain('bounded ownership table drifted');
 	}, 15_000);
 
-	// One case per interference shape, rather than one case over all six.
-	// Each mutant is a different document, so `ownershipFailures` has to walk
-	// it in full - twelve of those walks under a single budget put the case
-	// close enough to its ceiling that full-suite load, not content, decided
-	// whether it passed. It failed one full run and passed the next on the
-	// same tree while passing 31/31 in isolation both times, which is the
-	// shape that teaches people to re-run instead of read.
-	//
-	// `it.each` also names the shape under test in the failure, which the
-	// loop could only do through `expect.soft`'s message argument.
+	// Name each route-hiding shape separately to identify the failing geometry.
 	const HIDDEN_ROUTE_SHAPES = [
 		['inert attribute', '<span inert>[documentation site](' + DOCS_SITE + ')</span>'],
 		['pointer-events none', '<span style=pointer-events:none>[documentation site](' + DOCS_SITE + ')</span>'],
@@ -652,6 +659,17 @@ describe('documentation map', () => {
 		);
 	});
 
+	it('preserves the full document when testing appended interference', () => {
+		for (const fragment of [
+			'<style>a { display: none !important; }</style>',
+			'<body hidden>',
+			'<body onload="document.documentElement.hidden=true">'
+		]) {
+			expect(README_HTML + markdown.render(fragment)).toBe(markdown.render(normalizeSource(README) + '\n\n' + fragment));
+			expect(appendedInterferenceFailures(fragment)).toEqual(ownershipFailures(README + '\n\n' + fragment));
+		}
+	}, 10_000);
+
 	it('rejects rendered styles that can globally interfere with canonical routes', () => {
 		for (const stylesheet of [
 			'<style>a { display: none !important; }</style>',
@@ -660,7 +678,7 @@ describe('documentation map', () => {
 			'<link rel="stylesheet" href="https://example.invalid/readme.css">',
 			'<div style="position: fixed; inset: 0">route-blocking overlay</div>'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + stylesheet), stylesheet).toContain(
+			expect.soft(appendedInterferenceFailures(stylesheet), stylesheet).toContain(
 				'README contains rendered styling that can interfere with canonical routes'
 			);
 		}
@@ -670,9 +688,9 @@ describe('documentation map', () => {
 			'```html\n<style>a { display: none }</style>\n```',
 			'Inline code: `<style>a { display: none }</style>`.'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + nonRenderedExample), nonRenderedExample).toEqual([]);
+			expect.soft(appendedInterferenceFailures(nonRenderedExample), nonRenderedExample).toEqual([]);
 		}
-	}, 15_000);
+	});
 
 	it('rejects document-root attributes that disable canonical routes', () => {
 		for (const documentRoot of [
@@ -700,7 +718,7 @@ describe('documentation map', () => {
 			'<body bgcolor="#ffffff" text="#ffffff" link="#ffffff" vlink="#ffffff" alink="#ffffff">',
 			'<html background="route-obscuring-image.png">'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + documentRoot), documentRoot).toContain(
+			expect.soft(appendedInterferenceFailures(documentRoot), documentRoot).toContain(
 				'README contains rendered styling that can interfere with canonical routes'
 			);
 		}
@@ -712,10 +730,10 @@ describe('documentation map', () => {
 			'<!-- <body popover> -->',
 			'```html\n<body aria-disabled="true">\n```'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + nonRenderedExample), nonRenderedExample).toEqual([]);
+			expect.soft(appendedInterferenceFailures(nonRenderedExample), nonRenderedExample).toEqual([]);
 		}
-		expect(ownershipFailures(README + '\n\n<body aria-disabled="false">')).toEqual([]);
-	}, 30_000);
+		expect(appendedInterferenceFailures('<body aria-disabled="false">')).toEqual([]);
+	});
 
 	it('rejects executable document-root and navigation interference', () => {
 		for (const executableRouteMutation of [
@@ -749,7 +767,7 @@ describe('documentation map', () => {
 			'<BASE HREF="https://example.invalid/dead/">',
 			'<base>'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + executableRouteMutation), executableRouteMutation).toContain(
+			expect.soft(appendedInterferenceFailures(executableRouteMutation), executableRouteMutation).toContain(
 				'README contains rendered executable or navigation interference with canonical routes'
 			);
 		}
@@ -775,7 +793,7 @@ describe('documentation map', () => {
 			'```html\n<base href="https://example.invalid/dead/">\n```',
 			'Inline code: `<base href="https://example.invalid/dead/">`.'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + nonRenderedExample), nonRenderedExample).toEqual([]);
+			expect.soft(appendedInterferenceFailures(nonRenderedExample), nonRenderedExample).toEqual([]);
 		}
 		for (const inactiveObject of [
 			'<object hidden data="javascript:parent.document.documentElement.hidden=true"></object>',
@@ -783,9 +801,9 @@ describe('documentation map', () => {
 			'<object hidden data="data:text/html,<script>parent.postMessage(\'object-hit\',\'*\')</script>"></object>',
 			'<object data="data:text/plain,ordinary documentation"></object>'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + inactiveObject), inactiveObject).toEqual([]);
+			expect.soft(appendedInterferenceFailures(inactiveObject), inactiveObject).toEqual([]);
 		}
-	}, 60_000);
+	});
 
 	it('classifies stewardship variants and aligned passive clauses', () => {
 		const contradictions = [

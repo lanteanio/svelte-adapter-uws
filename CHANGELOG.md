@@ -491,6 +491,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documentation-map checks analyze self-contained appended HTML fixtures
+  without repeating the unchanged README ownership walk. Full-document checks
+  retain coverage of parser context while root attributes, executable markup
+  and navigation cases use the ordinary test deadline.
+
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as
