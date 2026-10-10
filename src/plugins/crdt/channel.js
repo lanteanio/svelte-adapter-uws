@@ -158,11 +158,12 @@ export function createCrdtChannel(options) {
 	}
 	// Background-reconcile cadence. 0 disables (power users running their own
 	// reconcile discipline); anything non-numeric or negative falls back to the
-	// default rather than silently disabling loss recovery.
+	// default rather than silently disabling loss recovery. Large finite values
+	// are capped at the timer limit to avoid overflowing into a 1 ms loop.
 	const reconcileIntervalMs = typeof options.reconcileIntervalMs === 'number'
 		&& Number.isFinite(options.reconcileIntervalMs)
 		&& options.reconcileIntervalMs >= 0
-		? options.reconcileIntervalMs
+		? Math.min(options.reconcileIntervalMs, 2147483647)
 		: HEALTHY_RECONCILE_MS;
 
 	const doc = new Y.Doc({ gc: options.gc !== false });

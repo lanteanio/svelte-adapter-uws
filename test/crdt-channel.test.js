@@ -121,6 +121,8 @@ beforeEach(async () => {
 	}
 	MockWebSocket._last = null;
 	await flush(2);
+	// Intentional close requires an explicit new connection.
+	clientModule.connect();
 });
 
 describe('option validation', () => {
@@ -790,6 +792,18 @@ describe('background reconcile (terminal drop)', () => {
 				const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: bad });
 				expect(scheduled.some((t) => t.ms === 30000), `fallback for ${String(bad)}`).toBe(true);
 				ch.destroy();
+			}
+
+			for (const value of [2147483647, 2147483648, Number.MAX_VALUE]) {
+				scheduled.length = 0;
+				const server = makeServer();
+				const channel = createCrdtChannel({ transport: server.transport, reconcileIntervalMs: value });
+				try {
+					expect(scheduled.some((t) => t.ms === 2147483647), `bounded delay for ${value}`).toBe(true);
+					expect(scheduled.every((t) => t.ms <= 2147483647)).toBe(true);
+				} finally {
+					channel.destroy();
+				}
 			}
 
 			scheduled.length = 0;

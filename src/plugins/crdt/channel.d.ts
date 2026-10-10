@@ -140,7 +140,8 @@ export function createCrdtChannel(options: {
 	 * (a loss with no causally-later update, which the pending-structs
 	 * detector cannot see) without waiting for a reconnect. An in-sync
 	 * exchange costs one tiny request answered with an empty diff. `0`
-	 * disables it. Default 30000.
+	 * disables it. Positive finite values are capped at 2147483647 ms to
+	 * avoid timer overflow. Default 30000.
 	 */
 	reconcileIntervalMs?: number;
 }): CrdtChannel;
