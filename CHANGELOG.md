@@ -101,6 +101,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: static date validators omit future and unrepresentable modification times.** Static assets whose file time is before 1900 or newer than the indexing clock no longer publish that time as `Last-Modified` or use it for date conditions, keeping date-based revalidation tied to a representable HTTP timestamp.
+  - **Affects:** Deployments containing future-dated, very old or newly written static assets.
+  - **Action:** None. Use the representation ETag for revalidation when `Last-Modified` is absent.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The indexing clock refreshes once per second; a recent file newer than that held value also omits `Last-Modified` for the cache entry's lifetime. The raw-mtime ETag and its conditional requests remain available.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: static text explicitly declares UTF-8.** Plain text, HTML, CSS, JavaScript and other indexed text assets now advertise UTF-8 in their HTTP Content-Type, so browsers decode non-ASCII bytes consistently and applications can identify legacy files that need conversion before deploying this header behavior.
+  - **Affects:** Static and prerendered text assets, including legacy Windows-1252 HTML, CSS or JavaScript files.
+  - **Action:** Re-encode non-UTF-8 text assets as UTF-8 before deploying.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The HTTP charset overrides HTML charset metadata and CSS @charset declarations. Files with another encoding are now interpreted as UTF-8; staticHeaders cannot override Content-Type per file.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
   - **Affects:** Endpoints that return custom ReadableStream response bodies.
   - **Action:** None for valid string or binary chunks.
@@ -127,13 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** Keep the automatic default, supply a known movement ceiling, or use zero to disable speed checks.
   - **Requires:** No new dependency or wire change.
   - **Compatibility:** Automatic local detection needs two tick-like command intervals; an explicit numeric ceiling also works before that baseline exists.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: static text explicitly declares UTF-8.** Plain text, HTML, CSS, JavaScript and other indexed text assets now advertise UTF-8 in their HTTP Content-Type, so browsers decode non-ASCII bytes consistently and applications can identify legacy files that need conversion before deploying this header behavior.
-  - **Affects:** Static and prerendered text assets, including legacy Windows-1252 HTML, CSS or JavaScript files.
-  - **Action:** Re-encode non-UTF-8 text assets as UTF-8 before deploying.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** The HTTP charset overrides HTML charset metadata and CSS @charset declarations. Files with another encoding are now interpreted as UTF-8; staticHeaders cannot override Content-Type per file.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
@@ -797,6 +804,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- Test static date eligibility independently of filesystem timestamp ranges and compare native responses with the actual stored file time.
 
 - Static text release guidance now explains HTTP charset precedence and the required conversion of legacy-encoded assets, since staticHeaders cannot override Content-Type.
 

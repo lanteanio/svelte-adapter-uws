@@ -28,6 +28,7 @@ describeUWS('future static modification times', () => {
 	let server;
 	let dir;
 	let stat;
+	let storedOldMtime;
 
 	beforeAll(async () => {
 		server = await startRealRuntime();
@@ -44,6 +45,7 @@ describeUWS('future static modification times', () => {
 			fs.writeFileSync(fixture, CONTENT);
 			const mtime = new Date(name === 'old' ? '1899-01-01T00:00:00Z' : '2020-01-01T00:00:00Z');
 			fs.utimesSync(fixture, mtime, mtime);
+			if (name === 'old') storedOldMtime = fs.statSync(fixture).mtime;
 		}
 
 		const { cacheDir } = await import('./fixture/build/handler/static-assets.js');
@@ -72,10 +74,14 @@ describeUWS('future static modification times', () => {
 			expect(etagged.body.length).toBe(0);
 		});
 	}
-	it.each(['GET', 'HEAD'])('%s omits pre-1900 dates but keeps ordinary past validators', async (method) => {
+	it.each(['GET', 'HEAD'])('%s validates the timestamp retained by the filesystem and ordinary past dates', async (method) => {
 		const old = await request(server.port, method, 'identity', null, null, 'Sun, 01 Jan 1899 00:00:00 GMT', '/future-mtime/old.txt');
 		expect(old.status).toBe(200);
-		expect(old.headers['last-modified']).toBeUndefined();
+		// Some filesystems clamp 1899 to 1901, while Windows may wrap it into
+		// the future. The wire must reflect the stored value, not the request.
+		const validStoredDate = storedOldMtime.getUTCFullYear() >= 1900 &&
+			storedOldMtime.getTime() <= Date.parse(old.headers.date);
+		expect(old.headers['last-modified']).toBe(validStoredDate ? storedOldMtime.toUTCString() : undefined);
 		const oldModified = await request(server.port, method, 'identity', 'Sun, 01 Jan 1899 00:00:00 GMT', null, null, '/future-mtime/old.txt');
 		expect(oldModified.status).toBe(200);
 		const past = await request(server.port, method, 'identity', null, null, null, '/future-mtime/past.txt');

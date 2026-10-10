@@ -15,6 +15,7 @@ import { revalidationHeaders } from '../utils/revalidation-headers.js';
 import { monotonicNow, now } from '../runtime.js';
 import { staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
+import { staticLastModifiedTime } from './static-last-modified.js';
 
 // File extensions that browsers cannot render inline. Serving these with
 // Content-Disposition: attachment prompts a download dialog instead of
@@ -209,8 +210,8 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
 			// A future or pre-1900 file time cannot supply an HTTP date. Keep
 			// the ETag, but omit Last-Modified and ignore date preconditions.
-			if (stat.mtimeMs >= Date.UTC(1900, 0, 1) && stat.mtimeMs <= now()) {
-				lastModifiedMs = Math.floor(stat.mtimeMs / 1000) * 1000;
+			lastModifiedMs = staticLastModifiedTime(stat.mtimeMs, now());
+			if (lastModifiedMs !== undefined) {
 				lastModified = new Date(lastModifiedMs).toUTCString(); // determinism-allow: formats a held file time
 			}
 			const configuredCacheControl = resolveStaticCacheControl(relPath, staticCacheControl);
