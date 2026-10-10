@@ -221,6 +221,9 @@ were reconstructed.
 Tenant-qualified identity and migration requirements for erasure are defined
 in [the erasure identity contract](./contracts/tenant-erasure-identity.md).
 
+Durable enqueue identity, receipt recovery and retention are defined in
+[the enqueue receipt contract](./contracts/durable-enqueue-receipts.md).
+
 ## Subscription-pressure signal
 
 Subscription pressure uses every settled logical subscription divided by the
