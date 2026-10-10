@@ -37,6 +37,12 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	authAbort: {
+		out: 'build-auth-abort',
+		handler: './src/hooks.ws.auth-abort.js',
+		websocket: { allowedOrigins: '*', authPathRateLimit: 0, upgradeRateLimit: 100 }
+	},
+
 	// A fractional auth window exercises the HTTP Retry-After wire grammar.
 	authFraction: {
 		out: 'build-auth-fraction',

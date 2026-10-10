@@ -1470,7 +1470,7 @@ if (WS_ENABLED) {
 			}
 
 			const state = acquireState();
-			res.onAborted(() => { state.aborted = true; });
+			res.onAborted(() => { state.aborted = true; state.failBody?.(); });
 
 			const contentLength = parseInt(authHeaders['content-length'], 10);
 			if (!isNaN(contentLength) && contentLength > AUTH_BODY_LIMIT) {

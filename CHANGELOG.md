@@ -191,6 +191,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Dev only; production is unchanged. Under `server.https` a same-origin `Origin` on the WebSocket upgrade and the auth endpoint is the `https://` one, as under production's `SSL_CERT`, and the `http://` one for the same host is refused. The hook gets the request's own path and query in `event.url` and `request.url`, as in production, instead of `/` with the query. Another spelling of the auth path goes on to the app, as in production, and so does any dashboard spelling but its path and the paths under it; trailing slashes on `dashboard.path` are dropped. Over HTTP/2 the hook's `headers` carry no pseudo-headers and `host` is the `:authority`, and a Response the hook returns is written without the connection headers HTTP/2 does not carry, such as `transfer-encoding`. A hook Response whose body fails to read answers a 500 without the hook's headers and cookies, as in production. A status that is no final status node can write, such as the 0 of `Response.error()`, answers the same 500, and over HTTP/1.1 so does a header value or cookie that node's HTTP/1.1 writer refuses; production writes both as given. Header values and cookies with text past ASCII go out as their UTF-8 bytes, as production writes them. A client that leaves partway through an auth POST no longer ends the dev server. Over HTTP/1.1 a Response node refuses only as it writes it, such as a 204 announcing a `trailer`, closes the connection. A hook 304 keeps the `content-length` it declares when that reads as a length.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: interrupted authentication body reads now reject and release request state.** When a client disconnected while an authentication hook awaited `request.text()`, `request.json()` or `request.formData()`, the body read could stay pending indefinitely and keep its request state out of the pool, so disconnects now reject that read and let the existing cleanup run.
+  - **Affects:** Applications whose WebSocket `authenticate` hook reads the request body.
+  - **Action:** No configuration change is needed; handle a rejected body read if the hook performs its own cleanup.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Complete body reads and hook responses are unchanged. An interrupted read rejects with the existing request-aborted error, and no response is written to the departed client.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -507,6 +513,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup
   and navigation cases use the ordinary test deadline.
+
+- **Authentication body reads settle when the client disconnects.** The auth
+  route invokes the body's failure callback from its abort handler, matching
+  the SSR and admin routes. Real TCP resets cover declared-length and chunked
+  text, JSON and form reads, hook rejection, and return of pooled request state.
 
 - The bundled client's auth POST sends `x-requested-with: XMLHttpRequest`,
   matching the existing origin guard. A real client and built runtime pin
