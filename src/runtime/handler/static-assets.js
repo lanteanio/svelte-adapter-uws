@@ -445,6 +445,9 @@ export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, 
 // Small bodies keep the single-call path. Large bodies stay in the shared
 // static cache while each socket advances its own write offset; tryEnd never
 // copies the unsent remainder into a per-connection native buffer.
+// Bounded memory takes precedence over HTTP/1.1 pipelining: if another request
+// is parsed while tryEnd is pending, uWS closes the connection and may truncate
+// this response. Non-pipelined clients retain complete delivery.
 const STATIC_BACKPRESSURE_THRESHOLD = 64 * 1024;
 
 /** @param {import('uWebSockets.js').HttpResponse} res @param {Buffer} body */

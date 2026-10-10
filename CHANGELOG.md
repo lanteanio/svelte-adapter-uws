@@ -101,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: slow static downloads retain bounded response memory.** Large static bodies now resume from the shared cache as socket capacity becomes available, avoiding a separate full-body native copy for every slow reader and keeping paused downloads from multiplying retained file memory across connections.
+  - **Affects:** Deployments serving large static files, particularly with many slow clients or custom HTTP/1.1 pipelining clients.
+  - **Action:** Use one outstanding request per connection; pipelining clients must detect truncated bodies and retry eligible idempotent requests on a new connection.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Non-pipelined downloads, ranges and encoded representations retain complete delivery. If another request is parsed while a large response awaits socket capacity, uWS closes the connection; the first body can be truncated and the later request left unanswered. Bounded memory takes precedence over pipelining.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: static date validators omit future and unrepresentable modification times.** Static assets whose file time is before 1900 or newer than the indexing clock no longer publish that time as `Last-Modified` or use it for date conditions, keeping date-based revalidation tied to a representable HTTP timestamp.
   - **Affects:** Deployments containing future-dated, very old or newly written static assets.
   - **Action:** None. Use the representation ETag for revalidation when `Last-Modified` is absent.
@@ -804,6 +811,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- Document bounded-memory static delivery and pin its Linux HTTP pipelining behavior, including a complete single-request control and a truncated pipelined response.
 
 - Test static date eligibility independently of filesystem timestamp ranges and compare native responses with the actual stored file time.
 

@@ -293,12 +293,22 @@ character Rollup will not put in a file name.
 
 ## HTTP pipelining
 
-uWS answers pipelined HTTP/1.1 requests only while each response is written
-before the next request on the connection is parsed. If a request is still
-waiting on its answer - any route that awaits, such as an endpoint doing I/O -
-when the next one is parsed, uWS closes the connection and neither request gets
-a byte. The rule sits in the transport's parser, ahead of any JavaScript, so the
-adapter cannot queue around it; RFC 9112 9.3.2 has a client retry requests a
-closed connection left unanswered, and browsers do not pipeline. node:http, and
-so `vite dev`, queues pipelined requests instead. `test/http-pipelining-real.test.js`
-pins both halves on the built runtime.
+uWS answers pipelined HTTP/1.1 requests only while each response is completed
+before the next request on the connection is parsed. If a route is still awaiting
+its first response bytes, parsing the next request closes the connection without
+answering either request. If a large static response has already written a prefix
+and is waiting for socket capacity, that close can truncate the first body and
+leave the next request unanswered.
+
+Large static responses deliberately retain one shared cache buffer and resume
+with `tryEnd` rather than copying the entire unsent body into a native buffer for
+every slow reader. This bounds retained memory even with many paused clients;
+HTTP/1.1 pipelining does not override that memory bound. The parser closes before
+JavaScript receives the later request, so the adapter cannot queue it. Clients
+should send one outstanding request per connection; a client that pipelines must
+detect incomplete bodies and retry eligible idempotent requests on a new
+connection, including a truncated first request. node:http, and therefore
+`vite dev`, queues pipelined requests instead. `test/http-pipelining-real.test.js`
+pins synchronous responses, waiting routes, and the Linux large-static case;
+`test/static-backpressure-real.test.js` pins bounded memory and complete delivery
+for slow clients without pipelining.
