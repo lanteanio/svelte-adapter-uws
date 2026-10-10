@@ -786,16 +786,17 @@ export async function createTestServer(options = {}) {
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
 			setTimer(() => {
-				try { ws.send(payload, false, false); }
+				let result;
+				try { result = ws.send(payload, false, false); }
 				catch { closedWsAbortsT++; return; }
-				if (countStats) bumpOutT(ws, payload);
+				if (countStats && result !== 2) bumpOutT(ws, payload);
 			}, delay);
 			return 1;
 		}
 		let result;
 		try { result = ws.send(payload, false, false); }
 		catch { closedWsAbortsT++; return 2; }
-		if (countStats) bumpOutT(ws, payload);
+		if (countStats && result !== 2) bumpOutT(ws, payload);
 		return result;
 	}
 
@@ -849,16 +850,17 @@ export async function createTestServer(options = {}) {
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
 			setTimer(() => {
-				try { ws.send(frame, true, false); }
+				let result;
+				try { result = ws.send(frame, true, false); }
 				catch { closedWsAbortsT++; return; }
-				if (countStats) bumpOutT(ws, frame);
+				if (countStats && result !== 2) bumpOutT(ws, frame);
 			}, delay);
 			return 1;
 		}
 		let result;
 		try { result = ws.send(frame, true, false); }
 		catch { closedWsAbortsT++; return 2; }
-		if (countStats) bumpOutT(ws, frame);
+		if (countStats && result !== 2) bumpOutT(ws, frame);
 		return result;
 	}
 
@@ -2327,7 +2329,7 @@ export async function createTestServer(options = {}) {
 					)));
 					return;
 				}
-				bumpOutT(ws, payload);
+				if (entry.sent) bumpOutT(ws, payload);
 			});
 		},
 		// Broadcast-request to every local subscriber of `topic`; partial success

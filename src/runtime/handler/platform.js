@@ -273,7 +273,7 @@ export const platform = {
 		let result;
 		try { result = ws.send(payload, false, compress); }
 		catch { counters.closedWsAborts++; return 2; }
-		bumpOut(ws, payload);
+		if (result !== 2) bumpOut(ws, payload);
 		return result;
 	},
 
@@ -1175,7 +1175,7 @@ export const platform = {
 			const json = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			let result;
 			try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
-			bumpOut(ws, json);
+			if (result !== 2) bumpOut(ws, json);
 			return result;
 		}
 		if (!isUint8Array(payload)) throw new TypeError('wire.encode must return Uint8Array or null');
@@ -1188,13 +1188,13 @@ export const platform = {
 			const json = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			let result;
 			try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
-			bumpOut(ws, json);
+			if (result !== 2) bumpOut(ws, json);
 			return result;
 		}
 		const frame = buildBinaryFrame(schemaVersion, id, seq === null ? 0 : seq, payload);
 		let result;
 		try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
-		bumpOut(ws, frame);
+		if (result !== 2) bumpOut(ws, frame);
 		// 2 = dropped past maxBackpressure (0 = enqueued, NOT a drop). A
 		// stateful encode already mutated this connection's dictionary for the
 		// dropped frame, so degrade the capability to JSON until reconnect.
@@ -1249,7 +1249,7 @@ export const platform = {
 				const d = source === null ? entries[i].data : source[i];
 				const json = envelopePrefix(topic, event) + envelopeData(d) + '}';
 				try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
-				bumpOut(ws, json);
+				if (result !== 2) bumpOut(ws, json);
 			}
 			return result;
 		};
@@ -1276,7 +1276,7 @@ export const platform = {
 				if (p == null) {
 					const json = envelopePrefix(topic, event) + envelopeData(datas[i]) + '}';
 					try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
-					bumpOut(ws, json);
+					if (result !== 2) bumpOut(ws, json);
 					continue;
 				}
 				if (!isUint8Array(p)) throw new TypeError('sendWireBatch: wire.encode must return Uint8Array or null');
@@ -1287,7 +1287,7 @@ export const platform = {
 				}
 				const frame = buildBinaryFrame(schemaVersion, id, 0, p);
 				try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
-				bumpOut(ws, frame);
+				if (result !== 2) bumpOut(ws, frame);
 				if (result === 2) {
 					poisonWireState(ws, ud, wire.capability);
 					return sendJsonFrom(i + 1, datas, 2);
@@ -1306,7 +1306,7 @@ export const platform = {
 		const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
 		let result;
 		try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
-		bumpOut(ws, frame);
+		if (result !== 2) bumpOut(ws, frame);
 		if (result === 2) poisonWireState(ws, ud, wire.capability);
 		return result;
 	},
@@ -1415,9 +1415,10 @@ export const platform = {
 		}
 		let count = 0;
 		for (const ws of targets) {
-			try { ws.send(envelope, false, compress); }
+			let result;
+			try { result = ws.send(envelope, false, compress); }
 			catch { counters.closedWsAborts++; continue; }
-			bumpOut(ws, envelope);
+			if (result !== 2) bumpOut(ws, envelope);
 			count++;
 		}
 		// One egress charge for the delivered set. This lane never feeds the
@@ -1473,10 +1474,10 @@ export const platform = {
 		let count = 0;
 		for (const ws of targets) {
 			try {
-				// end() flushes buffered outbound before the 1001 close frame, so the
-				// advisory always lands before the close.
-				ws.send(frame, false, compress);
-				bumpOut(ws, frame);
+				// end() flushes accepted buffered outbound before the 1001 close
+				// frame. A dropped advisory is not counted.
+				const result = ws.send(frame, false, compress);
+				if (result !== 2) bumpOut(ws, frame);
 				if (doClose) ws.end(1001, 'Server draining');
 			} catch { counters.closedWsAborts++; continue; }
 			count++;
@@ -2155,7 +2156,7 @@ export const platform = {
 					// topic's numeric id, so binary is undecodable here from now on.
 					// JSON for this frame + poison to JSON until reconnect.
 					poisonWireState(ws, ud, GAME_FANOUT_CAP);
-					try { ws.send(envelope, false, false); bumpOut(ws, envelope); delivered++; }
+					try { const result = ws.send(envelope, false, false); if (result !== 2) bumpOut(ws, envelope); delivered++; }
 					catch { counters.closedWsAborts++; }
 					continue;
 				}
@@ -2166,11 +2167,11 @@ export const platform = {
 				}
 				// A dropped shared frame needs no poisoning: the payload carries no
 				// per-connection state, so the client decoder stays in sync.
-				try { ws.send(frame, true, false); bumpOut(ws, frame); delivered++; }
+				try { const result = ws.send(frame, true, false); if (result !== 2) bumpOut(ws, frame); delivered++; }
 				catch { counters.closedWsAborts++; }
 				continue;
 			}
-			try { ws.send(envelope, false, false); bumpOut(ws, envelope); delivered++; }
+			try { const result = ws.send(envelope, false, false); if (result !== 2) bumpOut(ws, envelope); delivered++; }
 			catch { counters.closedWsAborts++; }
 		}
 		return { seq, delivered };
@@ -2590,7 +2591,7 @@ export const platform = {
 				)));
 				return;
 			}
-			bumpOut(ws, payload);
+			if (entry.sent) bumpOut(ws, payload);
 		});
 	},
 

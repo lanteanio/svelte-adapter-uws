@@ -760,6 +760,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.
 
+- Directed sends refused by native backpressure no longer increase close-hook message or byte counters. Queued frames remain counted across production and testing, including wire batches, filtered sends, reconnect advice, game delivery and requests.
+
 - Test-server wire broadcasts no longer inflate close-hook traffic counters; directed sends and wire-id announcements remain counted, including with outbound fault injection.
 
 - Clarify that trusted server subscription APIs accept system topics through the app hook without a namespace escape option; client wire subscriptions keep their existing guard.
