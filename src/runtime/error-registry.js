@@ -54,6 +54,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	RELAY_GAP: 'ADAPTER-ERR-RELAY-GAP',
 	SSR: 'ADAPTER-ERR-SSR',
 	UPGRADE_HOOK: 'ADAPTER-ERR-UPGRADE-HOOK',
+	CONNECTION_SETUP: 'ADAPTER-ERR-CONNECTION-SETUP',
 	ATTRIBUTION_HOOK: 'ADAPTER-ERR-ATTRIBUTION',
 	SUBSCRIBE_BATCH_HOOK: 'ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK',
 	SUBSCRIBE_BATCH_RESULT: 'ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT',
@@ -663,6 +664,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-upgrade-hook',
 		help: 'docs/errors.md#adapter-err-upgrade-hook'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CONNECTION_SETUP,
+		code: null,
+		event: 'runtime.websocket-open.failed',
+		component: 'runtime.websocket-open',
+		severity: 'error',
+		emission: 'direct',
+		problemPrefix: 'Connection setup failed after the upgrade completed.',
+		messagePrefix: direct('runtime.websocket-open', 'runtime.websocket-open.failed', 'error', 'Connection setup failed after the upgrade completed.'),
+		cause: 'An internal connection setup step threw after the WebSocket handshake completed and before the application open hook ran.',
+		consequence: 'The accepted connection is closed with code 1011. Its live-connection entry and admission permit are released. Application open and close hooks do not run for the failed setup; other connections remain available.',
+		automaticRecovery: 'The client can reconnect and repeat setup. The worker remains available to accept connections.',
+		nextAction: 'Read the attached error and requestId. Check custom instrumentation or changes to runtime built-ins, then reproduce the exception with the same adapter version. This event describes internal setup, not an exception thrown by the application open hook.',
+		sources: Object.freeze(['src/runtime/handler.js']),
+		anchor: 'adapter-err-connection-setup',
+		help: 'docs/errors.md#adapter-err-connection-setup'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.SUBSCRIPTION_SINK_DISPLACED,

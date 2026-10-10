@@ -582,6 +582,7 @@ if (WS_ENABLED) {
 	// factory closure.
 	const admission = createUpgradeAdmission(wsOptions.upgradeAdmission);
 	const connectionPermitCarrier = createConnectionPermitCarrier();
+	const failedOpenConnections = new WeakSet();
 	const ADMISSION_PER_TICK_BUDGET = wsOptions.upgradeAdmission?.perTickBudget ?? 0;
 	const messageAdmission = createMessageAdmission(wsOptions.messageAdmission);
 	// Publish-egress ledger and ceilings: the account is configured from the
@@ -2163,68 +2164,92 @@ if (WS_ENABLED) {
 			// corruption: a re-entrant or duplicate open on the same handle. Continuing
 			// would overwrite live per-connection state, so escalate to the hard tier.
 			fatal(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
-			userData[WS_SUBSCRIPTIONS] = new Set();
-			// Promote the upgrade-time requestId and trace context (carried across
-			// the upgrade on keys only this module can name - see CARRY_REQUEST_ID)
-			// into a per-connection platform clone, then drop the carry slots so
-			// userData stays clean for hook code. A request id that did not arrive
-			// is minted rather than left undefined: every log line for the
-			// connection correlates on it.
-			const wsPlatform = Object.create(platform);
 			const carriedRequestId = userData[CARRY_REQUEST_ID];
-			// Only a uWS that stopped copying Symbol keys would lose it; say so
-			// rather than let the minted id hide it.
-			assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
-			wsPlatform.requestId = typeof carriedRequestId === 'string' ? carriedRequestId : randomUuid();
-			Object.defineProperty(wsPlatform, 'connectionTraceContext', {
-				value: userData[CARRY_TRACE_CONTEXT] ?? null
-			});
-			userData[WS_PLATFORM] = wsPlatform;
-			delete userData[CARRY_REQUEST_ID];
-			delete userData[CARRY_TRACE_CONTEXT];
-			assert(userData[CARRY_REQUEST_ID] === undefined, 'ws.request-id-leak', null);
-			// Server-trusted attribution, resolved exactly once per connection and
-			// BEFORE the app open hook, so open/message hooks and every bundled
-			// limiter read one settled answer. Placed after the platform install so
-			// the refusal's close path finds the slots it asserts on. Fail-closed
-			// and loud: an invalid id or a throwing resolver refuses the connection,
-			// because admitting it unattributed would silently stand down every
-			// tenant-scoped limit downstream.
 			try {
-				installAttribution(wsModule.attribution, userData);
+				userData[WS_SUBSCRIPTIONS] = new Set();
+				// Promote the upgrade-time requestId and trace context (carried across
+				// the upgrade on keys only this module can name - see CARRY_REQUEST_ID)
+				// into a per-connection platform clone, then drop the carry slots so
+				// userData stays clean for hook code. A request id that did not arrive
+				// is minted rather than left undefined: every log line for the
+				// connection correlates on it.
+				const wsPlatform = Object.create(platform);
+				// Only a uWS that stopped copying Symbol keys would lose it; say so
+				// rather than let the minted id hide it.
+				assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
+				wsPlatform.requestId = typeof carriedRequestId === 'string' ? carriedRequestId : randomUuid();
+				Object.defineProperty(wsPlatform, 'connectionTraceContext', {
+					value: userData[CARRY_TRACE_CONTEXT] ?? null
+				});
+				userData[WS_PLATFORM] = wsPlatform;
+				delete userData[CARRY_REQUEST_ID];
+				delete userData[CARRY_TRACE_CONTEXT];
+				assert(userData[CARRY_REQUEST_ID] === undefined, 'ws.request-id-leak', null);
+				// Server-trusted attribution, resolved exactly once per connection and
+				// BEFORE the app open hook, so open/message hooks and every bundled
+				// limiter read one settled answer. Placed after the platform install so
+				// the refusal's close path finds the slots it asserts on. Fail-closed
+				// and loud: an invalid id or a throwing resolver refuses the connection,
+				// because admitting it unattributed would silently stand down every
+				// tenant-scoped limit downstream.
+				try {
+					installAttribution(wsModule.attribution, userData);
+				} catch (err) {
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.websocket-attribution',
+						event: 'runtime.websocket-attribution.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket attribution hook failed; the connection was refused at open.',
+						attributes: { requestId: wsPlatform.requestId, error: diagnosticError(err) }
+					});
+					try { ws.end(1008, 'Attribution failed'); } catch { /* native side already gone */ }
+					return;
+				}
+				// Stamp a fresh session id and announce it. The client stores it
+				// in sessionStorage and presents it back via { type: 'resume' }
+				// after a reconnect so the user's resume hook can fill the gap.
+				const sessionId = randomUuid();
+				userData[WS_SESSION_ID] = sessionId;
+				// Per-connection traffic stats are only allocated when the user
+				// has a `close` hook to receive them - keeps userData lean for
+				// stats-uninterested apps.
+				if (closeHookRegistered) {
+					userData[WS_STATS] = {
+						openedAt: monotonicNow(),
+						messagesIn: 0,
+						messagesOut: 0,
+						bytesIn: 0,
+						bytesOut: 0
+					};
+				}
+				sendControl(ws, '{"type":"welcome","sessionId":"' + sessionId + '"}');
+				wsConnections.add(ws);
+				if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
 			} catch (err) {
+				// Setup has no application-owned memberships yet. Release admission
+				// before diagnostics or close, and keep the app close hook paired
+				// only with connections whose app open hook could run.
+				failedOpenConnections.add(ws);
+				wsConnections.delete(ws);
+				if (userData[WS_CONNECTION_PERMIT]) {
+					userData[WS_CONNECTION_PERMIT] = undefined;
+					admission.releaseConnection();
+					gConnectionHeadroom?.set(admission.connectionHeadroom);
+				}
 				emitOperationalEvent({
 					source: 'svelte-adapter-uws',
-					component: 'runtime.websocket-attribution',
-					event: 'runtime.websocket-attribution.failed',
+					component: 'runtime.websocket-open',
+					event: 'runtime.websocket-open.failed',
 					severity: 'error',
 					dataClass: 'pseudonymous',
-					message: 'The WebSocket attribution hook failed; the connection was refused at open.',
-					attributes: { requestId: wsPlatform.requestId, error: diagnosticError(err) }
+					message: 'Connection setup failed after the upgrade completed.',
+					attributes: { requestId: userData[WS_PLATFORM]?.requestId ?? carriedRequestId, error: diagnosticError(err) }
 				});
-				try { ws.end(1008, 'Attribution failed'); } catch { /* native side already gone */ }
+				try { ws.end(1011, 'Connection setup failed'); } catch { /* native side already gone */ }
 				return;
 			}
-			// Stamp a fresh session id and announce it. The client stores it
-			// in sessionStorage and presents it back via { type: 'resume' }
-			// after a reconnect so the user's resume hook can fill the gap.
-			const sessionId = randomUuid();
-			userData[WS_SESSION_ID] = sessionId;
-			// Per-connection traffic stats are only allocated when the user
-			// has a `close` hook to receive them - keeps userData lean for
-			// stats-uninterested apps.
-			if (closeHookRegistered) {
-				userData[WS_STATS] = {
-					openedAt: monotonicNow(),
-					messagesIn: 0,
-					messagesOut: 0,
-					bytesIn: 0,
-					bytesOut: 0
-				};
-			}
-			sendControl(ws, '{"type":"welcome","sessionId":"' + sessionId + '"}');
-			wsConnections.add(ws);
-			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
 			if (wsModule.open) runOpenHook(wsModule, ws, { platform: userData[WS_PLATFORM] });
 		},
 
@@ -3137,6 +3162,7 @@ if (WS_ENABLED) {
 		close: (ws, code, message) => {
 			const userData = ws.getUserData();
 			messageAdmission.close(ws);
+			if (failedOpenConnections.delete(ws)) return;
 			assert(userData[WS_PLATFORM], 'ws.platform-missing-in-close', null);
 			const subscriptionSlot = userData[WS_SUBSCRIPTIONS];
 			const subscriptions = isSet(subscriptionSlot) ? subscriptionSlot : new Set();

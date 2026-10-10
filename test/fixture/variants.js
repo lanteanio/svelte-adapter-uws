@@ -36,6 +36,11 @@ export const FIXTURE_VARIANTS = {
 		handler: './src/hooks.ws.platform-contract.js',
 		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
 	},
+	setupfailure: {
+		out: 'build-setup-failure',
+		handler: './src/hooks.ws.setup-failure.js',
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100, upgradeAdmission: { maxConnections: 1 } }
+	},
 	topicstats: {
 		out: 'build-topic-stats',
 		handler: './src/hooks.ws.topic-stats.js',
