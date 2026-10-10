@@ -232,17 +232,31 @@ wall kills on.
   along the process's own group path; `max` and the v1 unlimited sentinel mean
   no wall.
 
-The reading is a 0..1 saturation that approaches 1 as the nearest out-of-memory
-death approaches. A process with no discoverable wall on either arm reads 0:
-the signal degrades to silence, never to a false alarm, and PSI memory pressure
-and `resident_memory_bytes` still show native growth there. The
-`memoryHeapUsedRatio` option name and its 0.85 default are shared across the
-family, the threshold can be disabled with `false` like every pressure
-threshold, and one reading feeds the `MEMORY` reason, which outranks every
-other pressure reason, the `value` fold, the `heap_used_ratio` gauge and
-send-gate window sizing. Arena fullness (`heapUsed/heapTotal`) is not part of
-the contract on any engine. This adapter implements it in
-`src/runtime/utils/memory-wall.js`.
+A known wall yields a 0..1 saturation that approaches 1 as the nearest
+out-of-memory death approaches. No discoverable wall means an unavailable
+measurement, not measured zero. Pressure decisions use zero in that case:
+`MEMORY` remains silent, the memory contribution to `value` is zero, and the
+send gate does not shrink its window for memory. Measured PSI pressure and
+`resident_memory_bytes` remain independent signals.
+
+The `heap_used_ratio` metric is absent when neither wall is available. Its
+worker mirror removes an earlier sample if a cgroup-only limit becomes
+unlimited and resumes reporting when a finite limit returns. External metrics
+registries can support this transition with optional `gauge.remove()`, which
+removes the gauge's sample. Registries without removal receive this gauge only
+when a latched engine ceiling makes its availability permanent; cgroup-only
+samples are omitted there to avoid retaining a stale ratio. Empty HELP/TYPE
+metadata may remain registered. A registry whose removal method throws is
+contained like other metric failures; its external sample may remain stale,
+while the worker mirror still clears the value.
+
+The `memoryHeapUsedRatio` option name and its 0.85 default are shared across
+the family. Setting the threshold to `false` disables `MEMORY` without
+disabling measurement or independent PSI thresholds. A known reading feeds
+the `MEMORY` reason, which outranks every other pressure reason, the `value`
+fold, the gauge and send-gate window sizing. Arena fullness
+(`heapUsed/heapTotal`) is not part of the contract on any engine. This adapter
+implements measurement in `src/runtime/utils/memory-wall.js`.
 
 ## Failure ownership
 

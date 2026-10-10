@@ -1276,7 +1276,7 @@ if (WS_ENABLED) {
 		// only because the reason string also reaches the log and the export.
 		gPressureReason?.set(PRESSURE_REASON_CODES[pressureSnapshot.reason] ?? 0);
 		gResidentBytes?.set(counters.lastResidentBytes);
-		gHeapUsedRatio?.set(counters.lastHeapUsedRatio);
+		gHeapUsedRatio?.setOptional(counters.lastMeasuredHeapUsedRatio, counters.memoryWallPermanent);
 		if (counters.lastSampleWallMs > 0) gSampleTimestamp?.set(counters.lastSampleWallMs / 1000);
 		if (counters.lastPublishCount > 0) mPublishes?.inc({}, counters.lastPublishCount);
 		emitPressureMetricTelemetry(telemetry, {

@@ -1833,7 +1833,15 @@ export interface MetricsRegistry {
 	gauge(
 		name: string,
 		help: string
-	): { set(value: number): void };
+	): {
+		set(value: number): void;
+		/**
+		 * Remove this gauge's sample when its source becomes unavailable.
+		 * Optional. Without it, a cgroup-only heap_used_ratio is omitted from
+		 * this registry; a permanent engine ceiling remains supported.
+		 */
+		remove?(): void;
+	};
 	/**
 	 * Observe a distribution. Optional: the adapter registers no histogram
 	 * today, so a registry without this method satisfies the contract and

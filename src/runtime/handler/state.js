@@ -880,6 +880,9 @@ export const counters = {
 	lastDroppedBytes: 0,
 	lastConnections: 0,
 	lastHeapUsedRatio: 0,
+	/** @type {number | null} No sample or no known memory wall. */
+	lastMeasuredHeapUsedRatio: null,
+	memoryWallPermanent: false,
 	lastResidentBytes: 0,
 	// Wall-clock ms of the most recent completed pressure fold; 0 until the
 	// first sample, which is how the freshness gauge stays absent rather than

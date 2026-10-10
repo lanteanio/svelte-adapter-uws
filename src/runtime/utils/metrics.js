@@ -254,6 +254,22 @@ export function mirrorRegistry(registry) {
 		set(/** @type {any} */ value) {
 			if (typeof value === 'number') record(name, undefined, value, true);
 			instrument?.set(value);
+		},
+		remove() {
+			mirror.get(name)?.clear();
+			instrument?.remove?.();
+		},
+		// Optional sources must be able to retract a previous sample. A legacy
+		// registry can expose only readings whose availability is permanent;
+		// the worker mirror supports removal independently of that registry.
+		setOptional(/** @type {number | null} */ value, /** @type {boolean} */ permanent) {
+			if (value === null) {
+				mirror.get(name)?.clear();
+				instrument?.remove?.();
+				return;
+			}
+			record(name, undefined, value, true);
+			if (permanent || typeof instrument?.remove === 'function') instrument?.set(value);
 		}
 	}));
 	if (typeof registry.histogram === 'function') {
@@ -294,7 +310,7 @@ export function containMetricInstrument(instrument) {
 	};
 	/** @type {any} */
 	const wrapped = {};
-	for (const method of ['inc', 'dec', 'set', 'observe']) {
+	for (const method of ['inc', 'dec', 'set', 'observe', 'remove', 'setOptional']) {
 		if (typeof instrument[method] === 'function') wrapped[method] = contain(instrument[method]);
 	}
 	return wrapped;

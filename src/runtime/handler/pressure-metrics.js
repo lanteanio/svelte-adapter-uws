@@ -207,13 +207,16 @@ function samplePressure(thresholds) {
 	// heapUsed against the V8 limit, rss against the cgroup limit - because
 	// the kernel's OOM killer charges the whole resident set, never the JS
 	// heap alone.
-	const heapUsedRatio = memoryWall.ratio(mem);
+	const measuredHeapUsedRatio = memoryWall.measure(mem);
+	const heapUsedRatio = measuredHeapUsedRatio ?? 0;
 	const memoryMB = mem.rss / (1024 * 1024);
 	// Both retained for the metrics hook. Resident memory is process-wide
 	// (worker threads share one address space); the wall ratio's heap arm is
 	// per-isolate while its rss arm is that same process-wide value, so
 	// workers report identically whenever the container wall dominates.
 	counters.lastHeapUsedRatio = heapUsedRatio;
+	counters.lastMeasuredHeapUsedRatio = measuredHeapUsedRatio;
+	counters.memoryWallPermanent = memoryWall.hasEngineLimit();
 	counters.lastResidentBytes = mem.rss;
 
 	// Kernel signals for this window. Null per source when unavailable; the

@@ -259,7 +259,7 @@ const SIGNAL_DEFINITIONS = [
 	// The heap arm is per-isolate, so each worker thread has its own reading;
 	// the rss arm is process-wide, so workers converge whenever the container
 	// wall dominates. The worst worker is the one nearest a wall.
-	{ name: 'heap_used_ratio', type: 'gauge', labels: [], unit: 'ratio', scope: 'worker', aggregate: 'max', help: 'Used fraction of the nearest memory wall (heap vs the V8 limit, resident set vs the cgroup memory limit, worst-of)' },
+	{ name: 'heap_used_ratio', optional: true, type: 'gauge', labels: [], unit: 'ratio', scope: 'worker', aggregate: 'max', help: 'Used fraction of the nearest memory wall (heap vs the V8 limit, resident set vs the cgroup memory limit, worst-of)' },
 	{ name: 'psi_cpu_some_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall CPU some avg10' },
 	{ name: 'psi_memory_full_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall memory full avg10' },
 	{ name: 'psi_io_full_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall IO full avg10' },

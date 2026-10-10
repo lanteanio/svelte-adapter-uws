@@ -362,27 +362,37 @@ export function createMemoryWallReader(deps) {
 		return pass.tightest;
 	}
 
-	return {
-		/**
-		 * @param {{ heapUsed: number, rss: number }} mem bytes, from
-		 *   `process.memoryUsage()`
-		 * @returns {number} 0..1
-		 */
-		ratio(mem) {
-			if (heapSizeLimit === undefined) {
-				try {
-					const limit = heapStatistics().heap_size_limit;
-					heapSizeLimit = Number.isFinite(limit) && limit > 0 ? limit : null;
-				} catch {
-					heapSizeLimit = null;
-				}
-			}
-			return memoryWallRatio({
-				heapUsed: mem.heapUsed,
-				rss: mem.rss,
-				heapSizeLimit: heapSizeLimit ?? null,
-				cgroupLimitBytes: readCgroupLimit()
-			});
+	function latchEngineLimit() {
+		if (heapSizeLimit !== undefined) return;
+		try {
+			const limit = heapStatistics().heap_size_limit;
+			heapSizeLimit = Number.isFinite(limit) && limit > 0 ? limit : null;
+		} catch {
+			heapSizeLimit = null;
 		}
+	}
+
+	/**
+	 * @param {{ heapUsed: number, rss: number }} mem
+	 * @returns {number | null} 0..1, or null when neither wall is known
+	 */
+	function measure(mem) {
+		latchEngineLimit();
+		const cgroupLimitBytes = readCgroupLimit();
+		if (heapSizeLimit === null && cgroupLimitBytes === null) return null;
+		return memoryWallRatio({
+			heapUsed: mem.heapUsed,
+			rss: mem.rss,
+			heapSizeLimit: heapSizeLimit ?? null,
+			cgroupLimitBytes
+		});
+	}
+
+	return {
+		measure,
+		/** A latched engine ceiling makes wall availability permanent. */
+		hasEngineLimit() { latchEngineLimit(); return heapSizeLimit !== null; },
+		/** @param {{ heapUsed: number, rss: number }} mem @returns {number} 0..1 */
+		ratio(mem) { return measure(mem) ?? 0; }
 	};
 }
