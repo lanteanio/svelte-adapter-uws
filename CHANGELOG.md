@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
+  - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
+  - **Action:** None. Update the adapter client with the server package.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The server's origin policy is unchanged. The client header value changes from `svelte-adapter-uws` to `XMLHttpRequest`; custom middleware that inspects that value must accept the new value.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: fractional auth rate-limit windows produce a valid Retry-After.** A fractional `websocket.authPathRateLimitWindow` previously produced a fractional `Retry-After` on auth preflight refusals; a `1.5`-second window now yields an integer delay of `2` or `3` seconds instead of `1.5` or `2.5`, allowing strict HTTP clients to honor the 429 response's delay.
+  - **Affects:** Deployments that configure a fractional `websocket.authPathRateLimitWindow`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The limiter keeps the configured fractional window. Only the response's delay rounds up before jitter; whole-second windows retain their existing values, including `10` through `14` seconds at the default.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
   - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
   - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
@@ -495,6 +507,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup
   and navigation cases use the ordinary test deadline.
+
+- The bundled client's auth POST sends `x-requested-with: XMLHttpRequest`,
+  matching the existing origin guard. A real client and built runtime pin
+  successful preflight and WebSocket connection without `Origin` or
+  `Sec-Fetch-Site`; the server still refuses a missing or unrecognized header
+  when no other configured origin signal accepts the request.
+- Auth rate-limit refusals round the configured window up before adding
+  `Retry-After` jitter. Built-runtime HTTP tests cover fractional windows and
+  retain the default whole-second range; rate accounting itself is unchanged.
 
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;

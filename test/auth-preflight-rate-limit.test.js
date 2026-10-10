@@ -48,6 +48,12 @@ describeUWS('the auth preflight is rate limited (built runtime)', () => {
 	/** @param {Record<string,string>} [headers] */
 	async function preflight(headers = { 'x-requested-with': 'XMLHttpRequest' }) {
 		const res = await fetch(`${server.httpUrl}/__ws/auth`, { method: 'POST', headers });
+		if (res.status === 429) {
+			const delay = res.headers.get('retry-after');
+			expect(delay).toMatch(/^[0-9]+$/);
+			expect(Number(delay)).toBeGreaterThanOrEqual(10);
+			expect(Number(delay)).toBeLessThanOrEqual(14);
+		}
 		// Drain, so the connection is not left half-read.
 		await res.text().catch(() => {});
 		return res.status;

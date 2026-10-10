@@ -1510,7 +1510,7 @@ function createConnection(options) {
 					resp = await fetch(target, {
 						method: 'POST',
 						credentials: 'include',
-						headers: { 'x-requested-with': 'svelte-adapter-uws' },
+						headers: { 'x-requested-with': 'XMLHttpRequest' },
 						signal: abort?.signal
 					});
 				} finally {

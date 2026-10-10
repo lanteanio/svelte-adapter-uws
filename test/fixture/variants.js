@@ -37,6 +37,18 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A fractional auth window exercises the HTTP Retry-After wire grammar.
+	authFraction: {
+		out: 'build-auth-fraction',
+		handler: null,
+		websocket: {
+			allowedOrigins: 'same-origin',
+			upgradeRateLimit: 100,
+			authPathRateLimit: 1,
+			authPathRateLimitWindow: 1.5
+		}
+	},
+
 	// Presence wired with the heartbeat off, for the two-real-client delivery
 	// suite. Its own build because the handler is a build-time choice and the
 	// default fixture deliberately wires only cursor: joining presence to the
