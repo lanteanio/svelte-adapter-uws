@@ -516,6 +516,34 @@ function appendedInterferenceFailures(fragment) {
 	return interferenceFailures(strictRenderedShapes(fragment));
 }
 
+// Self-contained appended ownership examples use the same rendered classifier.
+// The grouped full-document cases still exercise the canonical README context.
+function additionalOwnershipFailures(rendered, approved = new Set()) {
+	const competingClaim = rendered.elements.some((node) =>
+		aggregateOwnershipClaim(node, rendered, approved)
+	);
+	return competingClaim ? ['README contains an additional bounded ownership claim'] : [];
+}
+
+function appendedOwnershipFailures(fragment) {
+	const source = normalizeSource(fragment);
+	return [
+		...interferenceFailures(strictRenderedShapes(source)),
+		...additionalOwnershipFailures(renderedDocument(source))
+	];
+}
+
+function topRouteFailures(source, shapes) {
+	const divider = source.indexOf('\n\n---\n');
+	const preface = divider === -1 ? '' : source.slice(0, divider);
+	return occurrences(preface, OFFICIAL_LINKS) !== 1 ||
+		occurrences(preface, EXPECTED_MAP_SOURCE) !== 1 ||
+		occurrences(source, EXPECTED_MAP_SOURCE) !== 1 ||
+		occurrences(preface.toLowerCase(), 'https://svelte-realtime.dev') !== 2 ||
+		occurrences(preface, EXPECTED_TOP_CONTRACT) !== 1 || !shapes.topRoute
+		? ['top documentation-site route drifted'] : [];
+}
+
 function ownershipFailures(document) {
 	const source = normalizeSource(document);
 	const shapes = strictRenderedShapes(source);
@@ -523,13 +551,7 @@ function ownershipFailures(document) {
 	const divider = source.indexOf('\n\n---\n');
 	const preface = divider === -1 ? '' : source.slice(0, divider);
 	const exactTopContract = occurrences(preface, EXPECTED_TOP_CONTRACT) === 1;
-	if (occurrences(preface, OFFICIAL_LINKS) !== 1 ||
-		occurrences(preface, EXPECTED_MAP_SOURCE) !== 1 ||
-		occurrences(source, EXPECTED_MAP_SOURCE) !== 1 ||
-		occurrences(preface.toLowerCase(), 'https://svelte-realtime.dev') !== 2 ||
-		!exactTopContract || !shapes.topRoute) {
-		failures.push('top documentation-site route drifted');
-	}
+	failures.push(...topRouteFailures(source, shapes));
 	if (occurrences(source, OWNERSHIP_HEADING) !== 1 ||
 		!ownershipTableMatches(preface) || !exactTopContract ||
 		!shapes.ownershipTable) {
@@ -553,12 +575,7 @@ function ownershipFailures(document) {
 		node.tagName === 'li' && rendered.text(node) === EXPECTED_RELATED_TEXT
 	);
 	const approved = new Set([ownershipTable, ...relatedItems].filter(Boolean));
-	const competingClaim = rendered.elements.some((node) =>
-		aggregateOwnershipClaim(node, rendered, approved)
-	);
-	if (competingClaim) {
-		failures.push('README contains an additional bounded ownership claim');
-	}
+	failures.push(...additionalOwnershipFailures(rendered, approved));
 	return failures;
 }
 
@@ -858,7 +875,7 @@ describe('documentation map', () => {
 			'Setup is owned by this README whereas tutorials and API reference are owned by the documentation site.'
 		]) {
 			expect.soft(boundedOwnershipClaim(aligned), aligned).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + aligned), aligned).toEqual([]);
+			expect.soft(appendedOwnershipFailures(aligned), aligned).toEqual([]);
 		}
 		for (const ordinaryDirection of [
 			'This README directs readers to tutorials on the documentation site.',
@@ -917,7 +934,7 @@ describe('documentation map', () => {
 			'The documentation site owns tutorials and API reference - this README owns setup.'
 		]) {
 			expect.soft(boundedOwnershipClaim(aligned), aligned).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + aligned), aligned).toEqual([]);
+			expect.soft(appendedOwnershipFailures(aligned), aligned).toEqual([]);
 		}
 
 		for (const contradiction of [
@@ -978,7 +995,7 @@ describe('documentation map', () => {
 			'The documentation site owns tutorials and API reference ' + emDash + ' this README owns setup.'
 		]) {
 			expect.soft(boundedOwnershipClaim(aligned), aligned).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + aligned), aligned).toEqual([]);
+			expect.soft(appendedOwnershipFailures(aligned), aligned).toEqual([]);
 		}
 
 		for (const packageClaim of [
@@ -987,7 +1004,7 @@ describe('documentation map', () => {
 			'This README curates guides on setup.'
 		]) {
 			expect.soft(boundedOwnershipClaim(packageClaim), packageClaim).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + packageClaim), packageClaim).toEqual([]);
+			expect.soft(appendedOwnershipFailures(packageClaim), packageClaim).toEqual([]);
 		}
 
 		for (const contradiction of [
@@ -1009,7 +1026,7 @@ describe('documentation map', () => {
 			'<div class="ownership-grid"><div>Tutorials, API reference, and operations playbooks</div><div>Responsibility</div><div>This README</div></div>'
 		];
 		for (const contradiction of contradictions) {
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1027,7 +1044,7 @@ describe('documentation map', () => {
 			'</div>'
 		].join('\n');
 		for (const aligned of [alignedTable, alignedCards]) {
-			expect.soft(ownershipFailures(README + '\n\n' + aligned), aligned).toEqual([]);
+			expect.soft(appendedOwnershipFailures(aligned), aligned).toEqual([]);
 		}
 	}, 30_000);
 
@@ -1047,7 +1064,7 @@ describe('documentation map', () => {
 			'<div>This README owns installation and support status.<br>This README owns tutorials, API reference, and operations playbooks.</div>'
 		];
 		for (const contradiction of contradictions) {
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1075,7 +1092,7 @@ describe('documentation map', () => {
 			'<address>This README owns tutorials, API reference, and operations playbooks.</address>'
 		];
 		for (const contradiction of contradictions) {
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1105,7 +1122,7 @@ describe('documentation map', () => {
 		];
 		for (const contradiction of contradictions) {
 			expect.soft(boundedOwnershipClaim(contradiction), contradiction).toBe(true);
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1124,7 +1141,7 @@ describe('documentation map', () => {
 		];
 		for (const contradiction of contradictions) {
 			expect.soft(boundedOwnershipClaim(contradiction), contradiction).toBe(true);
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1140,7 +1157,7 @@ describe('documentation map', () => {
 		];
 		for (const contradiction of contradictions) {
 			expect.soft(boundedOwnershipClaim(contradiction), contradiction).toBe(true);
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1153,7 +1170,7 @@ describe('documentation map', () => {
 		];
 		for (const control of pairedControls) {
 			expect.soft(boundedOwnershipClaim(control), control).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + control), control).toEqual([]);
+			expect.soft(appendedOwnershipFailures(control), control).toEqual([]);
 		}
 	}, 30_000);
 
@@ -1169,7 +1186,7 @@ describe('documentation map', () => {
 		];
 		for (const contradiction of contradictions) {
 			expect.soft(boundedOwnershipClaim(contradiction), contradiction).toBe(true);
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1184,7 +1201,7 @@ describe('documentation map', () => {
 		];
 		for (const control of pairedControls) {
 			expect.soft(boundedOwnershipClaim(control), control).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + control), control).toEqual([]);
+			expect.soft(appendedOwnershipFailures(control), control).toEqual([]);
 		}
 	}, 30_000);
 
@@ -1214,7 +1231,7 @@ describe('documentation map', () => {
 		];
 		for (const control of controls) {
 			expect.soft(boundedOwnershipClaim(control), control).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + control), control).toEqual([]);
+			expect.soft(appendedOwnershipFailures(control), control).toEqual([]);
 		}
 
 		const contradictory = 'This README owns setup -- the documentation site owns setup.';
@@ -1270,7 +1287,7 @@ describe('documentation map', () => {
 			'The documentation site owns tutorials and API reference (this README owns setup).'
 		]) {
 			expect.soft(boundedOwnershipClaim(aligned), aligned).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + aligned), aligned).toEqual([]);
+			expect.soft(appendedOwnershipFailures(aligned), aligned).toEqual([]);
 		}
 
 		for (const packageClaim of [
@@ -1279,7 +1296,7 @@ describe('documentation map', () => {
 			'This README owns setup/support reference.'
 		]) {
 			expect.soft(boundedOwnershipClaim(packageClaim), packageClaim).toBe(false);
-			expect.soft(ownershipFailures(README + '\n\n' + packageClaim), packageClaim).toEqual([]);
+			expect.soft(appendedOwnershipFailures(packageClaim), packageClaim).toEqual([]);
 		}
 
 		for (const contradiction of [
@@ -1302,7 +1319,7 @@ describe('documentation map', () => {
 			'Deep technical articles, symbol lookup pages, and administrator procedures are authored in this README.',
 			'The README curates full ecosystem tutorials, API documentation, and production playbooks.'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1360,7 +1377,7 @@ describe('documentation map', () => {
 			'Tutorials, API reference, and operations playbooks are in the custody of this README.',
 			'Responsibility for tutorials, API reference, and operations playbooks is divided across this README and the documentation site.'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + contradiction), contradiction).toContain(
+			expect.soft(appendedOwnershipFailures(contradiction), contradiction).toContain(
 				'README contains an additional bounded ownership claim'
 			);
 		}
@@ -1417,12 +1434,11 @@ describe('documentation map', () => {
 			'```md\nThis README owns the guide collection.\n```',
 			'This is code: `This README maintains the guide collection.`'
 		]) {
-			expect.soft(ownershipFailures(README + '\n\n' + allowed), allowed).toEqual([]);
+			expect.soft(appendedOwnershipFailures(allowed), allowed).toEqual([]);
 		}
 	}, 60_000);
 
-	it('rejects non-canonical route syntax and destinations', () => {
-		for (const replacement of [
+	it.each([
 			'[documentation site][canonical-docs]',
 			'<a href=https://svelte-realtime.dev/>documentation site</a>',
 			'[documentation site](https://SVELTE-REALTIME.DEV/)',
@@ -1431,11 +1447,10 @@ describe('documentation map', () => {
 			'[documentation site](https://svelte-realtime.dev/#guides)',
 			'[documentation site](https://user@svelte-realtime.dev/)',
 			'[documentation site](https://svelte-realtime.dev:444/)'
-		]) {
-			const mutant = README.replace('[documentation site](' + DOCS_SITE + ')', replacement);
-			expect.soft(ownershipFailures(mutant), replacement).toContain('top documentation-site route drifted');
-		}
-	}, 15_000);
+	])('rejects non-canonical route syntax and destination %s', (replacement) => {
+		const source = normalizeSource(README.replace('[documentation site](' + DOCS_SITE + ')', replacement));
+		expect(topRouteFailures(source, strictRenderedShapes(source))).toContain('top documentation-site route drifted');
+	});
 
 	it('ships a stable release history and current versioned release route', () => {
 		expect(PACKAGE.files).toContain('CHANGELOG.md');

@@ -940,7 +940,13 @@ const parsed = new Map();
 function ast(f) {
 	if (!parsed.has(f)) {
 		const nodes = nodesWithAncestors(read(f));
-		parsed.set(f, { nodes, imports: policyImports(nodes, f), locals: localBindings(nodes), reachable: reachableFunctions(nodes) });
+		let imports, locals, reachable;
+		parsed.set(f, {
+			nodes,
+			get imports() { return imports ??= policyImports(nodes, f); },
+			get locals() { return locals ??= localBindings(nodes); },
+			get reachable() { return reachable ??= reachableFunctions(nodes); }
+		});
 	}
 	return parsed.get(f);
 }
@@ -1414,16 +1420,15 @@ describe('no surface re-derives a decision the policy owns', () => {
 		});
 	}
 
-	it('no shipped module reconstructs the cap through a folded size comparison', () => {
-		const offenders = CAP_DECISION_FILES.flatMap((file) =>
-			capEquivalentSizeComparisonOffenders(ast(file).nodes, file, SUBSCRIPTION_CAP));
+	it.each(CAP_DECISION_FILES)('%s does not reconstruct the cap through a folded size comparison', (file) => {
+		const offenders = capEquivalentSizeComparisonOffenders(ast(file).nodes, file, SUBSCRIPTION_CAP);
 		expect(
 			offenders,
 			`a helper rebuilt the subscription-cap decision under a constant expression: ${offenders.join(', ')}`
 		).toEqual([]);
 	});
 
-	it('no shipped module holds a private ordered decision on subscription membership size', () => {
+	it.each(CAP_DECISION_FILES)('%s has no private ordered decision on subscription membership size', (file) => {
 		// The surface-scoped rule above cannot see a helper the surface hands
 		// its userData to: `const ud = ws.getUserData()` then
 		// `ud[WS_SUBSCRIPTIONS].size >= 500` in any src file was invisible to
@@ -1431,8 +1436,7 @@ describe('no surface re-derives a decision the policy owns', () => {
 		// and the escape tracker has no CallExpression branch). This rule is
 		// threshold-agnostic and repo-wide, so a private cap of ANY value in
 		// ANY shipped module is an offense, wherever the Set came from.
-		const offenders = CAP_DECISION_FILES.flatMap((file) =>
-			privateSubscriptionOrderOffenders(ast(file).nodes, file));
+		const offenders = privateSubscriptionOrderOffenders(ast(file).nodes, file);
 		expect(
 			offenders,
 			`a shipped module compares WS_SUBSCRIPTIONS size outside exceedsSubscriptionCap: ${offenders.join(', ')}`

@@ -8,11 +8,11 @@
 // the `ws` library threw instead. Each case below drives one app close and
 // requires the same answer from every surface.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { isUtf8 } from 'node:buffer';
 import { WebSocket } from 'ws';
-import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
+import { hasUWS, startRealRuntime, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 
 let teardown = [];
 
@@ -119,8 +119,10 @@ const SURFACES = [
 ];
 
 describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
+	let url;
+	beforeEach(async () => { url = await boot(); }, REAL_BOOT_BUDGET_MS);
+
 	it('sends a short reason with its code unchanged', async () => {
-		const url = await boot();
 		const { closed, error } = await closeWith(url, { code: 4401, reason: 'Unauthorized' });
 		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(4401);
@@ -129,7 +131,6 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	});
 
 	it('shortens a long reason at a character boundary, so the client reads it', async () => {
-		const url = await boot();
 		for (const [reason, bytes] of [
 			['\u00e9'.repeat(100), 122],
 			['a'.repeat(121) + '\u{1F600}tail', 121],
@@ -146,7 +147,6 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	});
 
 	it('sends UTF-8 bytes as the reason', async () => {
-		const url = await boot();
 		const { closed } = await closeWith(url, { code: 4001, reasonBytes: [...Buffer.from('bin')] });
 		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(4001);
@@ -154,7 +154,6 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	});
 
 	it('closes with no status when no code is given', async () => {
-		const url = await boot();
 		const { closed } = await closeWith(url, {});
 		expect(closed, 'the connection closed').toBeTruthy();
 		expect(closed.code).toBe(1005);
@@ -162,7 +161,6 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	});
 
 	it('refuses what it cannot send with a TypeError and leaves the connection open', async () => {
-		const url = await boot();
 		const c = await client(url);
 		const refused = [
 			{ code: 1005, reason: 'x' },
@@ -190,7 +188,6 @@ describe.each(SURFACES)('ws.end() on $label', ({ boot }) => {
 	}, 30000);
 
 	it('close() drops the connection without a close frame', async () => {
-		const url = await boot();
 		const c = await client(url);
 		c.ws.send(JSON.stringify({ type: 'drop-probe' }));
 		const closed = await within(c.closed, 3000);
