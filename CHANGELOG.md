@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Direct paths, startup order and generated import quoting are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: Windows serves indexed assets with encoded Unicode and tilde names.** An encoded request for a real file such as `Übersicht~v2.pdf` was refused as a possible Windows short name; it now serves the exact indexed file from the startup cache.
+  - **Affects:** Windows deployments with static filenames containing both a tilde and characters browsers percent-encode.
+  - **Action:** Rebuild the application.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unindexed short names and alternate streams remain refused, as do encoded entries into reserved adapter paths.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
   - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
   - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
@@ -753,6 +759,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absolute-path fallback for virtual or unreadable IDs. A real Rollup build
   through a directory junction proves sanitized, colliding names all execute
   in startup order.
+- On Windows, an encoded GET or HEAD containing a reserved filesystem
+  character may serve an exact in-memory static index entry. The exception
+  follows reserved mount checks and precedes prerendered routing; unindexed
+  short names and alternate streams still receive 400. Real HTTP checks cover
+  Unicode tilde names, encoded tildes, HEAD, methods and reserved admin paths.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

@@ -37,6 +37,9 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import net from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
@@ -231,4 +234,21 @@ describeUWS('a target that resolves into the reserved admin prefix', () => {
 		// the app's ROUTER speaking, and that is the part being proved.
 		expect(served.status, 'a resolved target must reach the app router').toBe(405);
 	}, 60000);
+	it.runIf(process.platform === 'win32')('refuses an encoded reserved prefix before an indexed Unicode tilde asset', async () => {
+		const { cacheDir } = await import('./fixture/build-hook-crash/handler/static-assets.js');
+		const { staticCache } = await import('./fixture/build-hook-crash/handler/state.js');
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uws-admin-tilde-'));
+		const name = '\u00dcbersicht~v2.pdf';
+		try {
+			fs.writeFileSync(path.join(dir, name), 'indexed-inside-admin-prefix');
+			cacheDir(dir, '/__realtime', false);
+			expect(staticCache.get('/__realtime/' + name).buffer.toString()).toBe('indexed-inside-admin-prefix');
+			const refused = await rawRequest(server.port, '/%5f%5frealtime/' + encodeURIComponent(name));
+			expect(refused.status).toBe(400);
+			expect(refused.body).toBe('Bad Request');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 });

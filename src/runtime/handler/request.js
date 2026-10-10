@@ -123,13 +123,6 @@ export function handleRequest(res, req) {
 		));
 	}
 
-	// Windows: refuse a path naming an alternate data stream (`:`) or an 8.3
-	// short name (`~`), in the raw spelling and the decoded one - every lane
-	// below decodes before it opens anything.
-	if (WINDOWS && windowsReservedPath(pathname)) {
-		return send400(res, method === 'head');
-	}
-
 	// One map lookup, exactly as before, for every method this adapter carries.
 	// Only a method the map does not know pays the forbidden-set check, so the
 	// hot path is unchanged.
@@ -218,6 +211,18 @@ export function handleRequest(res, req) {
 		}
 	}
 
+	// On Windows, only an exact indexed asset may carry a reserved filesystem
+	// spelling such as a tilde. This lookup reads an in-memory key, never an
+	// alternate stream or an 8.3 alias. Keep it after the mount guards above:
+	// decoding a file name must not enter an adapter-owned namespace.
+	let reservedFile;
+	if (WINDOWS && windowsReservedPath(pathname)) {
+		if ((METHOD === 'GET' || METHOD === 'HEAD') && pathname.includes('%')) {
+			reservedFile = encodedStaticEntry(pathname);
+		}
+		if (reservedFile === undefined) return send400(res, METHOD === 'HEAD');
+	}
+
 	// === PRERENDERED CHECK ===
 	// Lightweight: only 7 header reads, no full collection, no remoteAddress decode
 	if (METHOD === 'GET' || METHOD === 'HEAD') {
@@ -241,7 +246,7 @@ export function handleRequest(res, req) {
 		// A static file whose name a browser percent-encodes, asked for that way:
 		// the fast path above matched the target as sent. Traced as the static
 		// answer it is, and only when there is a file to serve.
-		const encodedFile = pathname.includes('%') ? encodedStaticEntry(pathname) : undefined;
+		const encodedFile = reservedFile ?? (pathname.includes('%') ? encodedStaticEntry(pathname) : undefined);
 		if (encodedFile !== undefined) {
 			if (!tracingEnabled) {
 				return serveStatic(
