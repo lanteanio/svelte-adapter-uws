@@ -63,6 +63,7 @@ const DECLARED_LENGTH_RESPONSES = {
 // lanes let a suite hold the dev plugin to production by running this same
 // function on both.
 export function authenticate({ cookies, headers, url, request }) {
+	if (headers['x-auth-response'] === 'date') return new Response('dated', { headers: { date: 'Thu, 01 Jan 1970 00:00:00 GMT' } });
 	if (headers['x-auth-response'] === 'error') {
 		cookies.set('error_cookie', 'must-not-escape', { path: '/' });
 		return Response.error();

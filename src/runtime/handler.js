@@ -313,17 +313,6 @@ declareSingleValuedProxyHeaders([protocol_header, host_header, port_header, addr
  */
 
 
-// The HTTP Date header string is rebuilt once per second from the runtime
-// clock so the static handler never formats a fresh timestamp per response.
-// The wall-clock value itself comes from the injectable runtime module's
-// now(), which is already the ~1s-cached read - the rate limiter and per-
-// upgrade checks read it directly, so this timer only refreshes the header
-// string. Unref'd so it never holds the loop open.
-setIntervalTimer(() => {
-	counters.cachedDateHeader = new Date(now()).toUTCString(); // determinism-allow: formats the runtime clock value, not a clock read
-}, 1000).unref();
-
-
 cacheDir(path.join(clientDir, base), base, true, STATIC_HEADERS, STATIC_CACHE_CONTROL);
 cacheDir(path.join(prerenderedDir, base), base, false, STATIC_HEADERS, STATIC_CACHE_CONTROL);
 console.log(`[svelte-adapter-uws] Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
@@ -1545,7 +1534,7 @@ if (WS_ENABLED) {
 						res.cork(() => {
 							res.writeStatus(String(result.status));
 							for (const [hk, hv] of result.headers) {
-								if (hk === 'set-cookie' || hk === 'content-length') continue;
+								if (hk === 'set-cookie' || hk === 'content-length' || hk === 'date') continue;
 								res.writeHeader(hk, hv);
 							}
 							for (const c of result.headers.getSetCookie()) res.writeHeader('set-cookie', c);

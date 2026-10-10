@@ -106,6 +106,7 @@ export function message(ws, { data, platform }) {
  * mean anything.
  */
 export function admin(request) {
+	if (request.headers.get('x-response-date') === '1') return new Response('dated', { headers: { date: 'Thu, 01 Jan 1970 00:00:00 GMT' } });
 	if (
 		process.env.HOOK_CRASH_DRILL_TOKEN &&
 		request.headers.get('x-hook-crash') === process.env.HOOK_CRASH_DRILL_TOKEN

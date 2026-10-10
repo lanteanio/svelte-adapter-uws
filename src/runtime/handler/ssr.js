@@ -495,7 +495,7 @@ function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
 	let hasContentTypeOptions = false;
 	for (const [key, value] of response.headers) {
-		if (key === 'set-cookie' || key === 'content-length') continue;
+		if (key === 'set-cookie' || key === 'content-length' || key === 'date') continue;
 		if (key === 'x-content-type-options') hasContentTypeOptions = true;
 		res.writeHeader(key, value);
 	}

@@ -13,7 +13,7 @@ import { negotiateEncoding } from '../utils/content-coding.js';
 import { locationTarget } from '../utils/location-target.js';
 import { revalidationHeaders } from '../utils/revalidation-headers.js';
 import { monotonicNow, now } from '../runtime.js';
-import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
+import { staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
 
 // File extensions that browsers cannot render inline. Serving these with
@@ -428,7 +428,6 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 			// Minimal on purpose: a 412 updates no stored response.
 			res.cork(() => {
 				res.writeStatus('412 Precondition Failed');
-				res.writeHeader('date', counters.cachedDateHeader);
 				res.end();
 			});
 			return;
@@ -449,7 +448,6 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 				for (let i = 0; i < revalidation.length; i++) {
 					res.writeHeader(revalidation[i][0], revalidation[i][1]);
 				}
-				res.writeHeader('date', counters.cachedDateHeader);
 				// No length: Content-Length on a 304 may only name the 200's
 				// content length (RFC 9110 8.6), and `end()` would write a zero.
 				res.endWithoutBody();
@@ -495,7 +493,6 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 			res.writeStatus('206 Partial Content');
 			res.writeHeader('content-type', entry.contentType);
 			res.writeHeader('content-range', `bytes ${start}-${end}/${body.byteLength}`);
-			res.writeHeader('date', counters.cachedDateHeader);
 			for (let i = 0; i < headers.length; i++) {
 				res.writeHeader(headers[i][0], headers[i][1]);
 			}
@@ -508,7 +505,6 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 	res.cork(() => {
 		res.writeStatus('200 OK');
 		res.writeHeader('content-type', entry.contentType);
-		res.writeHeader('date', counters.cachedDateHeader);
 		// Pre-computed [key, value] tuples for the representation being served -
 		// no Object.entries() allocation and no content-encoding branch per
 		// request, and the validator written here is that representation's own.

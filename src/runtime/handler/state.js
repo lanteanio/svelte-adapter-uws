@@ -823,8 +823,6 @@ export const decodeCache = new Map();
  * at its write/read sites in the handler sub-modules.
  */
 export const counters = {
-	// HTTP Date header string, rebuilt once/second by a setInterval (formats the runtime clock value).
-	cachedDateHeader: new Date(now()).toUTCString(), // determinism-allow: formats the runtime clock value, not a clock read
 	// Monotonic source for server-initiated request refs (scoped per connection at use).
 	nextRequestRef: 1,
 	// One-shot guard for the platform.sendTo async-filter warning.

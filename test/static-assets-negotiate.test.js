@@ -457,7 +457,7 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(br, 'vary')).toBe('Accept-Encoding');
 		expect(header(br, 'cache-control')).toBe('no-cache');
 		expect(header(br, 'last-modified')).toBe(header(full, 'last-modified'));
-		expect(header(br, 'date')).toBeTruthy();
+		expect(header(br, 'date')).toBeUndefined(); // The native response supplies Date.
 		expect(header(br, 'content-encoding')).toBeUndefined();
 		expect(header(br, 'content-type')).toBeUndefined();
 		expect(br.body).toBeNull();
