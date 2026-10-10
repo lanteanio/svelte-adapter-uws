@@ -9,11 +9,12 @@
 //
 // MEASURED, on this runtime: one 8,121-byte `subscribe-batch` carrying 1,344
 // shortest-legal topics is answered with 1,344 frames and 97,484 bytes, twelve
-// times what it cost to ask. The worst shape fills the 256-topic cap and pads
-// the rest of the frame with empty strings, which past the cap are only
-// type-checked and each still answered with a denial: 8,175 bytes in, 2,466
-// frames and 174,956 bytes out, twenty-one times. Both are repeatable - the
-// frame is legal, so nothing refuses the next one.
+// times what it cost to ask. Another measured shape fills the 256-topic cap
+// and pads the rest with empty strings, each answered with an overflow denial:
+// with ref 1, 8,191 bytes in yields 2,496 frames and 177,042 payload bytes out
+// (21.6x). A 128-character ASCII ref yields 2,453 frames and 490,383 payload
+// bytes for the same inbound size (59.9x). These are examples, not upper bounds:
+// every reply echoes the ref. Counts exclude welcome and transport framing.
 //
 // WHY THE EXISTING DEFENCES MISS IT. The control-frame limit (wire.js,
 // 8 KiB) bounds one frame, which bounds the frame COUNT per inbound frame but

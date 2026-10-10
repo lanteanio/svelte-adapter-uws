@@ -232,6 +232,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Identity keys with a nonempty lowercase ASCII letter/digit fold keep their existing alias matching, including non-ASCII letters that lowercase to ASCII; the configured key itself and other reserved names remain protected, and wire updates still require `clientUpdateFields`.
   - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: nginx examples set the upstream protocol for page requests.** The catch-all location now sets HTTP/1.1 explicitly, as the WebSocket location already did, avoiding a 505 response on older nginx versions whose upstream default was HTTP/1.0.
+  - **Affects:** Deployments copying the README nginx example, especially nginx before 1.29.7.
+  - **Action:** Add `proxy_http_version 1.1;` to the app location as well as the WebSocket location.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only; the uWS server continues to answer HTTP/1.0 requests with 505.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: cookie-refresh guidance describes the handshake dependency without blaming a proxy vendor.** The README recommends the existing HTTP authenticate hook and explains that cookies on a WebSocket handshake depend on the deployed client and intermediary path, while preserving the existing build-time warning.
+  - **Affects:** Apps refreshing session cookies when a WebSocket connects.
+  - **Action:** Keep using `authenticate` for cookie refresh before the upgrade; verify handshake header delivery if using `upgradeResponse()` for cookies.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only; the authenticate hook and build-time cookie warning are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: control-frame amplification examples account for echoed references.** The earlier roughly 21x numeric-reference example was described as a worst case, but a 128-character reference measured roughly 60x on the same inbound byte budget when driven through the real lead runtime.
+  - **Affects:** Operators sizing control traffic and readers comparing request and response bytes.
+  - **Action:** Treat the ratios as measured examples, not upper bounds.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation and comments only; the per-connection 4 MiB control-frame budget per 10-second window and close code 4429 are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -622,6 +641,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Real WebSocket tests cover delivered diffs and fresh snapshots, Unicode case
   distinctions, punctuation-only keys, non-ASCII aliases with a nonempty fold,
   warning eligibility, and default and explicit client update permissions.
+
+- **HTTP/1.1 on nginx page routes:** the catch-all example explicitly sets
+  `proxy_http_version 1.1` and clears the upstream `Connection` header. The
+  text states that uWS answers HTTP/1.0 with 505 and links nginx's documented
+  change from an HTTP/1.0 default before 1.29.7. A real production fixture
+  answered raw HTTP/1.0 with 505 and HTTP/1.1 with 200.
+- **Cookie-refresh attribution:** both handshake-cookie explanations now
+  describe the deployed client and intermediary dependency without naming a
+  vendor as the cause of a failed handshake. The HTTP `authenticate` path
+  remains recommended, and its implementation and build-time warning are
+  unchanged. The protocol reference permits cookies on the handshake.
+- **Measured control-egress examples:** README and control-budget comments no
+  longer call a numeric-reference overflow batch the worst case. On the lead
+  runtime, an 8,191-byte frame with ref 1 delivered 2,496 replies totaling
+  177,042 payload bytes (21.6x); a 128-character ASCII ref delivered 2,453
+  replies totaling 490,383 bytes (59.9x). Longer refs can amplify further.
+  Counts exclude welcome and transport framing; the 4 MiB per 10-second
+  ceiling and close code 4429 do not change.
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

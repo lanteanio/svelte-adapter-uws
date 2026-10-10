@@ -1240,7 +1240,9 @@ Each ceiling is a non-negative safe integer per window; `0` (or omitted) disable
 
 Protocol control frames - `welcome`, subscribe acks, `lease-ok`, the flow-control window grants - are charged against no **egress** budget, and that part is a design position rather than an oversight: those budgets meter application-data fan-out, and charging control frames to them would let an exhausted tenant budget refuse the very grant frames that pace a client down, wedging the flow-control loop exactly when it is needed.
 
-They carry their own ceiling instead, because the channel amplifies: a client names a topic in a few bytes and is answered with a whole frame. Measured on this runtime, the worst legal shape - an 8 KB `subscribe-batch` that fills the 256-topic cap and pads the rest with empty entries, each answered with its own denial - comes back as roughly 175 KB across 2,466 frames, twenty-one times what it cost to ask, and repeatable, since the frame is legal. So each connection may be sent **4 MiB of control frames per 10-second window**, after which it is closed with **4429**, the throttle code the bundled client already reconnects on. The ceiling is fixed and needs no configuration: a reconnecting client restoring 256 topics is answered with about 15 KB, and even a 5,000-topic restore costs about 300 KB, so the budget sits far above any healthy burst while the worst amplifier reaches it from about 20 KB/s of sustained inbound. Application `send` and `publish` traffic is never charged here. See [`ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED`](docs/errors.md#adapter-err-control-egress-exhausted).
+They carry their own ceiling instead, because the channel amplifies: a client names a topic in a few bytes and is answered with a whole frame. One measured shape on this runtime is an 8,191-byte `subscribe-batch` with numeric `ref: 1`, 256 distinct topics and empty overflow entries: 2,496 replies carry 177,042 payload bytes, about **21.6 times** the request size. Filling the same byte budget with a 128-character ASCII ref instead yields 2,453 replies and 490,383 payload bytes, about **59.9 times**. These are measured examples, not upper bounds: every reply echoes the ref, and longer refs can amplify further. Counts exclude the welcome frame and WebSocket/TCP framing.
+
+Each connection may be sent **4 MiB of control frames per 10-second window**, after which it is closed with **4429**, the throttle code the bundled client already reconnects on. The ceiling is fixed and needs no configuration: with the bundled client's short numeric refs, restoring 256 topics costs about 15 KB and even a 5,000-topic restore costs about 300 KB. The measured numeric-ref overflow shape reaches the budget from about 20 KB/s of sustained inbound traffic; larger echoed refs need less. Application `send` and `publish` traffic is never charged here. See [`ADAPTER-ERR-CONTROL-EGRESS-EXHAUSTED`](docs/errors.md#adapter-err-control-egress-exhausted).
 
 ### Security configuration
 
@@ -2187,9 +2189,9 @@ export function upgrade() {
 
 ### Refreshing session cookies on WebSocket connect
 
-For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach - attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` - is RFC-compliant but **is silently rejected by Cloudflare Tunnel, Cloudflare's proxy, and some other strict edge proxies**. The symptom is that the WebSocket `open` handler fires server-side, then the connection closes with code 1006 (`Received TCP FIN before WebSocket close frame`) before any frames are exchanged. The adapter emits a build-time warning when it detects this pattern.
+For short-lived sessions you often want to rotate the session cookie every time a client connects. Attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` is permitted by [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html#section-4.2.2), but delivery depends on the client and every intermediary preserving the handshake response headers; verify header delivery through your deployed path if you choose this approach. The adapter emits a build-time warning when it detects this pattern.
 
-The adapter ships a first-class solution: the optional `authenticate` hook runs as a normal HTTP POST **before** the WebSocket upgrade. `Set-Cookie` rides on a standard 2xx response, which every proxy handles correctly; the browser then attaches the refreshed cookie to the upgrade request that follows.
+The optional `authenticate` hook runs as a normal HTTP POST **before** the WebSocket upgrade. `Set-Cookie` rides on a standard 2xx response and follows the browser's ordinary HTTP cookie rules; the browser then attaches the refreshed cookie to the upgrade request that follows.
 
 **Step 1: add an `authenticate` export to `hooks.ws.js`**
 
@@ -2254,10 +2256,6 @@ With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', 
 - The hook is only mounted when `authenticate` is exported from `hooks.ws` - no runtime cost when unused.
 - Dev mode (Vite plugin) mirrors the production route on the same path: only that exact path, as written, reaches the hook (another spelling, such as `/__WS/AUTH` or `/__ws/auth/x`, goes on to the app), with the target as the client sent it in `event.url`, an empty `?` dropped as production drops it. Under `server.https`, where Vite terminates TLS and speaks HTTP/2 (before Vite 7.2, HTTP/1.1 when `server.proxy` is set), a same-origin `Origin` is the `https://` one, as under `SSL_CERT` in production, and over HTTP/2 the hook's `headers` carry no pseudo-headers, with `host` taken from `:authority`.
 - The endpoint requires `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` matching `allowedOrigins` (CSRF defense). The adapter client always stamps `x-requested-with: XMLHttpRequest`. Native (non-browser) clients that need to reach this endpoint without those headers can opt out via `websocket.authPathRequireOrigin: false`. See [Security configuration](#security-configuration).
-
-**Why not put `Set-Cookie` on the 101?**
-
-Cloudflare's HTTP/2 WebSocket bridging rewrites 101 responses, and `Set-Cookie` on the 101 trips the edge into tearing the connection down. This is undocumented Cloudflare behavior, but reproducible on every tunnel and proxy connector. The `authenticate` hook sidesteps it entirely by using a standard HTTP response.
 
 ---
 
@@ -6274,7 +6272,7 @@ When you use `on('todos', 'created')`, you get the payload wrapped in `{ data }`
 
 ### "WebSocket works locally but not behind nginx/Caddy"
 
-Your reverse proxy needs to forward WebSocket upgrade requests. Here's a complete nginx config that handles both your app and WebSocket:
+Your reverse proxy needs to forward WebSocket upgrade requests. The uWS server accepts HTTP/1.1 requests; an HTTP/1.0 request receives `505 HTTP Version Not Supported`. Set `proxy_http_version 1.1` for both the app and WebSocket locations, including on [nginx versions before 1.29.7](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_http_version), which defaulted to HTTP/1.0 upstream. Here's a complete nginx config that handles both:
 
 ```nginx
 server {
@@ -6298,6 +6296,8 @@ server {
     # Everything else - your SvelteKit app
     location / {
         proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

@@ -4,9 +4,11 @@
 // Measured on this runtime: one 8,121-byte `subscribe-batch` of 1,344
 // shortest-legal topics comes back as 1,344 frames and 97,484 bytes - twelve
 // times what it cost to ask. Filling the 256-topic cap and padding the rest
-// with empty strings does worse: 2,466 frames and 174,956 bytes for 8,175 in,
-// twenty-one times. Both repeat, because the frame is legal and nothing
-// refuses the next one.
+// with empty strings and ref 1 yields 2,496 replies and 177,042 payload bytes
+// for 8,191 in (21.6x). A 128-character ASCII ref yields 2,453 replies and
+// 490,383 payload bytes for the same inbound size (59.9x). These measured
+// shapes are not upper bounds: every reply echoes the ref. Counts exclude
+// welcome and transport framing; the byte budget bounds repeated requests.
 //
 // The defences that do not cover it: the 8 KiB control-frame limit bounds one
 // frame rather than the rate; every `messageAdmission` limit is zero-by-default,

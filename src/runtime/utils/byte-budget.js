@@ -5,9 +5,10 @@
  * batch carries at most 256 topics (the bundled client chunks at 200), and 256
  * acks at the ack's own size is roughly 15 KB; a client restoring 5,000 topics sends twenty
  * such batches for roughly 300 KB. This sits about 270 times above the first and
- * about 13 times above the second, while the worst measured amplifier reaches
- * it from about 20 KB/s of sustained inbound - a rate no real client produces on the
- * control lane, where traffic is bursty at reconnect and quiet after.
+ * about 13 times above the second for the bundled client's short numeric refs.
+ * One measured numeric-ref amplifier reaches it from about 20 KB/s of sustained
+ * inbound; larger echoed refs need less. Healthy control traffic is bursty at
+ * reconnect and quiet afterward.
  *
  * Here rather than beside the sender because all three socket surfaces need it:
  * the production handler, the published test server and the dev plugin each own
