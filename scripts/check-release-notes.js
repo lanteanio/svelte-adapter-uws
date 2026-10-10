@@ -195,6 +195,11 @@ export function validateReleaseSummary(source, expectedVersion = PACKAGE_VERSION
 	}
 
 	if (entries.length === 0) throw new Error('consumer summary must contain at least one entry');
+	for (let index = 1; index < entries.length; index++) {
+		if (KINDS.indexOf(entries[index].kind) < KINDS.indexOf(entries[index - 1].kind)) {
+			throw new Error('consumer summary entries must be grouped in Keep-a-Changelog order');
+		}
+	}
 	// Keep-a-Changelog uses sections as needed: coverage is required exactly
 	// for the kind sections the engineering body actually contains, so a
 	// Fixed-only release passes with Fixed-only coverage.

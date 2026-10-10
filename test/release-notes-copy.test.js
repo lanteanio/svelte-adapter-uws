@@ -108,6 +108,19 @@ describe('consumer release summary', () => {
 		expect(new Set(leads)).toEqual(new Set(sections));
 	});
 
+	it.each([
+		['Fixed', 'Added', 'Changed'],
+		['Added', 'Fixed', 'Changed'],
+		['Added', 'Changed', 'Fixed', 'Changed']
+	])('rejects out-of-order consumer category sequences: %j', (...kinds) => {
+		const source = syntheticChangelog(NEWEST_VERSION, kinds, {
+			Added: ['- One added engineering bullet.'],
+			Changed: ['- One changed engineering bullet.'],
+			Fixed: ['- One fixed engineering bullet.']
+		});
+		expect(() => validateReleaseSummary(source)).toThrow(/grouped in Keep-a-Changelog order/);
+	});
+
 	it('rejects short or multi-sentence outcome blocks', () => {
 		const outcome = FIRST_ENTRY[2];
 		const short = CHANGELOG.replace(outcome, () => 'The contracts are easier to find.');

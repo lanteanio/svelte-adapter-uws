@@ -10,20 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
-- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
-  - **Affects:** Endpoints that return custom ReadableStream response bodies.
-  - **Action:** None for valid string or binary chunks.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
-  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
-  - **Action:** No application change is required.
-  - **Requires:** No new dependency.
-  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
 - **Added: opt-in canonical site hosts.** `CANONICAL_HOST_ALIASES` redirects explicitly listed aliases to `ORIGIN` before cached assets, prerendered pages and SSR requests, so a www alias can no longer bypass an application hook's canonical-host policy while configured liveness and readiness probes remain reachable.
   - **Affects:** Deployments serving the same site through multiple hostnames.
   - **Action:** Set `ORIGIN` and a comma-separated `CANONICAL_HOST_ALIASES` list when canonical redirects are desired.
@@ -38,75 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Omitted preserves full draining; queue overflow still drops oldest and trusted server injections remain unpaced.
   - **Detail:** [Added engineering detail](#added).
 
-- **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
-  - **Affects:** Applications that react to disconnects or send application messages through the client connection.
-  - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Existing callers can ignore the return value; serialization and transport exceptions still propagate, and `true` confirms local admission only.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
-  - **Affects:** Applications using the Vite WebSocket plugin, including `server.https`.
-  - **Action:** None.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
-  - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: Vite authentication hooks can answer before reading a request body.** Like production, dev runs `authenticate` immediately with a bounded request stream, so an ignored chunked body or an unfinished permitted Content-Length no longer delays or replaces the hook's answer, while hooks that consume the stream retain production's body limit and rejection behavior.
-  - **Affects:** Vite applications whose `authenticate` hook does not consume every request body.
-  - **Action:** Read `event.request` when authentication depends on the body.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Declared lengths over 64 KiB still receive 413 before the hook; a hook read past that cap still rejects and receives 413.
-  - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
-  - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
-  - **Action:** None. Update the adapter client with the server package.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** The server's origin policy is unchanged. The client header value changes from `svelte-adapter-uws` to `XMLHttpRequest`; custom middleware that inspects that value must accept the new value.
-  - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: fractional auth rate-limit windows produce a valid Retry-After.** A fractional `websocket.authPathRateLimitWindow` previously produced a fractional `Retry-After` on auth preflight refusals; a `1.5`-second window now yields an integer delay of `2` or `3` seconds instead of `1.5` or `2.5`, allowing strict HTTP clients to honor the 429 response's delay.
-  - **Affects:** Deployments that configure a fractional `websocket.authPathRateLimitWindow`.
-  - **Action:** None.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** The limiter keeps the configured fractional window. Only the response's delay rounds up before jitter; whole-second windows retain their existing values, including `10` through `14` seconds at the default.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: extra entries load through symlinked project paths.** A project reached through a symlink or Windows junction could import a nonexistent startup file after Rollup sanitized an extra entry name; the adapter now matches entry chunks by their real paths.
-  - **Affects:** Builds that discover extra `__*.js` server entries through a linked directory.
-  - **Action:** Rebuild the application.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Direct paths, startup order and generated import quoting are unchanged.
-  - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: Windows serves indexed assets with encoded Unicode and tilde names.** An encoded request for a real file such as `Übersicht~v2.pdf` was refused as a possible Windows short name; it now serves the exact indexed file from the startup cache.
-  - **Affects:** Windows deployments with static filenames containing both a tilde and characters browsers percent-encode.
-  - **Action:** Rebuild the application.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Unindexed short names and alternate streams remain refused, as do encoded entries into reserved adapter paths.
-  - **Detail:** [Fixed engineering detail](#fixed).
-- **Fixed: decomposed prerendered names keep their composed clean URLs.** Prerendered filenames written with decomposed Unicode now receive composed clean-path aliases and the matching trailing-slash policy, so their browser URLs serve the indexed page through either file-style or directory-style prerendered output.
-  - **Affects:** Deployments whose prerendered output uses decomposed Unicode filenames or directory names.
-  - **Action:** Rebuild the application.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
 - **Added: reversible offline simulation on the client connection.** `simulateOffline()` pauses the socket and reconnect attempts while preserving subscriptions and queued messages; `resumeOnline()` reconnects with a fresh auth preflight when enabled, so an application can exercise its normal offline queue and recovery behavior.
   - **Affects:** Applications and demos that exercise their offline state and recovery flow.
   - **Action:** Use the two connection methods for temporary offline simulation.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Both methods are idempotent; permanent close, server refusal and retry exhaustion cannot be resumed.
   - **Detail:** [Added engineering detail](#added).
+
 - **Added: accounted topic membership for plugins in other packages.** A plugin that called `ws.subscribe` and wrote the subscription registry by hand left the worker's accounting behind, which the consistency auditor reports as `subs.total-mismatch`; the new `svelte-adapter-uws/subscriptions` entry exposes the runtime's own `trackedSubscribe` and `trackedUnsubscribe`.
   - **Affects:** Plugin and extension authors who manage a connection's topics from server code, such as presence, cursor or group lanes.
   - **Action:** Replace `ws.subscribe(topic)` plus a registry write with `trackedSubscribe(ws, topic)`, and the leave with `trackedUnsubscribe(ws, topic)`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Additive. These are the helpers the bundled plugins already use: native membership, the registry, the per-connection cap, the shared-codec cohort and the accounting move together. They reach the running app's connection state from any module instance.
   - **Detail:** [Added engineering detail](#added).
+
 - **Added: the request signal aborts when the client disconnects and when shutdown stops waiting.** The Request handed to SvelteKit carried no signal, so `event.request.signal` never fired; it now aborts when the client goes away before its request body has arrived in full, as under SvelteKit's Node adapter, and when the shutdown budget runs out.
   - **Affects:** Endpoints, load functions and hooks that pass `event.request.signal` to a `fetch`, a query or a stream, and admin handlers that read `request.signal`.
   - **Action:** None. To stop slow work early, pass `event.request.signal` on, as with SvelteKit's Node adapter.
   - **Requires:** No new dependency or option.
   - **Compatibility:** A request whose response completes never sees the signal abort, and neither does one whose client leaves after its body arrived, so a form action that has its data finishes what it started, as with the Node adapter. A response the server itself cuts off mid-stream aborts it like a disconnect. On disconnect the reason is an `AbortError`; at shutdown it is an `AbortError` whose message names the shutdown, admin requests included. Code that ignores the signal runs exactly as before. Each rendered request allocates one `AbortController`, about 2 microseconds on its `Request`; built assets and prerendered pages are served without one.
   - **Detail:** [Added engineering detail](#added).
+
 - **Added: send already serialized JSON without retaining it for reconnect.** `connect().sendSerialized(text): boolean` passes a complete JSON text message directly to an open WebSocket, so callers can validate and serialize once before allocating request state, with a false result whenever a connecting or closed socket cannot accept the message immediately.
   - **Affects:** Client libraries and apps that construct serialized messages and manage their own request lifetime.
   - **Action:** Call `sendSerialized(text)` with a primitive string containing valid JSON. A `false` result means no open socket accepted it; the method never queues it for reconnect.
@@ -120,36 +58,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every sendable code, and every well-formed reason of 123 bytes or fewer, goes out exactly as before. A code outside those ranges, a non-integer or a non-number, a reason without a code, and reason bytes that are not UTF-8 now throw a `TypeError` and leave the connection open; under `vite dev` the `ws` library threw for a bad code too, but only after it had started closing. A longer reason is shortened at a character boundary and a lone surrogate is sent as U+FFFD instead of invalid bytes. The rule is installed on each of the adapter's own sockets, so a uWS server the application runs beside it is untouched. Under `vite dev` a long reason no longer throws, a binary reason is sent as its bytes, and `ws.close()` now drops the connection without a close frame as uWS does, so the client reads 1006 rather than 1005. In the simulator a close with no code now reports 0 to the server and 1005 to the peer, as uWS does, where it reported 1000 to both.
   - **Detail:** [Changed engineering detail](#changed).
+
 - **Changed: a malformed WebSocket handshake is refused with 400, and an unsupported version with 426.** uWS accepted a handshake on its key's length alone and sent a keyless one on to the application, so a request without `Connection: upgrade`, with a non-base64 key or with version 8 still opened a socket; every surface now refuses it.
   - **Affects:** Clients that send a nonstandard handshake: a hand-rolled client, a proxy that rewrites `Connection` or `Upgrade`, or a client asking for WebSocket version 8, which `vite dev` accepted. Browsers and the `ws` library send conforming handshakes.
   - **Action:** None for browser and `ws` clients. A client refused here needs one `Upgrade: websocket` line, a `Connection` that lists `upgrade`, one base64 key of 16 bytes and `Sec-WebSocket-Version: 13`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** The refusal comes before the capacity, origin, rate-limit and application checks, so a malformed handshake is never answered or counted as load; it is counted as `upgrade_rejected_total{reason="malformed_handshake"}`, and a 426 carries `Sec-WebSocket-Version: 13`. Letter case is ignored, and only spaces and tabs are trimmed. A GET to the WebSocket path that is not a handshake, or an upgrade to another protocol, is answered as before. `createTestServer` and `vite dev` refuse the same handshakes with the same statuses, except that `vite dev` refuses an upgrade to another protocol on that path with 400, as its WebSocket library already did. Simulator clients send a conforming handshake, so an `upgrade` hook under `svelte-adapter-uws/sim` now sees `upgrade`, `connection`, `sec-websocket-key` and `sec-websocket-version`, and a scenario's own `connect` headers replace them.
   - **Detail:** [Changed engineering detail](#changed).
+
 - **Changed: the flow-control window narrows along a ramp as memory fills, not in one step.** Past a `heap_used_ratio` of 0.7 a flow-controlled connection's window fell from the full 256 requests to under a third at once; it now ramps down, reaching half at the default 0.85 MEMORY threshold and a twentieth near the wall.
   - **Affects:** Clients that opt into internal flow control, on workers whose memory reading passes 0.7.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Below 0.7 every window is the full base, as before. Between 0.7 and 0.985 every window is larger than it was, and from there to the wall both reach the same floor. The window is a function of `heap_used_ratio` and of subscriptions per connection, both exported, so a worker that grants smaller windows while `pressure_reason` still reads none can be read from them.
   - **Detail:** [Changed engineering detail](#changed).
+
 - **Changed: a request target carrying a byte outside visible ASCII, or a fragment, is refused with 400.** uWS decoded raw non-ASCII bytes in the request line and served the page behind them, and routed on a path that kept its `#`; every route and the WebSocket handshake now refuse such a target, as RFC 9112 asks.
   - **Affects:** Clients that send raw UTF-8, control characters or a `#` in the request line instead of percent-encoding them. Browsers and HTTP libraries encode these, and leave the fragment out.
   - **Action:** None for browser traffic. A client refused here percent-encodes the target: `/caf%C3%A9`, not the raw bytes.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Percent-encoded targets are served as before, non-ASCII page names included, and a static file with a non-ASCII name is now served for its encoded spelling. Built assets pay one read of the query and a scan of the target, which measured within run-to-run noise (bench/40). A handshake refused for its query counts as `upgrade_rejected_total{reason="malformed_handshake"}`; one whose path carries such a byte misses the WebSocket route and is refused like any other request. node's HTTP parser refuses the raw bytes itself and passes a `#` on, so under `vite dev` the WebSocket handshake and the auth path refuse a fragment and pages are served as Vite serves them. `createTestServer` refuses on the routes it mirrors.
   - **Detail:** [Changed engineering detail](#changed).
+
 - **Changed: the WebTransport reliable stream carries empty messages and close codes, and truncates a recovery it cannot carry whole.** Section 15 of PROTOCOL.md carries an empty message as a zero-length record and a close as a close record (`kind` `0x02`), and places a recovery's truncation where a client can re-snapshot at once.
   - **Affects:** Authors of a runtime or client that implements the section 15 reliable-stream binding, and of a client that reads section 8.1's replay events. The JavaScript adapter and its client do not implement the binding and behave exactly as before.
   - **Action:** Accept a zero-length record; wherever a WebSocket would send a close frame, other than for an error in the frames themselves, write a close record with the same payload and then FIN, and refuse any byte after one; reset with `RECORD_TOO_LARGE` instead of sending a message larger than you may emit, except for a `msg` on `__replay:{topic}`, a sequenced frame for a topic with an open recovery window, and a live relayed `game` event outside such a window for its room, which is not delivered; never form a `batch` record over that bound; on `__replay:{topic}`, write neither the over-bound `msg` nor any later one of that recovery and end it with `end` carrying `truncated:true`, except that a resume's own gap-fill there that has written no `end` by its own request's answer gets the standalone `truncated` just before that answer and no `end` after it; while a recovery window for a topic is open, withhold every sequenced frame for it from the first over-bound one, live frames included, until no window for it remains open, admitting the complete run of standalone `truncated` events and its answer to the send queue and closing the answered windows as one step with respect to frame handling, before transport transmission, and resetting instead if the hold exceeds its bound; open such a window for every request that asks to recover a topic and that you answer with `subscribed`, `subscribe-denied` or `resumed`, whether or not you can recover the topic, while a malformed `recover` or a `resume` frame you do not act on opens none; as a stream client, drop the topic's offset and surface the truncation on a standalone `truncated` or an `end` carrying `truncated:true`, and after a `RECORD_TOO_LARGE` reset, whichever side reset the lane, drop the offset of every topic whose `recover` subscribe or `resume` frame you had not seen answered and surface a truncation for each, and never take a topic's offset from `__replay:{topic}` events; any client that reads section 8.1's events should accept a standalone `truncated` with no `end` after it, including one after a terminal `end`, `denied` or `rehydrate` but before the core answer, and treat an `end` that carries `truncated:true`, a `replay` request's own included, as it treats that event; open the stream only after the CONNECT response; re-pin `test-vectors/webtransport-stream.json`, which now has eight records, names the check behind every refusal, flags the entries that hold only at its assumed receiver limit or only for a receiver that reads on after a close, and lists recovery transcripts in `recoveryTruncation`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Section 15 stays provisional until its wire-status line reads frozen, so the change lands inside revision 1. A zero-length record that used to be a `PROTOCOL_ERROR` is now an empty message, `kind` `0x02` is now a close record, a well-formed record whose inner message is malformed no longer resets the lane and is dropped, denied or passed through as on WebSocket, and bytes the stack holds unsent now count against the pending bound. An endpoint may also cap its pending records at no fewer than 65,536, a server must bound bytes sent but not yet acknowledged at no less than 1 MiB, a receiver limit is never below 125 bytes, a server may refuse a stream that arrived before it sent its successful response, and `NO_ERROR` (`0x00`) joins the stream errors. A withheld `0x03` record counts as dropped for sections 6.4 and 6.7, so a stateful capability degrades to JSON and a `game.fanout:1` topic falls back to its JSON envelope. Section 8.1 now also says a standalone `truncated` can arrive with no `end` after it, ahead of a topic's resume answer, as the reference server already sends it when a resume cannot deliver everything a topic is owed.
   - **Detail:** [Changed engineering detail](#changed).
+
 - **Changed: the package no longer carries its roadmap, claim register or decision records.** `ROADMAP.md`, `docs/claim-register.md`, `docs/decisions/`, `docs/desync-coverage.md` and the release pages of earlier prereleases leave the repository and the npm package, so a link that follows the newest version or the dev branch to one of them ends at a missing file.
   - **Affects:** Readers, sites and tools that link to those files in the package or the repository.
   - **Action:** Link the exit contract in `docs/releasing.md`, the boundaries and memory-pressure rules in `docs/architecture.md`, `PROTOCOL.md` for wire compatibility, a release's `CHANGELOG.md` heading for its notes, or the claim's own README section; version-pinned links keep working.
   - **Requires:** No new dependency or option.
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
+  - **Affects:** Endpoints that return custom ReadableStream response bodies.
+  - **Action:** None for valid string or binary chunks.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
+  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
+  - **Action:** No application change is required.
+  - **Requires:** No new dependency.
+  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
+  - **Affects:** Applications that react to disconnects or send application messages through the client connection.
+  - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Existing callers can ignore the return value; serialization and transport exceptions still propagate, and `true` confirms local admission only.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
+  - **Affects:** Applications using the Vite WebSocket plugin, including `server.https`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: Vite authentication hooks can answer before reading a request body.** Like production, dev runs `authenticate` immediately with a bounded request stream, so an ignored chunked body or an unfinished permitted Content-Length no longer delays or replaces the hook's answer, while hooks that consume the stream retain production's body limit and rejection behavior.
+  - **Affects:** Vite applications whose `authenticate` hook does not consume every request body.
+  - **Action:** Read `event.request` when authentication depends on the body.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Declared lengths over 64 KiB still receive 413 before the hook; a hook read past that cap still rejects and receives 413.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
+  - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
+  - **Action:** None. Update the adapter client with the server package.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The server's origin policy is unchanged. The client header value changes from `svelte-adapter-uws` to `XMLHttpRequest`; custom middleware that inspects that value must accept the new value.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: fractional auth rate-limit windows produce a valid Retry-After.** A fractional `websocket.authPathRateLimitWindow` previously produced a fractional `Retry-After` on auth preflight refusals; a `1.5`-second window now yields an integer delay of `2` or `3` seconds instead of `1.5` or `2.5`, allowing strict HTTP clients to honor the 429 response's delay.
+  - **Affects:** Deployments that configure a fractional `websocket.authPathRateLimitWindow`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The limiter keeps the configured fractional window. Only the response's delay rounds up before jitter; whole-second windows retain their existing values, including `10` through `14` seconds at the default.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: extra entries load through symlinked project paths.** A project reached through a symlink or Windows junction could import a nonexistent startup file after Rollup sanitized an extra entry name; the adapter now matches entry chunks by their real paths.
+  - **Affects:** Builds that discover extra `__*.js` server entries through a linked directory.
+  - **Action:** Rebuild the application.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Direct paths, startup order and generated import quoting are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: Windows serves indexed assets with encoded Unicode and tilde names.** An encoded request for a real file such as `Übersicht~v2.pdf` was refused as a possible Windows short name; it now serves the exact indexed file from the startup cache.
+  - **Affects:** Windows deployments with static filenames containing both a tilde and characters browsers percent-encode.
+  - **Action:** Rebuild the application.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unindexed short names and alternate streams remain refused, as do encoded entries into reserved adapter paths.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: decomposed prerendered names keep their composed clean URLs.** Prerendered filenames written with decomposed Unicode now receive composed clean-path aliases and the matching trailing-slash policy, so their browser URLs serve the indexed page through either file-style or directory-style prerendered output.
+  - **Affects:** Deployments whose prerendered output uses decomposed Unicode filenames or directory names.
+  - **Action:** Rebuild the application.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: send and publish documentation distinguishes local status from delivery.** The send reference reversed the numeric success and backpressure results, while the publish reference called local fan-out delivery, so the corrected descriptions now explain the existing values and their limits without changing any runtime return.
   - **Affects:** Applications interpreting `platform.send()` or `platform.publish()` results.
   - **Action:** Compare send results explicitly: `0` is backpressure, `1` is success, and `2` is dropped. Use an application acknowledgement when processing confirmation is required.
@@ -163,120 +177,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Hook failures keep their existing 1011 close codes and reasons. A failed close hook still allows connection cleanup, even when logging also fails. Healthy hooks are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a throwing open, drain or close hook no longer takes the worker down.** The three lifecycle hooks ran outside the message hook's exception boundary, so one throw or rejection ended the worker and all its connections; a failing `open` or `drain` hook now closes only its own connection with 1011, and a failing `close` hook is logged.
   - **Affects:** Apps whose `open`, `drain` or `close` hook can throw or return a rejecting promise. `createTestServer` and `vite dev` contain `open` and `close` the same way.
   - **Action:** None, unless an error tracker relied on these failures reaching `process.on('uncaughtException' | 'unhandledRejection')`: they are now caught and printed, so report them from inside the hook. Catch there too to close the connection deliberately rather than with 1011.
   - **Requires:** No new dependency or option.
   - **Compatibility:** A hook that does not fail is called as before, on the same object, and still not awaited; a returned thenable now gets a rejection handler attached. An app with its own process-level handler used to keep the connection open after a failing `open` or `drain` hook and see the error there; the connection is now closed with 1011 and the error goes to the console line. A hook export that is present but not a function is reported on each connection instead of throwing out of the callback. The close reasons are `Open handler error` and `Drain handler error`, beside the existing `Message handler error`, and the lines print as `ADAPTER-ERR-OPEN-HOOK`, `ADAPTER-ERR-DRAIN-HOOK` and `ADAPTER-ERR-CLOSE-HOOK`. Under `vite dev` a failing close hook no longer skips the dev server's own cleanup for that connection.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the documented way to stop a client retrying now sends its close code.** The README closed an unauthenticated socket with `ws.close(4401, 'Unauthorized')`, but `close()` takes no arguments and sends no close frame, so the client read 1006 and kept reconnecting; the example now uses `ws.end(4401, 'Unauthorized')`.
   - **Affects:** Apps that copied the example to end a client's retry loop.
   - **Action:** Replace `ws.close(code, reason)` with `ws.end(code, reason)` wherever the client is meant to read the code.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only; `ws.close()` behaves as it always did on uWS.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a sendCoalesced value JSON cannot carry no longer takes the worker down.** Queued behind backpressure, such a value was first serialized in the drain callback, where the throw ended the worker; it is now dropped and reported while the rest of the queue goes out, and on an idle socket the call still throws as `send` does.
   - **Affects:** Apps that pass a BigInt, a cyclic object or a function through `platform.sendCoalesced` to a slow client.
   - **Action:** None; convert such values before sending, and watch for `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Serializable values are queued, coalesced and sent exactly as before. An older queued entry that fails no longer throws out of a later, unrelated `sendCoalesced` call.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: createTestServer now has sendCoalesced and runs the drain hook.** The test server had neither, so a call to `platform.sendCoalesced` failed there and a `drain` hook never ran; it now queues and drains on real backpressure the way production does, while `vite dev` still sends each value at once.
   - **Affects:** Suites that exercise `sendCoalesced` or a `drain` hook through `createTestServer`.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Additive for the test server. `vite dev` has no outbound queue model, so it sends each coalesced value immediately and never calls `drain`.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a long diagnostic message now parses back.** A message longer than 512 characters was cut after normalizing, so a cut landing just past a space left a trailing one, and `parseDiagnostic` refused the line `formatDiagnostic` had just written because its message no longer matched its own normalized form.
   - **Affects:** Log pipelines and tools that read adapter diagnostic lines back with `parseDiagnostic` from `svelte-adapter-uws/observability`.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** A message is still at most 512 characters; one that was cut right after a space loses that trailing space. Nothing else about the line changes.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the invariant-violation counter is declared for TypeScript.** `platform.assertions`, the per-category counter, existed on every surface's platform and was documented in the README, but the published `Platform` type did not declare it, so TypeScript apps reading it failed to compile; it is now declared as a read-only `Map`.
   - **Affects:** TypeScript apps that read `platform.assertions`.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Types only. `introspect().assertions` keeps its plain-object type.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: sendWireBatch rejects invalid codec payloads before binary admission.** A codec returning an object, Promise or other non-byte value could announce a wire id before frame construction failed, or have its value coerced into unexpected bytes; the call now throws `TypeError` before announcing or constructing that frame.
   - **Affects:** Custom stateful codec authors using `platform.sendWireBatch`, on the production runtime and under `createTestServer`.
   - **Action:** Return `Uint8Array` bytes, or `null` to decline an encoding. Keep asynchronous work outside `encode`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Valid payloads, including `Buffer` and byte-array views from another JavaScript realm, retain their bytes. Nullish results keep their fallback behavior and codec exceptions propagate unchanged. A failure on a later entry leaves earlier entries sent.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: sendWireBatch reports a dropped last frame.** When the codec declined the batch and the frame for the final entry was dropped, the call returned 1, as if everything had gone out; it now returns 2, on the production runtime and under `createTestServer`.
   - **Affects:** Plugins and apps that read the return value of `platform.sendWireBatch` to decide whether to resend.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Only that one outcome changes. A dropped frame followed by entries that fall back to JSON still reports the status of the last send.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the control-channel ceiling documents its worst case.** The README measured a subscribe batch of short topics, twelve times amplified; filling the 256-topic cap and padding with empty entries, each denied on its own, is twenty-one times, so the 4 MiB per 10 s budget is reached from about 20 KB/s of inbound, not 34.
   - **Affects:** Operators sizing inbound limits in front of the adapter from the documented figures.
   - **Action:** None; the ceiling itself is unchanged and still cuts such a client with 4429.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a rate-limited auth preflight no longer closes the client for good.** The bundled client read every 4xx from the preflight as a verdict on the user, so a 429 - which clients behind one address earn together - marked them all permanently closed until a reload; a 429 now backs off like a throttling close, no sooner than its new Retry-After.
   - **Affects:** Apps using `connect({ auth: true })` whose users share an address (offices, schools, carrier NAT), and anything reading `failure` for the preflight.
   - **Action:** None. A UI keyed on `$failure.class === 'AUTH'` for a 429 now sees `'THROTTLE'` with `kind: 'auth-preflight'`.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every other 4xx is still terminal and 5xx still retries. The server's preflight 429 now carries `Retry-After` of about one `authPathRateLimitWindow`, jittered; the client caps any `Retry-After` it honours at five minutes.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a connection attempt the network never answers is abandoned and retried.** A WebSocket handshake or an auth preflight that got no response at all - no open, no error, no close - left the client in 'connecting' indefinitely; each attempt is now bounded at 15 seconds and then handed to the ordinary backoff.
   - **Affects:** Clients on networks that silently drop traffic (captive portals, broken proxies, mobile handovers).
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option; the backoff, `maxReconnectAttempts` and the failure classes are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the close-hook traffic stats say what bytesOut counts.** `bytesOut` was documented as bytes but adds the `length` of each frame, so a non-ASCII text frame counted fewer bytes than it put on the wire; the declaration now states the unit - bytes for binary frames, UTF-16 code units for text ones - and why it is kept.
   - **Affects:** Apps that read `bytesOut` in a `close` hook, especially for non-ASCII text traffic.
   - **Action:** None; treat text `bytesOut` as a lower bound on UTF-8 bytes.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. An exact UTF-8 count measured about 28 ns for a 90-character envelope and 140 ns for 400 on every send, which this per-send stat does not pay; `topicPublishBytesPerSec` uses the same unit.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a server entry with an apostrophe, `#` or `%` in its name loads.** The build imported each `__` entry a Vite plugin writes by a path built from its entry name, so an apostrophe broke the generated index and a `#` or `%` - which Rollup rewrites in file names - pointed at a file that did not exist.
   - **Affects:** Vite plugins that emit `__`-prefixed server entries with such characters in the name.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Entries are now imported by the file Rollup wrote, with JSON-quoted specifiers, and in file-name order on every filesystem. An ordinary name imports exactly as before.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: data JSON has no form for is refused instead of sent broken.** A function or a symbol as message data went out as `"data":undefined`, a frame no client can parse; every send and publish lane now throws a TypeError to the caller, as it already did for a BigInt.
   - **Affects:** Apps that pass a function or a symbol as message data, usually by accident.
   - **Action:** None; fix the call the TypeError points at.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Every value JSON can carry is sent exactly as before; measured on the envelope builder, the added check is within run noise.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a plugin's tracked join of an already shared topic gets binary frames under createTestServer.** The test server never connected `trackedSubscribe` to its shared fan-out, so a capable socket a plugin subscribed to an already shared topic received no frame from its publishes; it now joins the binary cohort, as in production.
   - **Affects:** Plugin and extension suites that call `trackedSubscribe` or `trackedUnsubscribe` from `svelte-adapter-uws/subscriptions` under `createTestServer` or `svelte-adapter-uws/sim`, on topics published with a `shared: true` codec.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Production behaviour for a single server is unchanged. A capable socket joined this way receives one wire-id announce and then the binary frame, a second join of a topic it holds announces nothing, and a tracked leave, including the one a revoked subscribe runs, takes it out of the cohort. A socket that joined before the topic's first shared publish was already moved into the cohort by that publish. Each server now keeps its own join and leave, so a process that runs several servers no longer joins one server's sockets to another's cohort.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a request whose client disconnects mid-body no longer hangs forever.** The body stream waited for a last chunk that never came, so a handler reading the body never returned and the request stayed counted as in flight, which also made every graceful shutdown wait out its whole budget; the disconnect now ends the read with an error.
   - **Affects:** Endpoints, form actions and admin handlers that read a request body, on servers whose clients can drop mid-upload.
   - **Action:** None. A handler that reads the body sees the read reject with `Request aborted`, as it already did for a client gone before the read began.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Requests whose body arrives in full are unaffected.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a request id, trace context or connection permit can no longer go missing between upgrade and open.** uWS copies upgrade userData by assignment, so an accessor on Object.prototype for one of the adapter's string keys took the value: the connection ran without its request id, and with `maxConnections` set the first connection stopped the worker.
   - **Affects:** Apps, or libraries they load, that define an accessor on `Object.prototype` for `__adapter_uws_request_id__`, `__uwsTraceContext` or `__adapter_uws_connection_permit__`, and test code that imports `WS_REQUEST_ID_KEY` from `svelte-adapter-uws/testing`.
   - **Action:** None. Test code that read the request id through `WS_REQUEST_ID_KEY` reads `userData[WS_PLATFORM].requestId`, as it already had to once `open` had run.
   - **Requires:** No new dependency or option.
   - **Compatibility:** The three values now cross the upgrade on keys no other code can name. `WS_REQUEST_ID_KEY` is still exported with the same value and marked deprecated; no slot uses it. A request id that fails to arrive is minted rather than left undefined. An application's own `__adapter_uws_request_id__` or `__uwsTraceContext` property in its upgrade userData now reaches its hooks unchanged, where the adapter used to overwrite it at upgrade and delete it at open; a non-enumerable property at `__adapter_uws_connection_permit__` is dropped by the upgrade copy like any other non-enumerable property, where the adapter used to recreate it.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a target that resolves onto one of the adapter's own paths is refused instead of reaching the app.** `/x/../healthz` skipped the health answer and reached the app's router as `/healthz`, as the same spelling did for the readiness and auth paths and waiting-room pages; it now gets 400, as a target entering the admin prefix already did.
   - **Affects:** Clients that spell a request to one of these paths with dot segments, a backslash or percent-encoding, or ask for its SvelteKit data, as `/healthz/__data.json` does.
   - **Action:** None. Request the path as it is spelled.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Direct requests to these paths are answered as before. A refused spelling is refused whatever the method, a method the path itself does not answer included, since it is routed as one path and read as another either way. The WebSocket path counts as one of them only while an admission ceiling answers its GETs; without one its pages, their data and such spellings stay the app's, and `vite dev` refuses such a spelling on the handshake. A page one trailing slash further on, `/healthz/`, is a path of its own that the adapter never answered, so it and its data stay the app's. An escaped spelling of the admin prefix that ends in an escape no decoder reads is refused too, where a request other than GET or HEAD used to reach the app's `handle` hook.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a static file whose name a browser percent-encodes is served for that spelling.** Assets were looked up by their raw file name, so `static/maß.txt` requested as `/ma%C3%9F.txt`, or `My Report.pdf` as `/My%20Report.pdf`, got the app's 404; the encoded spelling now finds the file, as under SvelteKit's Node adapter.
   - **Affects:** Apps whose `static/` directory or build output holds a file whose name carries a space, a non-ASCII letter or another character a browser encodes, such as `Übersicht.pdf`.
   - **Action:** None.
   - **Requires:** No new dependency or option.
   - **Compatibility:** The raw bytes of a non-ASCII name, the only spelling that reached such a file before, are refused as a request target. An escaped spelling that decodes to a file's name is served, escapes in either letter case, except where it escapes a character `decodeURI` keeps encoded, `/`, `#`, `?` and `&` among them, as under the Node adapter; a name written decomposed is also found for its composed spelling. A target that matches a file as sent is served exactly as before, on the same single map lookup.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a Host header carrying a path no longer picks the page the app renders.** With no `ORIGIN` set, the request URL was built from the Host value, so `Host: a/__realtime/x?` routed the app to `/__realtime/x` whatever the request line named, past the reserved admin prefix and a proxy's path rules; it is now refused with 400.
   - **Affects:** Deployments without `ORIGIN` whose pages, `admin()` handler or `authenticate` hook a client can reach with a Host header of its own choosing. Browsers cannot send one; any scripted client can.
   - **Action:** None. If every request is now answered 400 and a warning names `HOST_HEADER`, `PORT_HEADER` or `PROTOCOL_HEADER`, fix what the proxy writes into that header.
@@ -290,18 +324,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Dev only; production is unchanged. Under `server.https` a same-origin `Origin` on the WebSocket upgrade and the auth endpoint is the `https://` one, as under production's `SSL_CERT`, and the `http://` one for the same host is refused. The hook gets the request's own path and query in `event.url` and `request.url`, as in production, instead of `/` with the query. Another spelling of the auth path goes on to the app, as in production, and so does any dashboard spelling but its path and the paths under it; trailing slashes on `dashboard.path` are dropped. Over HTTP/2 the hook's `headers` carry no pseudo-headers and `host` is the `:authority`, and a Response the hook returns is written without the connection headers HTTP/2 does not carry, such as `transfer-encoding`. A hook Response whose body fails to read answers a 500 without the hook's headers and cookies, as in production. A status that is no final status node can write, such as the 0 of `Response.error()`, answers the same 500, and over HTTP/1.1 so does a header value or cookie that node's HTTP/1.1 writer refuses; production rejects invalid final statuses too but writes these header values as given. Header values and cookies with text past ASCII go out as their UTF-8 bytes, as production writes them. A client that leaves partway through an auth POST no longer ends the dev server. Over HTTP/1.1 a Response node refuses only as it writes it, such as a 204 announcing a `trailer`, closes the connection. A hook 304 keeps the `content-length` it declares when that reads as a length.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: malformed bodyless response lengths no longer produce enormous headers.** An authenticate hook or endpoint that declares `abc`, a negative length or an unsafe integer now omits `Content-Length` on HEAD and 304 responses, while a network-error Response now produces a valid 500 before hook cookies or headers are written.
   - **Affects:** Applications returning their own Responses from `authenticate`, endpoints or server hooks.
   - **Action:** Declare the actual GET representation length when supplying a length on HEAD or 304; omit it when unknown.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Decimal-prefix parsing is retained: `42abc` still reports `42`, and zero and safe positive integers remain accepted. Responses with status 0, including `Response.error()`, now receive a clean 500. Valid statuses, 204 framing and ordinary bodyless responses are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: immutable assets honor wildcard cache conditions.** A GET or HEAD with `If-None-Match: *` now receives 304 when a versioned asset exists, including brotli and gzip variants, where these requests previously returned 200 because assets without an ETag skipped conditional handling despite the wildcard checking existence.
   - **Affects:** Clients revalidating built assets under `/_app/immutable/`.
   - **Action:** None. Existing wildcard requests receive the conditional response they requested.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Normal immutable requests still return 200 with the selected representation. Wildcard If-Match succeeds; a specific If-Match tag fails with 412 because no entity-tag exists. Missing date validators still cause date conditions to be ignored, and immutable range behavior is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: interrupted authentication body reads now reject and release request state.** When a client disconnected while an authentication hook awaited `request.text()`, `request.json()` or `request.formData()`, the body read could stay pending indefinitely and keep its request state out of the pool, so disconnects now reject that read and let the existing cleanup run.
   - **Affects:** Applications whose WebSocket `authenticate` hook reads the request body.
   - **Action:** No configuration change is needed; handle a rejected body read if the hook performs its own cleanup.
@@ -315,7 +352,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or plugin option.
   - **Compatibility:** With an empty prefix, bare `ORIGIN` works as before. With a prefix and no prefixed origin pin, dev uses the request Host as production does; a bare `ORIGIN` no longer overrides it.
   - **Detail:** [Fixed engineering detail](#fixed).
-
 
 - **Fixed: wire sends and publishes reject invalid codec payloads before binary admission.** A codec returning an object announced a wire id before frame construction failed; an array or string could instead be coerced into unintended bytes, so these invalid results now fail before reaching a binary subscriber.
   - **Affects:** Custom codec authors using `sendWire`, `publishWire` or `publishWireBatch` in production or `createTestServer`.
@@ -337,18 +373,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only; the uWS server continues to answer HTTP/1.0 requests with 505.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: cookie-refresh guidance describes the handshake dependency without blaming a proxy vendor.** The README recommends the existing HTTP authenticate hook and explains that cookies on a WebSocket handshake depend on the deployed client and intermediary path, while preserving the existing build-time warning.
   - **Affects:** Apps refreshing session cookies when a WebSocket connects.
   - **Action:** Keep using `authenticate` for cookie refresh before the upgrade; verify handshake header delivery if using `upgradeResponse()` for cookies.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only; the authenticate hook and build-time cookie warning are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: control-frame amplification examples account for echoed references.** The earlier roughly 21x numeric-reference example was described as a worst case, but a 128-character reference measured roughly 60x on the same inbound byte budget when driven through the real lead runtime.
   - **Affects:** Operators sizing control traffic and readers comparing request and response bytes.
   - **Action:** Treat the ratios as measured examples, not upper bounds.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation and comments only; the per-connection 4 MiB control-frame budget per 10-second window and close code 4429 are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -686,6 +725,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- The release-note CLI now rejects consumer summaries whose categories are not grouped in Added, Changed, Fixed order, so the standard repository checks enforce the same ordering as the copy regression suite.
 
 - Request body cancellation stops both preallocated and streaming native upload callbacks before they copy or enqueue later chunks. Payload-limit errors use a private identity brand so hostile application rejection objects cannot throw during auth or SSR failure classification.
 
