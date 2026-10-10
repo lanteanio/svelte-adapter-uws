@@ -3758,6 +3758,10 @@ export interface Platform {
 	 * increments `platform.closedWsAborts`. Callers can fire-and-forget
 	 * without a per-site try/catch.
 	 *
+	 * Trusted server topic names may use the reserved `__` prefix; the app's
+	 * subscription hook still authorizes them. There is no `allowSystemTopic`
+	 * option. Validate client-selected names before calling this server API.
+	 *
 	 * @example
 	 * ```js
 	 * // In an RPC handler that needs to subscribe the connection
@@ -3774,7 +3778,9 @@ export interface Platform {
 	/**
 	 * Consult the user's subscribe-hook chain for a single topic without
 	 * actually subscribing the connection. Returns `null` to allow or a
-	 * string denial reason to deny.
+	 * string denial reason to deny. Ordinary checks accept server-selected `__`
+	 * system topics through the app hook, with no `allowSystemTopic` option.
+	 * Validate client-selected names before calling this trusted server API.
 	 *
 	 * Use this when the caller wants to make the subscribe decision in
 	 * one step and perform the actual `ws.subscribe` later as part of a
