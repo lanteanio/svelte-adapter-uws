@@ -218,6 +218,21 @@ optional and is passed to the extension that should use it. It bounds backend
 failure latency; it does not prove that missed cross-instance events or writes
 were reconstructed.
 
+## Subscription-pressure signal
+
+Subscription pressure uses every settled logical subscription divided by the
+number of live connections. Each subscription retains membership state and can
+participate in publication fanout, regardless of how many belong to the same
+connection. The default threshold is 50 subscriptions per connection. A
+connection with many subscriptions therefore contributes its actual count;
+its contribution is not clipped to a fixed per-connection allowance.
+
+This signal measures aggregate resource demand. Clipping one connection's
+contribution would hide that demand and could report a healthy worker while
+its membership and fanout costs keep growing. Per-connection admission limits
+bound individual consumers independently; they do not change the pressure
+measurement. Lease grant sizing uses the same uncapped ratio.
+
 ## Memory-pressure signal
 
 Every adapter in the family reports memory pressure as the distance to the
