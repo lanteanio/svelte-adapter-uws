@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Disabled by default; redirects preserve the method with 308, and mounted adapter probes remain available.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: smooth authorities can limit command work per entity per tick.** `maxCommandsPerTick` limits how many client commands each entity applies in one caller-driven tick, preserving the remaining commands in order and acknowledging only the applied prefix so applications can bound burst work without discarding honest input that arrived together after a network stall.
+  - **Affects:** Applications using the smooth authority directly or through a consumer that forwards the setting.
+  - **Action:** Optionally set a positive integer limit and keep the caller-owned tick cadence bounded.
+  - **Requires:** No new dependency. Higher-level consumers must forward the setting on the authoritative owner.
+  - **Compatibility:** Omitted preserves full draining; queue overflow still drops oldest and trusted server injections remain unpaced.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
   - **Affects:** Applications that react to disconnects or send application messages through the client connection.
   - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
@@ -340,6 +347,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Opt-in `CANONICAL_HOST_ALIASES` redirects listed site hosts to `ORIGIN` with 308 before static, prerendered and SSR deduplication, preserving methods and raw targets while keeping mounted health probes available.
+
+- Smooth authorities accept an optional positive integer `maxCommandsPerTick`, retaining each client-command tail in order and acknowledging only the commands applied in that tick. Default full draining and trusted server injection behavior remain unchanged.
 
 - **Pre-serialized client text sends.** `WSConnection.sendSerialized(text): boolean`
   validates the primitive-string input and calls `WebSocket.send` only when the

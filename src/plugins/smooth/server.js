@@ -6,16 +6,17 @@
  * can only ever send COMMANDS, never push state. Each entity (one per owning
  * connection per topic) holds the authoritative state, a bounded queue of
  * commands awaiting the next tick, and the id of the last command applied.
- * A tick drains every queued command in arrival order through the SAME
+ * A tick drains queued commands in arrival order through the SAME
  * `apply(state, command, ctx)` the clients predict with, then reports which
  * entities changed (for the broadcast) and which owners need an
  * acknowledgement (always carrying the authoritative state - the ack IS the
  * owner's copy of truth, which is what lets the broadcast skip echoing the
  * owner's own entity back to it).
  *
- * Commands are drained whole per tick rather than paced one-per-tick:
- * commands are frame-coalesced input samples arriving on a reliable in-order
- * transport, so pacing would add queue latency without fairness gain. A tick
+ * Commands drain whole by default. `maxCommandsPerTick` optionally caps each
+ * entity's client-command work per tick, retaining the tail in order and
+ * acknowledging only the applied prefix. Trusted server injections are not
+ * paced by this limit. The caller still owns the tick cadence. A tick
  * with an EMPTY queue holds the entity unchanged unless an `onMissing(state,
  * lastCommand)` hook is supplied (a genuinely simulated entity continues its
  * motion there); `onMissing` returning the same state reference (or
@@ -82,11 +83,17 @@ const DEFAULT_QUEUE_CAP = 1024;
  * @param {{
  *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any, key: string | null }) => any,
  *   onMissing?: (state: any, lastCommand: any) => any,
- *   queueCap?: number
- * }} options resolved options - validation belongs to the caller's public
- *   surface.
+ *   queueCap?: number,
+ *   maxCommandsPerTick?: number
+ * }} options caller-resolved hooks and queue bound; an explicit command
+ *   budget must be a positive integer.
  */
 export function createSmoothAuthority(options) {
+	const configuredLimit = options.maxCommandsPerTick;
+	if (configuredLimit !== undefined && (!Number.isInteger(configuredLimit) || configuredLimit < 1)) {
+		throw new TypeError('maxCommandsPerTick must be an integer greater than or equal to 1');
+	}
+	const maxCommandsPerTick = configuredLimit === undefined ? Infinity : configuredLimit;
 	const apply = options.apply;
 	const onMissing = options.onMissing;
 	// Defensive clamp: the queue bound is a flood defense, so a malformed cap
@@ -253,7 +260,7 @@ export function createSmoothAuthority(options) {
 		},
 
 		/**
-		 * Run one authoritative tick: drain every entity's queue in order
+		 * Run one authoritative tick: drain each entity's permitted prefix in order
 		 * through `apply`, advance command-less active entities through
 		 * `onMissing`, and report what changed.
 		 *
@@ -288,21 +295,37 @@ export function createSmoothAuthority(options) {
 				let commanded = false;
 				if (e.queue.length > 0) {
 					let s = e.state;
-					for (let i = 0; i < e.queue.length; i++) {
-						const c = e.queue[i];
-						rng.reseed(c.id);
-						currentId = c.id;
-						eventOrdinal = 0;
-						s = apply(s, c.cmd, ctx);
-						e.lastAckedId = c.id;
-						e.lastCommand = c.cmd;
-						for (let j = 0; j < eventSink.length; j++) {
-							const ev = eventSink[j];
-							events.push({ type: ev.type, key: ev.key, data: ev.data, id: ev.id, opts: ev.opts, ws: e.ws, commanded: true });
+					// The default keeps its dynamic full-drain behavior. A bounded
+					// tick owns its prefix before apply can enqueue more work, so
+					// queueCap eviction can only change the waiting tail.
+					const queue = maxCommandsPerTick === Infinity ? e.queue : e.queue.splice(0, maxCommandsPerTick);
+					try {
+						for (let i = 0; i < queue.length; i++) {
+							const c = queue[i];
+							rng.reseed(c.id);
+							currentId = c.id;
+							eventOrdinal = 0;
+							s = apply(s, c.cmd, ctx);
+							e.lastAckedId = c.id;
+							e.lastCommand = c.cmd;
+							for (let j = 0; j < eventSink.length; j++) {
+								const ev = eventSink[j];
+								events.push({ type: ev.type, key: ev.key, data: ev.data, id: ev.id, opts: ev.opts, ws: e.ws, commanded: true });
+							}
+							eventSink.length = 0;
 						}
-						eventSink.length = 0;
+					} catch (error) {
+						if (queue !== e.queue) {
+							// State is committed only after the whole prefix succeeds.
+							// Restore it for retry, subject to the usual drop-oldest cap;
+							// callback side effects remain the caller's responsibility.
+							e.queue = queue.concat(e.queue);
+							const overflow = e.queue.length - queueCap;
+							if (overflow > 0) e.queue.splice(0, overflow);
+						}
+						throw error;
 					}
-					e.queue.length = 0;
+					if (queue === e.queue) e.queue.length = 0;
 					e.state = s;
 					e.active = true;
 					commanded = true;

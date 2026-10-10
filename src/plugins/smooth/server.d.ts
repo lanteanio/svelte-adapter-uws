@@ -74,6 +74,13 @@ export interface SmoothAuthorityOptions<State = any, Command = any> {
 	onMissing?: (state: State, lastCommand: Command | undefined) => State | undefined;
 	/** Per-entity queue bound; oldest commands drop beyond it (default 1024). */
 	queueCap?: number;
+	/**
+	 * Optional positive integer limit on client commands applied per entity per
+	 * drain. The remaining tail stays queued in order; acknowledgements cover
+	 * only applied commands. Omitted = drain all. The caller owns tick cadence;
+	 * trusted server injections remain unpaced. queueCap still drops oldest.
+	 */
+	maxCommandsPerTick?: number;
 }
 
 export interface SmoothAuthority<State = any, Command = any> {
@@ -114,7 +121,8 @@ export interface SmoothAuthority<State = any, Command = any> {
 	 */
 	set(key: string, state: State): boolean;
 	/**
-	 * Run one authoritative tick. The caller publishes `updates` (excluding
+	 * Run one authoritative tick, retaining commands beyond maxCommandsPerTick.
+	 * The caller publishes `updates` (excluding
 	 * each entity's owner when echo suppression is on) and sends each ack to
 	 * its owner AFTER this returns - subscribers observe a tick atomically.
 	 */

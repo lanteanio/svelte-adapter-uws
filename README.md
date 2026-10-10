@@ -4806,7 +4806,7 @@ Latency cost vs. the alternate "fire-the-first-mover-synchronously" design: the 
 
 **Decision:** Use these primitives for server-authoritative entities whose owners predict input locally: a dragged shape, avatar, or game character. Most apps should use [svelte-realtime](https://github.com/lanteanio/svelte-realtime)'s higher-level `live.smooth()` surface.
 
-**Required action:** Send commands, never client-authored state. Run the same deterministic `apply` function on the predicting client and the authority, then acknowledge each owner with the resulting server state.
+**Required action:** Send commands, never client-authored state. Run the same deterministic `apply` function on the predicting client and the authority, then acknowledge each owner with the resulting server state. Optionally set `createSmoothAuthority({ apply, maxCommandsPerTick: 1 })` to apply at most one client command per entity per caller-driven tick; larger positive integers allow bounded catch-up. The tail stays queued in order and only applied commands are acknowledged; `queueCap` still drops the oldest overflow. Omit the option to drain all, and keep the authoritative tick cadence bounded. Trusted server injections remain unpaced.
 
 ```js
 // Server: the authoritative command processor + the binary codec.
