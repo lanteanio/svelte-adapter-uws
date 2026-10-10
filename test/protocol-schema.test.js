@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 // skipped suite reports PASSED with zero assertions. Taking the helper's flag
 // is what makes REQUIRE_UWS / CI turn a missing addon into a failure here too.
 import { hasUWS } from './helpers/real-runtime.js';
+import { decodeValue } from '../src/runtime/wire-value.js';
 
 const root = JSON.parse(readFileSync(new URL('../protocol.schema.json', import.meta.url), 'utf8'));
 // Line endings are a checkout property, not a contract property: git may hand
@@ -22,6 +23,33 @@ const flatProtocol = protocol
 	.split(/\n\s*\n/)
 	.map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
 	.join('\n\n');
+// The whole of a list item, collapsed: a pin of every sentence in it also
+// catches a sentence added anywhere in it.
+function bulletAt(opening) {
+	const lines = protocol.split('\n');
+	const start = lines.findIndex((l) => l.startsWith(opening));
+	let end = start + 1;
+	// The item runs to the next item or heading, or to a blank line that no
+	// indented line follows: a Markdown lazy continuation line (unindented text
+	// right after the item's text) is still the item's paragraph.
+	while (end < lines.length) {
+		const line = lines[end];
+		if (line.trim() === '') {
+			if ((lines[end + 1] ?? '').startsWith('  ')) { end++; continue; }
+			break;
+		}
+		if (/^(- |#|```)/.test(line)) break;
+		end++;
+	}
+	return lines.slice(start, end).join(' ').replace(/\s+/g, ' ').trim();
+}
+// A whole paragraph, collapsed, found by its opening: a pin of every sentence
+// in it also catches a sentence added between two pinned ones.
+function paragraphAt(opening) {
+	const paragraph = flatProtocol.split('\n\n').find((p) => p.startsWith(opening));
+	if (paragraph === undefined) throw new Error('no paragraph starts with ' + opening);
+	return paragraph;
+}
 // The Meta block alone: an assertion about what Meta says must not be satisfied
 // by the same words appearing in a section 800 lines away.
 const metaBlock = protocol.slice(protocol.indexOf('## Meta'), protocol.indexOf('## 1. Framing'));
@@ -1225,23 +1253,744 @@ describe('WebTransport reliable-stream carriage', () => {
 	it('refuses its own over-bound message with the receiver code, and never replays it', () => {
 		const { senderOverBoundError } = root['x-webtransport'].reliableStream;
 		expect(senderOverBoundError).toBe('RECORD_TOO_LARGE');
-		expect(flatProtocol).toContain('MUST NOT emit it, drop it, or split it across records');
-		expect(flatProtocol).toContain(`so it MUST reset the reliable lane with \`${senderOverBoundError}\` instead`);
+		expect(flatProtocol).toContain(`Except in the two cases below, a sender holding a message larger than it may emit MUST NOT emit it, drop it, or split it across records - a drop loses a reliable message without a word, and a split hands the receiver messages nobody sent - so it MUST reset the reliable lane with \`${senderOverBoundError}\` instead.`);
+		expect(flatProtocol).toContain(`so it MUST reset the reliable lane with \`${senderOverBoundError}\` instead. The first exception is recovery.`);
+		// Which events share a batch is the server's own choice, so a batch
+		// never has to be the over-bound record: an event too large to share
+		// one goes out bare.
+		expect(flatProtocol).toContain('A `batch` record (section 3.3) is one message on the wire, but which events share one is the server\'s own choice, so a server MUST NOT form one larger than it may emit: an event larger than the sender may emit goes out as a bare data-event in its place and is judged as above, so no event queued after it goes out in an earlier record.');
 		expect(flatProtocol).toContain('a sender holding a message larger than it may emit resets its lane with the same code (15.1)');
 		// Recovery answers with section 8.1's truncation - a signal every client
-		// already handles - and 15.3 and 15.5 name the exception they now carry.
-		expect(flatProtocol).toContain('Recovery over this carriage - section 7\'s resume by either mechanism, and section 8\'s `replay` - MUST NOT replay such a message and MUST NOT gap-fill past it: the server MUST answer that topic\'s recovery with section 8.1\'s truncation, at or before that message');
-		expect(flatProtocol).toContain('On this carriage truncation therefore also covers history the server holds but cannot carry; 8.1\'s client action is unchanged');
-		expect(flatProtocol).toContain('except where this section says otherwise - 15.1\'s rules on a message larger than its sender may emit among them: recovery never replays one, and a relayed `game` event too large for the lane is not delivered live');
-		expect(flatProtocol).toContain('only the gap-fill differs, by 15.1\'s rule for a message larger than its sender may emit');
+		// already handles - and 15.3, 15.5 and the schema name the exceptions
+		// they carry.
+		expect(flatProtocol).toContain('Recovery over this carriage - section 7\'s resume by either mechanism, and section 8\'s `replay` - MUST NOT replay such a message and MUST NOT gap-fill past it: the server MUST answer that topic\'s recovery with section 8.1\'s truncation instead, placed as the next bullet says, so the client re-snapshots instead of replaying a message the sender cannot emit; only a gap-fill for which the next bullet leaves no place to put a truncation resets the lane instead.');
+		expect(flatProtocol).toContain('On this carriage truncation therefore also covers history the server holds but cannot carry; 8.1\'s client action applies as written.');
+		expect(flatProtocol).toContain('While a recovery window for a topic is open (next bullet), that answer also covers a live sequenced frame for the topic, which the wire cannot tell from the gap-fill.');
+		expect(flatProtocol).toContain('A `game.fanout:1` record left undelivered this way is a dropped frame for section 6.7.');
+		expect(flatProtocol).toContain('except where this section says otherwise - 15.1\'s rules on a message larger than its sender may emit among them: recovery never replays one, the sequenced frames for a topic with an open recovery window are withheld from the first over-bound one until no window for it remains open, and a relayed `game` event too large for the lane is otherwise not delivered live.');
+		expect(flatProtocol).toContain('only the gap-fill, and what the server writes for a topic while a recovery window for it is open, differ, by 15.1\'s rule for a message larger than its sender may emit.');
+		expect(flatProtocol).toContain('a signalled `RECORD_TOO_LARGE` here (15.1\'s two exceptions aside)');
+		expect(root.description).toContain('rather than emitting, dropping, or splitting it, except that a recovery answers with truncation and withholds a topic\'s sequenced frames from the first over-bound one while a recovery window for it is open (PROTOCOL.md 15.1), and a live relayed game event outside a recovery window for its room is not delivered');
+		expect(flatProtocol).toContain('15.1\'s truncation signals the gaps that withheld frames and cut messages leave, the room `seq` shows the gap an undelivered `game` event leaves, and a withheld or undelivered `0x03` record degrades a capability or a room only as 15.1 says.');
+		expect(flatProtocol).toContain('`truncated:true` means the history from the requested point could not be delivered whole: the buffer was trimmed past it (the in-memory backend inlines truncation here), or on section 15\'s stream a message was too large to carry. |');
 		// A relayed game event too large for the lane is loss, as the datagram
 		// carriage of the same lane already treats it - never a reset, and never a
 		// frozen denial reason a WebSocket sender would see.
+		expect(flatProtocol).toContain('The second exception is live delivery on the relayed `game` lane (section 3.10) while no recovery window for its room is open, because its WebTransport carriage already treats an over-size event as loss: the server MUST NOT deliver a relayed event whose fan-out to a stream subscriber is larger than it may emit, and MUST NOT reset that subscriber\'s lane for it, as section 14.3 handles an over-size datagram.');
+		// What 15.1 withholds or does not deliver is never queued, so 15.6's
+		// no-drop rule and 15.1 agree.
+		expect(flatProtocol).toContain('This binding leaves out a message the server would otherwise write only where 15.1 withholds it (a `batch` record that would have carried only withheld events included), cuts it from a `__replay:{topic}` recovery, drops the `end` of a cut gap-fill whose standalone `truncated` came first, or does not deliver it, and such a message never enters the send queue');
+		expect(flatProtocol).toContain('resets its lane with the same code (15.1), as does a server whose recovery hold outlasts its bound (15.1).');
 		expect(flatProtocol).toContain('the server MUST NOT deliver a relayed event whose fan-out to a stream subscriber is larger than it may emit, and MUST NOT reset that subscriber\'s lane for it, as section 14.3 handles an over-size datagram');
 		expect(flatProtocol).toContain('The room `seq` advances regardless, so the gap is visible. Recovery of such an event follows the truncation rule above');
 		expect(flatProtocol).toContain('An envelope that exceeds the session\'s maximum datagram size is not delivered to that session');
+		// Every sentence of the bullet that states the sender rule and its two exceptions.
+		expect(bulletAt('- **A sender MUST NOT emit a record whose'), '15.1 sender bullet').toBe([
+			'- **A sender MUST NOT emit a record whose `messageBytes` exceed 1,048,576 bytes**, unless it knows out of band that its peer accepts more.',
+			'Nothing on this carriage negotiates a size, so this bound is fixed and every sender can evaluate it against the record in hand.',
+			'Except in the two cases below, a sender holding a message larger than it may emit MUST NOT emit it, drop it, or split it across records - a drop loses a reliable message without a word, and a split hands the receiver messages nobody sent - so it MUST reset the reliable lane with `RECORD_TOO_LARGE` instead.',
+			'The first exception is recovery.',
+			'Recovery over this carriage - section 7\'s resume by either mechanism, and section 8\'s `replay` - MUST NOT replay such a message and MUST NOT gap-fill past it: the server MUST answer that topic\'s recovery with section 8.1\'s truncation instead, placed as the next bullet says, so the client re-snapshots instead of replaying a message the sender cannot emit; only a gap-fill for which the next bullet leaves no place to put a truncation resets the lane instead.',
+			'While a recovery window for a topic is open (next bullet), that answer also covers a live sequenced frame for the topic, which the wire cannot tell from the gap-fill.',
+			'On this carriage truncation therefore also covers history the server holds but cannot carry; 8.1\'s client action applies as written.',
+			'The second exception is live delivery on the relayed `game` lane (section 3.10) while no recovery window for its room is open, because its WebTransport carriage already treats an over-size event as loss: the server MUST NOT deliver a relayed event whose fan-out to a stream subscriber is larger than it may emit, and MUST NOT reset that subscriber\'s lane for it, as section 14.3 handles an over-size datagram.',
+			'A `game.fanout:1` record left undelivered this way is a dropped frame for section 6.7.',
+			'The room `seq` advances regardless, so the gap is visible.',
+			'Recovery of such an event follows the truncation rule above.',
+			'A `batch` record (section 3.3) is one message on the wire, but which events share one is the server\'s own choice, so a server MUST NOT form one larger than it may emit: an event larger than the sender may emit goes out as a bare data-event in its place and is judged as above, so no event queued after it goes out in an earlier record.'
+		].join(' '));
 		const binding = flatProtocol.slice(flatProtocol.indexOf('## 15. '), flatProtocol.indexOf('## Appendix A.'));
 		expect(binding).not.toContain('game-denied');
+	});
+
+	// Section 15.1's placement of a recovery's truncation, as a model of the
+	// spec text: every case's `written` sequence has to equal what it produces.
+	const replayPrefix = '__replay:';
+	const truncatedEvent = (topic) => ({ kind: 'text', frame: { topic: replayPrefix + topic, event: 'truncated', data: null } });
+	/** The first `count` varints after a 0x03 record's demux and schema bytes (section 6.1). */
+	function binaryVarints(m, count) {
+		return binaryHeader(m, count).values;
+	}
+	function binaryHeader(m, count) {
+		const bytes = Buffer.from(m.hex ?? m.headHex, 'hex');
+		const values = [];
+		let i = 2;
+		while (values.length < count) {
+			let value = 0;
+			for (let scale = 1; ; i++, scale *= 128) {
+				if (i >= bytes.length) throw new Error('a varint runs past the end of the record');
+				value += (bytes[i] & 0x7f) * scale;
+				if ((bytes[i] & 0x80) === 0) { i++; break; }
+			}
+			values.push(value);
+		}
+		return { values, payload: bytes.subarray(i) };
+	}
+	function carryRecovery(transcript, bound) {
+		// Per topic, the requests whose recovery window for it is open, by
+		// their index in the transcript.
+		const windows = new Map();
+		const held = new Set();
+		const cutReplays = new Set();
+		// Cut gap-fills already signalled by a standalone event at their own
+		// request's answer; they write no `end` after it.
+		const signalledReplays = new Set();
+		// A recovery on __replay:T is keyed by the request it fills when it is a
+		// resume's own gap-fill, with or without a reqId, and otherwise by its reqId.
+		const recoveryKey = (entry) => entry.frame.topic + '\0' + (entry.fills !== undefined ? '#' + entry.fills : entry.frame.data?.reqId);
+		const boundIds = new Map();
+		// A dropped stateful record degrades its capability (6.4); a dropped
+		// game.fanout:1 record sends its room back to JSON (6.7).
+		let statefulDegraded = false;
+		const fanoutJson = new Set();
+		const dropRecord = (entry, topic) => {
+			if (entry.capability === 'stateful') statefulDegraded = true;
+			if (entry.capability === 'game.fanout:1') fanoutJson.add(topic);
+		};
+		const written = [];
+		const resetLane = () => ({ written, resets: root['x-webtransport'].reliableStream.senderOverBoundError, open: 0 });
+		const closeWindow = (topic, request) => {
+			const open = windows.get(topic) ?? [];
+			const i = open.indexOf(request);
+			if (i === -1) return;
+			open.splice(i, 1);
+			// Every answer that closes a window during a hold gets the event, and
+			// so does this request's own gap-fill on __replay:T if it was cut and
+			// has not ended; one event serves both.
+			const own = replayPrefix + topic + '\0#' + request;
+			const unended = cutReplays.has(own) && !signalledReplays.has(own);
+			if (held.has(topic) || unended) written.push(truncatedEvent(topic));
+			if (unended) signalledReplays.add(own);
+			// The hold ends with the last window.
+			if (open.length === 0) held.delete(topic);
+		};
+		for (let index = 0; index < transcript.length; index++) {
+			const entry = transcript[index];
+			if (entry.client) {
+				for (const topic of entry.recovers) windows.set(topic, [...(windows.get(topic) ?? []), index]);
+				continue;
+			}
+			if (entry.holdExpires !== undefined) {
+				if (held.has(entry.holdExpires)) return resetLane();
+				continue;
+			}
+			const f = entry.frame;
+			const size = entry.length ?? (entry.kind === 'binary' ? entry.hex.length / 2 : Buffer.byteLength(JSON.stringify(f)));
+			const over = size > bound;
+			if (f?.type === 'wire-id') {
+				boundIds.set(f.id, f.topic);
+				// A stateful capability back on JSON never allocates an id (6.2, 6.4). A
+				// room sent back to JSON keeps the one binding 6.2 gave it.
+				if (entry.capability === 'stateful' && statefulDegraded) continue;
+			}
+			// An answer closes its own request's window: for its topic, or for
+			// every topic a resume frame recovers. A refusal opened none.
+			if (entry.answers !== undefined && f.type !== 'error') {
+				for (const topic of f.type === 'resumed' ? [...windows.keys()] : [f.topic]) closeWindow(topic, entry.answers);
+			}
+			if (typeof f?.topic === 'string' && f.topic.startsWith(replayPrefix)) {
+				const recovery = recoveryKey(entry);
+				if (f.event === 'msg' && (cutReplays.has(recovery) || over)) { cutReplays.add(recovery); continue; }
+				if (f.event === 'end' && cutReplays.delete(recovery)) {
+					const signalled = signalledReplays.delete(recovery);
+					if (!signalled) written.push({ ...entry, frame: { ...f, data: { ...f.data, truncated: true } } });
+					continue;
+				}
+				written.push(entry);
+				continue;
+			}
+			if (f?.type === 'batch') {
+				const kept = f.events.filter((e) => !(held.has(e.topic) && typeof e.seq === 'number'));
+				if (kept.length === f.events.length) written.push(entry);
+				else if (kept.length > 0) written.push({ kind: 'text', frame: { ...f, events: kept } });
+				continue;
+			}
+			let topic;
+			let sequenced = false;
+			if (entry.kind === 'binary') {
+				const [id, seq] = binaryVarints(entry, 2);
+				topic = boundIds.get(id);
+				sequenced = seq !== 0;
+			} else if (f?.type === undefined) {
+				topic = f?.topic;
+				sequenced = typeof f?.seq === 'number';
+			}
+			if (topic !== undefined && sequenced && (windows.get(topic)?.length ?? 0) > 0) {
+				if (held.has(topic)) { dropRecord(entry, topic); continue; }
+				if (over) { held.add(topic); dropRecord(entry, topic); continue; }
+			}
+			// Outside a window, an over-bound relayed game event is not delivered.
+			if (over && entry.relayedGame === true) { dropRecord(entry, topic); continue; }
+			if (over) return resetLane();
+			if ((entry.capability === 'stateful' && statefulDegraded) || (entry.capability === 'game.fanout:1' && fanoutJson.has(topic))) {
+				written.push(entry.relayedGame ? { kind: 'text', frame: entry.json, relayedGame: true } : { kind: 'text', frame: entry.json });
+				continue;
+			}
+			written.push(entry);
+		}
+		return { written, resets: undefined, open: [...windows.values()].reduce((n, open) => n + open.length, 0) };
+	}
+	// Each run of consecutive standalone truncated events, sorted by topic.
+	function byTopicWithinEventRuns(written) {
+		const out = [];
+		let run = [];
+		const flush = () => { out.push(...run.sort((a, b) => (a.frame.topic < b.frame.topic ? -1 : a.frame.topic > b.frame.topic ? 1 : 0))); run = []; };
+		for (const m of written) {
+			if (m.frame?.event === 'truncated' && m.frame.topic.startsWith(replayPrefix)) run.push(m);
+			else { flush(); out.push(m); }
+		}
+		flush();
+		return out;
+	}
+	// The topics a request recovers can only be ones it asks to recover.
+	function askedToRecover(frame) {
+		if (frame.type === 'subscribe') return Number.isInteger(frame.recover?.offset) && frame.recover.offset >= 0 ? [frame.topic] : [];
+		if (frame.type === 'subscribe-batch') return [...new Set(frame.topics)].filter((t) => Number.isInteger(frame.recover?.[t]?.offset) && frame.recover[t].offset >= 0);
+		if (frame.type === 'resume') return Object.keys(frame.lastSeenSeqs);
+		return [];
+	}
+	const isRef = (ref) => typeof ref === 'number' || typeof ref === 'string';
+
+	it('places a recovery truncation after every frame it withholds', () => {
+		const bound = root['x-webtransport'].reliableStream.maximumSenderMessageBytes;
+		const cases = streamVector.recoveryTruncation;
+		for (const c of cases) {
+			const label = c.reason;
+			for (const e of c.transcript.filter((x) => x.client)) {
+				// `replay` is a plugin ingress frame (section 8), outside the core schema.
+				if (e.client.type === 'replay') {
+					// A replay request always carries a reqId here, so a __replay
+					// event without one belongs to a resume's own gap-fill.
+					expect(typeof e.client.topic === 'string' && Number.isInteger(e.client.since) && typeof e.client.reqId === 'string', label).toBe(true);
+				} else {
+					expect(validate(root, e.client), label).toEqual([]);
+				}
+				for (const t of e.recovers) expect(askedToRecover(e.client), label).toContain(t);
+				const answered = c.transcript.some((m) => m.answers === c.transcript.indexOf(e) && ['subscribed', 'subscribe-denied', 'resumed'].includes(m.frame.type));
+				if (answered) expect([...e.recovers].sort(), label + ': windows of an answered request').toEqual([...askedToRecover(e.client)].sort());
+				// Only a request the server answers can open a window (section 3.2).
+				if (e.recovers.length > 0 && e.client.type !== 'resume') expect(isRef(e.client.ref), label).toBe(true);
+			}
+			// A hold's expiry is a transcript marker for a topic, never a message.
+			for (const m of c.transcript.filter((x) => x.holdExpires !== undefined)) expect(typeof m.holdExpires, label).toBe('string');
+			expect(c.written.some((m) => m.holdExpires !== undefined), label).toBe(false);
+			const wireTopics = new Map(c.transcript.filter((m) => m.frame?.type === 'wire-id').map((m) => [m.frame.id, m.frame.topic]));
+			// One binding per topic per connection (section 6.2).
+			expect(new Set(wireTopics.values()).size, label + ': one binding per topic').toBe(wireTopics.size);
+			expect(c.transcript.filter((m) => m.frame?.type === 'wire-id').length, label + ': one topic per id').toBe(wireTopics.size);
+			// Only a `msg` carries history, so only a `msg` can be over the bound there.
+			for (const m of c.transcript) if (typeof m.frame?.topic === 'string' && m.frame.topic.startsWith(replayPrefix) && m.frame.event !== 'msg') expect(m.overBound, label + ': only a msg can be over the bound on __replay').toBeUndefined();
+			// A server never forms a `batch` record larger than it may emit (15.1), so
+			// no transcript carries one.
+			for (const m of c.transcript.filter((x) => x.frame?.type === 'batch')) expect(m.length === undefined && m.overBound === undefined, label + ': a batch record is never over the bound').toBe(true);
+			// A __replay event of a resume's own gap-fill names the earlier request
+			// it belongs to, which recovers that topic; every one without a reqId
+			// does, and nothing off that channel does.
+			c.transcript.forEach((m, at) => {
+				const replayTopic = typeof m.frame?.topic === 'string' && m.frame.topic.startsWith(replayPrefix) ? m.frame.topic.slice(replayPrefix.length) : undefined;
+				if (replayTopic === undefined || (m.frame.data?.reqId !== undefined && m.fills === undefined)) {
+					expect(m.fills, label).toBeUndefined();
+					return;
+				}
+				expect(Number.isInteger(m.fills) && m.fills < at, label).toBe(true);
+				expect(c.transcript[m.fills].recovers, label).toContain(replayTopic);
+				// Section 11: a gap-fill's msg events precede the answer; only its end may follow.
+				const answerIx = c.transcript.findIndex((x) => x.answers === m.fills && (x.frame.type === 'resumed' || x.frame.topic === replayTopic));
+				if (m.frame.event === 'msg' && answerIx !== -1) expect(at, label + ': a gap-fill msg precedes its answer').toBeLessThan(answerIx);
+			});
+			// One history: every message for a topic and seq, on any channel, is the
+			// same event, so it is over the bound everywhere or nowhere and carries the
+			// same data; and a replay from `since` S starts at S+1 with no gaps.
+			const events = new Map();
+			const note = (topic, seq, over, data) => {
+				if (topic === undefined || typeof seq !== 'number' || seq === 0) return;
+				const key = topic + '#' + seq;
+				const seen = events.get(key);
+				if (!seen) { events.set(key, { over, data }); return; }
+				expect(seen.over, label + ': over-bound verdict for ' + key).toBe(over);
+				if (seen.data !== undefined && data !== undefined) expect(data, label + ': data for ' + key).toEqual(seen.data);
+				if (seen.data === undefined) seen.data = data;
+			};
+			for (const m of c.transcript) {
+				const f = m.frame;
+				if (m.kind === 'binary') {
+					const [id, seq] = binaryVarints(m, 2);
+					note(wireTopics.get(id), seq, m.overBound === true, m.json?.data);
+				} else if (f?.type === 'batch') {
+					for (const e of f.events) note(e.topic, e.seq, false, e.data);
+				} else if (typeof f?.topic === 'string' && f.topic.startsWith(replayPrefix) && f.event === 'msg') {
+					note(f.topic.slice(replayPrefix.length), f.data.seq, m.overBound === true, f.data.data);
+				} else if (f?.type === undefined && typeof f?.topic === 'string') {
+					note(f.topic, f.seq, m.overBound === true, f.data);
+				}
+			}
+			const offsetOf = (request, topic) => (request.type === 'resume' ? request.lastSeenSeqs[topic] : request.type === 'subscribe' ? request.recover?.offset : request.recover?.[topic]?.offset);
+			// An ack to a recovering request carries the epoch the request reported,
+			// unless the server answered a mismatch with `rehydrate`, whose epoch the
+			// ack then carries (section 7).
+			const askedEpoch = (request, topic) => (request.type === 'subscribe' ? request.recover?.epoch : request.type === 'resume' ? request.lastSeenEpochs?.[topic] : request.recover?.[topic]?.epoch);
+			for (const m of c.transcript) {
+				if (m.frame?.type !== 'subscribed' || !c.transcript[m.answers]?.recovers?.includes(m.frame.topic)) continue;
+				const asked = askedEpoch(c.transcript[m.answers].client, m.frame.topic);
+				const rehydrate = c.transcript.find((r) => r.frame?.event === 'rehydrate' && r.fills === m.answers && r.frame.topic === replayPrefix + m.frame.topic);
+				if (rehydrate) expect(asked !== undefined && rehydrate.frame.data.epoch !== asked, label + ': rehydrate for a matching or absent epoch').toBe(true);
+				const expected = rehydrate ? rehydrate.frame.data.epoch : asked;
+				if (expected !== undefined) expect(m.frame.epoch, label + ': ack epoch for ' + m.frame.topic).toBe(expected);
+			}
+			const epochOf = new Map();
+			const agree = (topic, epoch, what) => {
+				if (epoch === undefined) return;
+				if (!epochOf.has(topic)) epochOf.set(topic, epoch);
+				expect(epoch, label + ': ' + what + ' epoch for ' + topic).toBe(epochOf.get(topic));
+			};
+			for (const m of c.transcript) {
+				if (m.client) for (const t of m.recovers) agree(t, askedEpoch(m.client, t), 'reported');
+				else if (m.frame?.event === 'rehydrate') epochOf.set(m.frame.topic.slice(replayPrefix.length), m.frame.data.epoch);
+				else if (m.frame?.type === 'subscribed') agree(m.frame.topic, m.frame.epoch, 'ack');
+			}
+			// An epoch that does not match starts a new sequence space, so that
+			// request's offset says nothing about the seqs that follow.
+			const rehydrated = new Set(c.transcript.filter((m) => m.frame?.event === 'rehydrate').map((m) => m.fills + '#' + m.frame.topic.slice(replayPrefix.length)));
+			c.transcript.forEach((e, at) => {
+				if (e.client?.type === 'replay') {
+					const end = c.transcript.findIndex((m, i) => i > at && m.frame?.topic === replayPrefix + e.client.topic && m.frame.event === 'end' && m.frame.data?.reqId === e.client.reqId);
+					const seqs = c.transcript.slice(at + 1, end === -1 ? undefined : end).filter((m) => m.frame?.topic === replayPrefix + e.client.topic && m.frame.event === 'msg' && m.frame.data?.reqId === e.client.reqId).map((m) => m.frame.data.seq);
+					expect(seqs, label + ': replay ' + e.client.reqId + ' since ' + e.client.since).toEqual(seqs.map((_, i) => e.client.since + 1 + i));
+				}
+				// A resume's own gap-fill on __replay also runs on from its offset.
+				for (const topic of e.recovers ?? []) {
+					const seqs = c.transcript.filter((m) => m.fills === at && m.frame.topic === replayPrefix + topic && m.frame.event === 'msg').map((m) => m.frame.data.seq);
+					expect(seqs, label + ': gap-fill of request ' + at + ' for ' + topic).toEqual(seqs.map((_, i) => offsetOf(e.client, topic) + 1 + i));
+				}
+			});
+			// Per topic, the seqs a case shows on any channel, with the offsets its
+			// windows and replays start from, leave no hole; ordinary frames run on
+			// consecutively, since section 11 keeps a topic's seq monotonic on a
+			// connection; and the first frame for a topic after a request that
+			// recovers it, ordinary or of that request's own gap-fill, continues
+			// from the request's offset.
+			const seqsOf = (m) => {
+				const f = m.frame;
+				if (m.kind === 'binary') {
+					const [id, seq] = binaryVarints(m, 2);
+					return seq === 0 ? [] : [{ topic: wireTopics.get(id), seq, ordinary: true }];
+				}
+				if (f?.type === 'batch') return f.events.filter((e) => typeof e.seq === 'number').map((e) => ({ topic: e.topic, seq: e.seq, ordinary: true }));
+				if (typeof f?.topic !== 'string') return [];
+				if (f.topic.startsWith(replayPrefix)) return f.event === 'msg' ? [{ topic: f.topic.slice(replayPrefix.length), seq: f.data.seq, ordinary: false, fills: m.fills }] : [];
+				return f.type === undefined && typeof f.seq === 'number' ? [{ topic: f.topic, seq: f.seq, ordinary: true }] : [];
+			};
+			const framed = new Map();
+			const starts = new Map();
+			const add = (map, topic, seq) => map.set(topic, [...(map.get(topic) ?? []), seq]);
+			const lastOrdinary = new Map();
+			c.transcript.forEach((m, at) => {
+				if (m.client) {
+					if (m.client.type === 'replay') add(starts, m.client.topic, m.client.since);
+					for (const topic of m.recovers) {
+						if (rehydrated.has(at + '#' + topic)) continue;
+						const offset = offsetOf(m.client, topic);
+						add(starts, topic, offset);
+						const next = c.transcript.slice(at + 1).flatMap(seqsOf).find((s) => s.topic === topic && (s.ordinary || s.fills === at));
+						if (next) expect(next.seq, label + ': recovery of request ' + at + ' for ' + topic).toBe(offset + 1);
+					}
+					return;
+				}
+				for (const s of seqsOf(m)) {
+					add(framed, s.topic, s.seq);
+					if (!s.ordinary) continue;
+					const prev = lastOrdinary.get(s.topic);
+					expect(prev === undefined || s.seq === prev + 1, label + ': ' + s.topic + ' seq ' + s.seq + ' after ' + prev).toBe(true);
+					lastOrdinary.set(s.topic, s.seq);
+				}
+			});
+			for (const [topic, seqs] of framed) {
+				const all = new Set([...seqs, ...(starts.get(topic) ?? [])]);
+				expect(all.size, label + ': a hole in ' + topic).toBe(Math.max(...all) - Math.min(...all) + 1);
+			}
+			// What the server writes keeps each topic's seq rising (section 11).
+			const lastWritten = new Map();
+			for (const s of c.written.flatMap(seqsOf).filter((x) => x.ordinary)) {
+				expect(s.seq, label + ': written ' + s.topic).toBeGreaterThan(lastWritten.get(s.topic) ?? -Infinity);
+				lastWritten.set(s.topic, s.seq);
+			}
+			// A __replay event with a reqId belongs to an earlier replay request
+			// for that topic with that reqId.
+			c.transcript.forEach((m, at) => {
+				const reqId = m.frame?.data?.reqId;
+				if (reqId === undefined || m.fills !== undefined || !m.frame.topic?.startsWith(replayPrefix)) return;
+				expect(c.transcript.slice(0, at).some((e) => e.client?.type === 'replay' && e.client.reqId === reqId && replayPrefix + e.client.topic === m.frame.topic), label).toBe(true);
+			});
+			for (const m of [...c.transcript.filter((x) => !x.client && x.holdExpires === undefined), ...c.written]) {
+				// A record of a degrading capability carries the data-event it stands for.
+				if (m.capability !== undefined) {
+					expect(['stateful', 'game.fanout:1'], label).toContain(m.capability);
+					if (m.frame?.type === 'wire-id') {
+						// A tagged binding names the capability of the records that use it.
+						const users = c.transcript.filter((r) => r.kind === 'binary' && binaryVarints(r, 1)[0] === m.frame.id);
+						expect(users.length > 0 && users.every((r) => r.capability === m.capability), label).toBe(true);
+					} else {
+						expect(m.kind, label).toBe('binary');
+						if (!m.overBound) {
+							const { values: [id, seq], payload } = binaryHeader(m, 2);
+							expect(validate(root, m.json), label).toEqual([]);
+							expect([m.json.topic, m.json.seq], label).toEqual([wireTopics.get(id), seq]);
+							// A game.fanout:1 payload is the value-codec [event, data] (6.7).
+							if (m.capability === 'game.fanout:1') expect(decodeValue(payload), label).toEqual([m.json.event, m.json.data]);
+						}
+					}
+				}
+				if (m.length !== undefined) {
+					// Shown without the event data that makes it this large.
+					expect(m.overBound === true, label).toBe(m.length > bound);
+					if (m.kind === 'text') expect((m.frame.topic.startsWith(replayPrefix) ? m.frame.data : m.frame).data, label).toBeUndefined();
+					else expect(m.headHex.startsWith('03'), label).toBe(true);
+				} else if (m.kind === 'binary') {
+					expect(m.hex.startsWith('03') && m.hex.length / 2 <= bound, label).toBe(true);
+				} else {
+					expect(m.kind, label).toBe('text');
+					expect(m.overBound, label).toBeUndefined();
+					expect(validate(root, m.frame), label).toEqual([]);
+				}
+				if (m.relayedGame) {
+					if (m.kind === 'binary') expect(m.capability, label).toBe('game.fanout:1');
+					else expect(m.frame.type === undefined && typeof m.frame.seq === 'number', label).toBe(true);
+				}
+				// An answer answers an earlier request of the matching kind.
+				if (m.answers !== undefined) {
+					const request = c.transcript[m.answers]?.client;
+					expect(request, label).toBeDefined();
+					if (!c.written.includes(m)) expect(m.answers, label).toBeLessThan(c.transcript.indexOf(m));
+					if (m.frame.type === 'subscribed' || m.frame.type === 'subscribe-denied') {
+						expect(request.ref, label).toBe(m.frame.ref);
+						expect(request.type === 'subscribe' ? [request.topic] : request.topics ?? [], label).toContain(m.frame.topic);
+					} else if (m.frame.type === 'resumed') {
+						expect(request.type, label).toBe('resume');
+					} else {
+						expect(m.frame.type, label).toBe('error');
+					}
+				} else {
+					expect(['subscribed', 'subscribe-denied', 'resumed', 'error'], label).not.toContain(m.frame?.type);
+				}
+			}
+			const carried = carryRecovery(c.transcript, bound);
+			// Events that go before the same answer may come in any order; the
+			// file lists them by topic, and so does the comparison.
+			expect(byTopicWithinEventRuns(c.written), label).toEqual(c.written);
+			expect(byTopicWithinEventRuns(carried.written), label).toEqual(c.written);
+			expect(carried.resets, label).toBe(c.thenResets);
+			// A case that does not reset answers every window it opened.
+			expect(carried.open, label).toBe(0);
+		}
+		// What each case is there for. Each check matches exactly one case, no two
+		// checks match the same case, and the count is pinned, so an edited file
+		// can neither drop a case nor swap it for one that leaves its rule
+		// unchecked.
+		const requests = (c) => c.transcript.filter((e) => e.client).map((e) => e.client);
+		const recovering = (c) => c.transcript.filter((e) => e.client && e.recovers.length > 0);
+		const indexOfWritten = (c, test) => c.written.findIndex(test);
+		const truncatedAt = (c, topic) => indexOfWritten(c, (m) => m.frame?.event === 'truncated' && (topic === undefined || m.frame.topic === replayPrefix + topic));
+		const truncatedCount = (c) => c.written.filter((m) => m.frame?.event === 'truncated').length;
+		const overBound = (c) => c.transcript.filter((m) => m.overBound);
+		const firstOver = (c) => c.transcript.findIndex((m) => m.overBound);
+		const answerAt = (c, request, topic) => c.transcript.findIndex((m) => m.answers === c.transcript.indexOf(request) && (topic === undefined || m.frame.topic === topic));
+		const topicOf = (c, m) => {
+			if (m.kind !== 'binary') return m.frame?.topic;
+			const id = binaryVarints(m, 2)[0];
+			return c.transcript.slice(0, c.transcript.indexOf(m)).find((e) => e.frame?.type === 'wire-id' && e.frame.id === id)?.frame.topic;
+		};
+		const insideWindow = (c, m) => {
+			const request = recovering(c)[0];
+			const topic = topicOf(c, m);
+			const answer = answerAt(c, request, request.client.type === 'resume' ? undefined : topic);
+			const at = c.transcript.indexOf(m);
+			return request.recovers.includes(topic) && at > c.transcript.indexOf(request) && at < answer;
+		};
+		const oneOverInsideWindow = (c) => overBound(c).length === 1 && insideWindow(c, c.transcript[firstOver(c)]);
+		const replays = (c) => requests(c).filter((r) => r.type === 'replay');
+		const afterFirstOver = (c, test) => firstOver(c) !== -1 && c.transcript.slice(firstOver(c) + 1).some(test);
+		// Transcript and written entries are separate objects: compare by value.
+		const writes = (c, m, before = c.written.length) => c.written.slice(0, before).some((w) => JSON.stringify(w) === JSON.stringify(m));
+		const truncatedEnds = (c) => c.written.filter((m) => m.frame?.event === 'end' && m.frame.data?.truncated === true).length;
+		// A plain subscribe answered before the event, with its ack inside the hold
+		// or before the hold starts: each case pins one of the two shapes.
+		const plainSubscribeAnsweredBeforeEvent = (c, duringHold) => c.transcript.some((e, i) => e.client?.type === 'subscribe' && e.recovers.length === 0 && isRef(e.client.ref) &&
+			indexOfWritten(c, (m) => m.answers === i) !== -1 && indexOfWritten(c, (m) => m.answers === i) < truncatedAt(c) &&
+			(duringHold ? firstOver(c) < c.transcript.findIndex((m) => m.answers === i) : c.transcript.findIndex((m) => m.answers === i) < firstOver(c)));
+		// The entry at which the model resets the lane: the shortest prefix of the
+		// transcript that resets ends with it. A reset predicate names that entry,
+		// so an earlier reset for another reason cannot stand in for the one the
+		// case exists for.
+		const resetsAt = (c) => { for (let i = 0; i < c.transcript.length; i++) if (carryRecovery(c.transcript.slice(0, i + 1), bound).resets) return i; return -1; };
+		// A frame for T as 15.1 defines it: a sequenced data-event, or a 0x03 record
+		// whose seq is not 0. A reset predicate names one, so an unsequenced
+		// over-bound frame (which resets in or out of a window) cannot stand in.
+		const frameFor = (m) => (m.kind === 'binary' && binaryVarints(m, 2)[1] !== 0) || (m.kind === 'text' && m.frame?.type === undefined && Number.isInteger(m.frame?.seq));
+		const purposes = {
+			'duplicate batch topics close their window at the first ack': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'subscribe-batch' &&
+				recovering(c)[0].client.topics.length === 2 && new Set(recovering(c)[0].client.topics).size === 1 && recovering(c)[0].recovers.length === 1 && oneOverInsideWindow(c) && truncatedCount(c) === 1 &&
+				truncatedAt(c) + 1 === indexOfWritten(c, (m) => m.answers === c.transcript.indexOf(recovering(c)[0])) &&
+				c.transcript.filter((m) => m.answers === c.transcript.indexOf(recovering(c)[0])).length === 2 &&
+				c.transcript.some((m, i) => m.frame?.topic === recovering(c)[0].recovers[0] && frameFor(m) && writes(c, m) &&
+					i > answerAt(c, recovering(c)[0]) && c.transcript.slice(i + 1).some((a) => a.answers === c.transcript.indexOf(recovering(c)[0]) && a.frame.topic === m.frame.topic)),
+			'a subscribe window that writes an unsequenced frame during the hold': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'subscribe' &&
+				overBound(c).length === 2 && overBound(c).every((m) => c.transcript.indexOf(m) < answerAt(c, recovering(c)[0])) &&
+				afterFirstOver(c, (m) => m.kind === 'text' && m.frame.type === undefined && m.frame.event === 'note' && recovering(c)[0].recovers.includes(m.frame.topic) && writes(c, m, truncatedAt(c))) &&
+				c.transcript.some((m, i) => i > firstOver(c) && i < answerAt(c, recovering(c)[0]) && !m.overBound && m.frame?.topic === recovering(c)[0].recovers[0] && typeof m.frame.seq === 'number' && !writes(c, m)),
+			'two windows of one subscribe-batch truncated apart': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'subscribe-batch' && truncatedCount(c) === 2 &&
+				c.transcript.some((m, i) => m.holdExpires === recovering(c)[0].recovers[1] && i > firstOver(c) &&
+					i < c.transcript.findIndex((t) => t.overBound && t.frame?.topic === recovering(c)[0].recovers[1])) && !c.thenResets &&
+				overBound(c).some((m) => m.frame?.topic === recovering(c)[0].recovers[1] && c.transcript.indexOf(m) > answerAt(c, recovering(c)[0], recovering(c)[0].recovers[0])) &&
+				c.transcript.some((m, i) => i > firstOver(c) && i < answerAt(c, recovering(c)[0], recovering(c)[0].recovers[0]) && !m.overBound &&
+					m.frame?.topic === recovering(c)[0].recovers[1] && typeof m.frame.seq === 'number' && writes(c, m)),
+			'a resume window that filters batch records': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'resume' &&
+				c.written.filter((m) => m.frame?.type === 'batch').length < c.transcript.filter((m) => m.frame?.type === 'batch').length &&
+				c.written.some((m) => m.frame?.type === 'batch' && m.frame.events.some((e) => recovering(c)[0].recovers.includes(e.topic) && e.seq === undefined)) &&
+				c.transcript.some((t) => t.frame?.type === 'batch' && c.written.some((w) => w.frame?.type === 'batch' && w.frame.events.length > 0 && w.frame.events.length < t.frame.events.length &&
+					w.frame.events.every((e) => t.frame.events.some((x) => JSON.stringify(x) === JSON.stringify(e))) && t.frame.events.some((x) => recovering(c)[0].recovers.includes(x.topic) && typeof x.seq === 'number'))),
+			'a withheld 0x03 record beside a seq-0 record written during the hold': (c) => overBound(c).some((m) => m.kind === 'binary') && truncatedAt(c) !== -1 &&
+				afterFirstOver(c, (m) => m.kind === 'binary' && !m.overBound && binaryVarints(m, 2)[1] === 0 && writes(c, m, truncatedAt(c))),
+			'a wire-id inside a hold': (c) => recovering(c).length === 1 && firstOver(c) !== -1 && afterFirstOver(c, (m) => m.frame?.type === 'wire-id' && m.frame.topic === recovering(c)[0].recovers[0] && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0]) && writes(c, m) &&
+				afterFirstOver(c, (b) => b.kind === 'binary' && binaryVarints(b, 1)[0] === m.frame.id && c.transcript.indexOf(b) < answerAt(c, recovering(c)[0]) && !writes(c, b))) && c.written.some((m) => m.kind === 'binary'),
+			'a window answered with subscribe-denied': (c) => truncatedCount(c) === 1 && c.written[truncatedAt(c) + 1]?.frame?.type === 'subscribe-denied' &&
+				c.written[truncatedAt(c) + 1].answers === c.transcript.indexOf(recovering(c)[0]),
+			'a replay request with a live frame written past its cut': (c) => replays(c).length === 1 && recovering(c).length === 0 && truncatedEnds(c) === 1 &&
+				afterFirstOver(c, (m) => m.frame?.topic === replays(c)[0].topic && typeof m.frame.seq === 'number' && writes(c, m)),
+			'two replays of one topic cut apart': (c) => replays(c).length === 2 && replays(c)[0].topic === replays(c)[1].topic && replays(c)[0].reqId !== replays(c)[1].reqId && truncatedEnds(c) === 1 &&
+				afterFirstOver(c, (m) => m.frame?.event === 'msg' && m.frame.data?.reqId !== c.transcript[firstOver(c)].frame.data.reqId && writes(c, m)),
+			'a replay reusing a truncated replay\'s reqId': (c) => replays(c).length === 2 && replays(c)[0].topic === replays(c)[1].topic && replays(c)[0].reqId === replays(c)[1].reqId &&
+				c.transcript.findIndex((e) => e.client === replays(c)[1]) > c.transcript.findIndex((m) => m.frame?.event === 'end') &&
+				JSON.stringify(c.written.filter((m) => m.frame?.event === 'end').map((m) => m.frame.data?.truncated === true)) === '[true,false]',
+			'two replays of two topics sharing a reqId': (c) => replays(c).length === 2 && replays(c)[0].topic !== replays(c)[1].topic && replays(c)[0].reqId === replays(c)[1].reqId && truncatedEnds(c) === 1 &&
+				afterFirstOver(c, (m) => m.frame?.event === 'msg' && m.frame.topic !== c.transcript[firstOver(c)].frame.topic && writes(c, m)),
+			'a replay-channel gap-fill inside a window': (c) => recovering(c).length === 1 && truncatedEnds(c) === 1 && truncatedCount(c) === 0 &&
+				overBound(c).some((m) => m.frame?.topic?.startsWith(replayPrefix) && m.frame.data?.reqId === undefined),
+			'a cut gap-fill with a reqId signalled before its answer': (c) => recovering(c).length === 1 && truncatedCount(c) === 1 && !c.written.some((m) => m.frame?.event === 'end') &&
+				overBound(c).some((m) => m.fills !== undefined && m.frame.data?.reqId !== undefined) &&
+				c.written[truncatedAt(c) + 1]?.answers === c.transcript.indexOf(recovering(c)[0]) && afterFirstOver(c, (m) => m.kind === 'text' && m.frame.type === undefined && typeof m.frame.seq === 'number' && writes(c, m, truncatedAt(c))),
+			'a replay request cut inside another request\'s window and ended after its answer': (c) => recovering(c).length === 1 && replays(c).length === 1 && truncatedCount(c) === 0 &&
+				recovering(c)[0].recovers.includes(replays(c)[0].topic) &&
+				overBound(c).some((m) => m.frame?.topic?.startsWith(replayPrefix) && m.frame.data?.reqId !== undefined) && truncatedEnds(c) === 1 &&
+				answerAt(c, recovering(c)[0]) < c.transcript.findIndex((m) => m.frame?.event === 'end'),
+			'a cut gap-fill on the replay channel whose end comes after its answer': (c) => recovering(c).length === 1 && overBound(c).some((m) => m.fills !== undefined && m.frame.data?.reqId === undefined) &&
+				truncatedCount(c) === 1 && truncatedEnds(c) === 0 && !c.written.some((m) => m.frame?.event === 'end') &&
+				c.transcript.some((m, i) => m.fills !== undefined && m.frame.event === 'end' && i > answerAt(c, recovering(c)[0])),
+			'two cut gap-fills on the replay channel, each signalled before its own answer': (c) => recovering(c).length === 2 && truncatedCount(c) === 2 &&
+				new Set(overBound(c).map((m) => m.fills)).size === 2 && overBound(c).every((m) => m.fills !== undefined) &&
+				c.transcript.indexOf(recovering(c)[1]) > firstOver(c) && !c.transcript.some((m) => m.frame?.event === 'end') &&
+				c.written.every((m, i) => m.frame?.event !== 'truncated' || overBound(c).some((o) => o.fills === c.written[i + 1]?.answers)),
+			'one event for a hold and a cut gap-fill that end at one answer': (c) => recovering(c).length === 1 && truncatedCount(c) === 1 &&
+				overBound(c).some((m) => m.fills !== undefined) && !c.thenResets && !c.transcript.some((m) => m.frame?.event === 'end') &&
+				overBound(c).some((m) => m.kind === 'text' && m.frame.type === undefined && typeof m.frame.seq === 'number' && !m.frame.topic.startsWith(replayPrefix) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0])),
+			'an epoch that does not match opens a window': (c) => recovering(c).length === 1 && truncatedCount(c) === 1 &&
+				indexOfWritten(c, (m) => m.frame?.event === 'rehydrate') !== -1 && indexOfWritten(c, (m) => m.frame?.event === 'rehydrate') < truncatedAt(c) &&
+				c.written[truncatedAt(c) + 1]?.answers === c.transcript.indexOf(recovering(c)[0]),
+			'a second window opened during the hold': (c) => recovering(c).length === 2 && recovering(c)[0].recovers[0] === recovering(c)[1].recovers[0] && truncatedCount(c) === 2 &&
+				firstOver(c) !== -1 && !(c.transcript[firstOver(c)].frame?.topic ?? '').startsWith(replayPrefix) &&
+				firstOver(c) < c.transcript.indexOf(recovering(c)[1]) && c.transcript.indexOf(recovering(c)[1]) < answerAt(c, recovering(c)[0]),
+			'a later window after the hold ended': (c) => recovering(c).length === 2 && recovering(c)[0].recovers[0] === recovering(c)[1].recovers[0] &&
+				firstOver(c) !== -1 && firstOver(c) < answerAt(c, recovering(c)[0]) && truncatedCount(c) === 1 &&
+				c.transcript.indexOf(recovering(c)[1]) > answerAt(c, recovering(c)[0]),
+			'an answer to a plain subscribe inside a subscribe-batch window': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'subscribe-batch' && plainSubscribeAnsweredBeforeEvent(c, false),
+			'a resume answered while a subscribe window stays open': (c) => recovering(c).length === 2 && recovering(c).some((e) => e.client.type === 'resume') && recovering(c).some((e) => e.client.type === 'subscribe') &&
+				indexOfWritten(c, (m) => m.frame?.type === 'resumed') < truncatedAt(c) && truncatedAt(c) !== -1 && firstOver(c) < c.transcript.findIndex((m) => m.frame?.type === 'resumed'),
+			'a plain subscribe answered inside a resume window': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'resume' && plainSubscribeAnsweredBeforeEvent(c, true),
+			'two resume frames answered out of order': (c) => recovering(c).length === 2 && recovering(c).every((e) => e.client.type === 'resume') &&
+				c.written.find((m) => m.frame?.type === 'resumed')?.answers === c.transcript.indexOf(recovering(c)[1]) &&
+				overBound(c).some((m) => recovering(c)[0].recovers.includes(m.frame?.topic) && !recovering(c)[1].recovers.includes(m.frame?.topic) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[1])) &&
+				c.written[truncatedAt(c) + 1]?.answers === c.transcript.indexOf(recovering(c)[0]),
+			'a replay request running beside a window whose hold is on': (c) => recovering(c).length === 1 && replays(c).length === 1 && truncatedCount(c) === 1 &&
+				overBound(c).every((m) => !(m.frame?.topic ?? '').startsWith(replayPrefix)) &&
+				afterFirstOver(c, (m) => m.frame?.topic?.startsWith(replayPrefix) && m.frame.event === 'msg' && writes(c, m)),
+			'a game.fanout record withheld in a hold a data-event started': (c) => recovering(c).length === 1 && oneOverInsideWindow(c) && c.transcript[firstOver(c)]?.kind === 'text' &&
+				afterFirstOver(c, (m) => m.capability === 'game.fanout:1' && m.kind === 'binary' && !m.overBound && !writes(c, m) && insideWindow(c, m) && topicOf(c, m) === topicOf(c, c.transcript[firstOver(c)])) &&
+				c.written.some((m) => m.kind === 'text' && c.transcript.some((t) => t.capability === 'game.fanout:1' && t.json && JSON.stringify(t.json) === JSON.stringify(m.frame))),
+			'an over-bound game.fanout record that starts a hold': (c) => recovering(c).length === 1 && oneOverInsideWindow(c) && truncatedCount(c) === 1 && c.transcript[firstOver(c)]?.relayedGame === true && c.transcript[firstOver(c)].kind === 'binary' &&
+				overBound(c).some((m) => m.capability === 'game.fanout:1') &&
+				c.written.some((m) => m.kind === 'text' && c.transcript.some((t) => t.capability === 'game.fanout:1' && t.json && JSON.stringify(t.json) === JSON.stringify(m.frame))),
+			'a stateful record withheld in a hold a data-event started': (c) => recovering(c).length === 1 && oneOverInsideWindow(c) && c.transcript[firstOver(c)]?.kind === 'text' &&
+				afterFirstOver(c, (m) => m.capability === 'stateful' && m.kind === 'binary' && !m.overBound && !writes(c, m) && insideWindow(c, m) && topicOf(c, m) === topicOf(c, c.transcript[firstOver(c)])) &&
+				c.written.some((m) => m.kind === 'text' && c.transcript.some((t) => t.capability === 'stateful' && t.json && JSON.stringify(t.json) === JSON.stringify(m.frame))),
+			'a relayed game event dropped for a room with no window while another room has one': (c) => recovering(c).length === 1 && !c.thenResets &&
+				overBound(c).some((m) => m.relayedGame && m.kind === 'text' && !recovering(c)[0].recovers.includes(m.frame.topic) && c.transcript.indexOf(m) > c.transcript.indexOf(recovering(c)[0]) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0])),
+			'a relayed game event dropped with no request in flight': (c) => requests(c).length === 0 && overBound(c).some((m) => m.relayedGame && m.kind === 'text') && !c.thenResets,
+			'a relayed game event withheld inside a window': (c) => recovering(c).length === 1 && oneOverInsideWindow(c) && c.transcript[firstOver(c)]?.relayedGame === true && c.transcript[firstOver(c)].kind === 'text' && truncatedCount(c) === 1,
+			'a relayed game event dropped during a replay': (c) => replays(c).length === 1 && !c.thenResets &&
+				overBound(c).some((m) => m.relayedGame && m.frame?.topic === replays(c)[0].topic && c.transcript.indexOf(m) > c.transcript.findIndex((e) => e.client === replays(c)[0]) &&
+					c.transcript.indexOf(m) < c.transcript.findIndex((e) => e.frame?.topic === replayPrefix + replays(c)[0].topic && e.frame.event === 'end' && e.frame.data?.reqId === replays(c)[0].reqId)),
+			'a live over-bound frame during a replay resets': (c) => replays(c).length === 1 && Boolean(c.thenResets) &&
+				overBound(c).some((m) => frameFor(m) && !m.relayedGame && m.frame?.topic === replays(c)[0].topic && c.transcript.indexOf(m) > c.transcript.findIndex((e) => e.client === replays(c)[0]) && c.transcript.indexOf(m) === resetsAt(c)),
+			'an over-bound unsequenced frame in a window resets': (c) => recovering(c).length === 1 && Boolean(c.thenResets) && firstOver(c) > c.transcript.indexOf(recovering(c)[0]) &&
+				overBound(c).some((m) => m.kind === 'text' && m.frame.seq === undefined && recovering(c)[0].recovers.includes(m.frame.topic) && c.transcript.indexOf(m) === firstOver(c) && c.transcript.indexOf(m) === resetsAt(c) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0])),
+			'an over-bound unsequenced frame during a hold resets': (c) => recovering(c).length === 1 && Boolean(c.thenResets) && firstOver(c) > c.transcript.indexOf(recovering(c)[0]) &&
+				overBound(c).some((m) => m.kind === 'text' && m.frame.seq === undefined && recovering(c)[0].recovers.includes(m.frame.topic) &&
+					c.transcript.indexOf(m) > firstOver(c) && c.transcript.indexOf(m) === resetsAt(c) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0]) && typeof c.transcript[firstOver(c)].frame?.seq === 'number' && c.transcript[firstOver(c)].frame.topic === m.frame.topic),
+			'an over-bound seq-0 record in a window resets': (c) => recovering(c).length === 1 && Boolean(c.thenResets) &&
+				overBound(c).some((m) => m.kind === 'binary' && binaryVarints(m, 2)[1] === 0 && c.transcript.indexOf(m) > c.transcript.indexOf(recovering(c)[0]) && c.transcript.indexOf(m) === resetsAt(c) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0]) &&
+					c.transcript.some((w) => w.frame?.type === 'wire-id' && w.frame.id === binaryVarints(m, 1)[0] && recovering(c)[0].recovers.includes(w.frame.topic))),
+			'a hold that outlasts its bound resets': (c) => Boolean(c.thenResets) && recovering(c).length === 1 && firstOver(c) > c.transcript.indexOf(recovering(c)[0]) &&
+				c.transcript.some((m, i) => m.holdExpires === recovering(c)[0].recovers[0] && i > firstOver(c) && i === resetsAt(c) && i < answerAt(c, recovering(c)[0]) &&
+					!c.transcript.slice(i + 1).some((t) => t.overBound)),
+			// The capability degrades, not the topic: records for another topic go
+			// out as JSON too, and a binding for them is never written.
+			'a stateful capability degraded to JSON': (c) => overBound(c).some((m) => m.capability === 'stateful') &&
+				new Set(c.written.filter((m) => m.kind === 'text' && c.transcript.some((t) => t.capability === 'stateful' && t.json && JSON.stringify(t.json) === JSON.stringify(m.frame))).map((m) => m.frame.topic)).size === 2 &&
+				c.transcript.some((m, i) => m.frame?.type === 'wire-id' && m.capability === 'stateful' && i > firstOver(c) && !writes(c, m)),
+			// A room falls back, not the capability: another room's records stay binary.
+			'a game.fanout room sent back to JSON': (c) => requests(c).length === 0 && overBound(c).some((m) => m.capability === 'game.fanout:1') &&
+				c.written.some((m) => m.kind === 'text' && c.transcript.some((t) => t.capability === 'game.fanout:1' && t.json && JSON.stringify(t.json) === JSON.stringify(m.frame))) &&
+				c.written.some((m) => m.kind === 'binary' && m.capability === 'game.fanout:1' && afterFirstOver(c, (t) => JSON.stringify(t) === JSON.stringify(m)) &&
+					!c.written.some((j) => j.kind === 'text' && j.frame.type === undefined && j.frame.topic === m.json.topic)),
+			'a cut gap-fill answered during a hold that outlives the answer': (c) => recovering(c).length === 2 && truncatedCount(c) === 2 &&
+				overBound(c).some((m) => m.fills === c.transcript.indexOf(recovering(c)[0])) && recovering(c)[1].recovers.includes(recovering(c)[0].recovers[0]) &&
+				overBound(c).some((m) => m.fills === undefined && m.frame?.topic === recovering(c)[0].recovers[0] && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0])) &&
+				answerAt(c, recovering(c)[1]) > answerAt(c, recovering(c)[0]) &&
+				c.transcript.some((m, i) => m.fills !== undefined && m.frame.event === 'end' && i > answerAt(c, recovering(c)[0])) && !c.written.some((m) => m.frame?.event === 'end'),
+			'one answer that closes windows for two topics': (c) => recovering(c).length === 1 && recovering(c)[0].recovers.length === 2 && recovering(c)[0].client.type === 'resume' &&
+				truncatedCount(c) === 2 && c.written[truncatedAt(c) + 1]?.frame?.event === 'truncated' && c.written[truncatedAt(c) + 2]?.frame?.type === 'resumed' &&
+				overBound(c).some((m) => m.fills !== undefined) && overBound(c).some((m) => m.fills === undefined),
+			'a refused request opens no window': (c) => Boolean(c.thenResets) && requests(c).length === 1 && recovering(c).length === 0 && c.written.some((m) => m.frame?.type === 'error' && m.answers === 0) &&
+				overBound(c).some((m) => frameFor(m) && m.frame?.topic === requests(c)[0].topic && c.transcript.indexOf(m) === resetsAt(c)),
+			'a recover key outside topics opens no window': (c) => Boolean(c.thenResets) &&
+				requests(c).some((r) => r.type === 'subscribe-batch' && overBound(c).some((m) => frameFor(m) && Object.keys(r.recover ?? {}).includes(m.frame?.topic) && !r.topics.includes(m.frame.topic) && c.transcript.indexOf(m) > c.transcript.findIndex((e) => e.client === r) && c.transcript.indexOf(m) === resetsAt(c))),
+			'a topic of the batch without recover resets beside an open window': (c) => recovering(c).length === 1 && recovering(c)[0].client.type === 'subscribe-batch' && Boolean(c.thenResets) &&
+				overBound(c).every((m) => frameFor(m) && recovering(c)[0].client.topics.includes(m.frame?.topic) && !recovering(c)[0].recovers.includes(m.frame?.topic) &&
+					c.transcript.indexOf(m) > c.transcript.indexOf(recovering(c)[0]) && c.transcript.indexOf(m) < answerAt(c, recovering(c)[0]) && c.transcript.indexOf(m) === resetsAt(c)),
+			'a message exactly at the bound': (c) => c.written.some((m) => m.length === bound) && c.transcript.some((m) => m.holdExpires !== undefined) && !c.thenResets,
+			'a reset after the window closed': (c) => recovering(c).length === 1 && Boolean(c.thenResets) &&
+				overBound(c).every((m) => frameFor(m) && recovering(c)[0].recovers.includes(m.frame?.topic) && answerAt(c, recovering(c)[0], m.frame?.topic) < c.transcript.indexOf(m) && c.transcript.indexOf(m) === resetsAt(c))
+		};
+		const covered = new Set();
+		for (const [purpose, test] of Object.entries(purposes)) {
+			expect(cases.filter((c) => test(c)).map((c) => c.reason), purpose).toHaveLength(1);
+			covered.add(cases.findIndex((c) => test(c)));
+		}
+		// No two checks share a case, so every case has its own.
+		expect(covered.size).toBe(cases.length);
+		expect(cases).toHaveLength(Object.keys(purposes).length);
+		// The sender bullet points at "the next bullet" three times, so nothing may
+		// come between the two.
+		expect(flatProtocol).toContain('so no event queued after it goes out in an earlier record. - **Where a recovery\'s truncation goes** depends on how the recovery reaches the client.');
+		// Nothing may follow the placement bullet either: the sender bullet speaks of
+		// "the two cases below".
+		expect(flatProtocol).toContain('a frame withheld for a window that remains open is followed by another event. - **A receiver\'s limit is its section 1.3 inbound message limit applied to this carriage**');
+		expect(bulletAt('- `ref` is a client-allocated')).toBe('- `ref` is a client-allocated correlation id (a per-connection incrementing integer in the reference client; a string is also accepted). The server echoes it on the matching ack and never mints its own. **Silent mode:** a request whose `ref` is absent, or is not a number or string (null, boolean, object), is performed but NOT acked - the server sends no `subscribed` and no `subscribe-denied`. An emitted ack therefore always carries a number or string `ref`, never `null`. One exception, and it is not an ack: a `subscribe` carrying a `recover` of the shape below against a server with a resume hook is REFUSED rather than performed silently, with `{"type":"error","code":"RECOVER_REQUIRES_REF"}` (section 3.7). Silent mode trades away hearing the outcome; it cannot trade away history the client asked to be sent, because a client that never learns the gap-fill did not happen resumes over a hole in its own stream.');
+		expect(bulletAt('- `subscribe-batch` caps')).toBe('- `subscribe-batch` caps at **256 topics per frame** and emits one `subscribed` / `subscribe-denied` ack per entry of `topics`, all sharing the one `ref`; a topic named twice is acked twice. The second entry is a duplicate if the first installed the subscription, and is judged on its own otherwise. Topics past the cap are NOT subscribed and are each answered `subscribe-denied` with reason `BATCH_OVERFLOW` (under the silent-mode rule above: a ref-less batch stays silent) - never dropped without a signal. A client MUST NOT exceed the cap; it SHOULD chunk instead. (The reference client chunks well below this, at 8000 bytes and 200 topics, to respect the control-frame ceiling of section 1.2.)');
+		expect(bulletAt('- `recover` is resume-on-subscribe')).toBe('- `recover` is resume-on-subscribe (section 7). On `subscribe` it is a single `{offset, epoch?}`; on `subscribe-batch` it is a map keyed by topic, so recovery for many topics rides the same already-chunked batch instead of a separate whole-session `resume` frame that would overflow the control-frame ceiling. For each recover-tagged topic the server gap-fills the missed tail ahead of the first live frame, exactly as the `resume` frame does, and omits it for a topic the auth gate denied. A client that omits `recover` (or a server that does not implement it) is byte-identical to a plain subscribe. A `recover` outside that shape - not an object, or an `offset` that is not a non-negative integer - is treated as absent: the server performs the request as a plain subscribe, sends no history and acks it as one, and a server MUST NOT gap-fill for a `subscribe` or `subscribe-batch` that asks in any other way than the shape above; a client that wants its offset honoured sends that shape, with a number or string `ref`.');
+		expect(bulletAt('- On resume, a topic\'s gap-fill')).toBe('- On resume, a topic\'s gap-fill frames precede its `subscribed` ack (or the whole-session `resumed`); on section 15\'s carriage a gap-fill\'s `__replay:` `end` may follow that ack (15.1).');
+		expect(bulletAt('- `RECOVER_REQUIRES_REF` -')).toBe('- `RECOVER_REQUIRES_REF` - a `subscribe` carrying a `recover` of section 3.2\'s shape arrived without a `ref` while the server has a resume hook. `topic` names the topic, or is `null` when a whole `subscribe-batch` frame is refused. History is the one reply a client must correlate, so the silent-mode rule of section 3.2 cannot apply to it: staying silent would leave the client believing it had subscribed AND been gap-filled, and resuming over a hole in its history. The subscription is NOT installed. The client MUST send a `ref` on any subscribe that asks for recovery.');
+		expect(paragraphAt('Resume-on-subscribe is acked')).toBe('Resume-on-subscribe is acked per topic by the ordinary `subscribed` frame (the gap-fill precedes it; on section 15\'s carriage its `__replay:` `end` may follow it, 15.1); the whole-session `resume` frame is acked once with `resumed`. The epoch is optional in both: a client that has no epoch for a topic omits it, and the server treats an absent epoch as a match (single-generation legacy behaviour). Epochs and recovery are additive - a new client against an old server, or an old client against a new server, degrade to offset-only recovery (or, for resume-on-subscribe against a server that predates it, to a plain resubscribe) without breaking.');
+		expect(paragraphAt('The bundled collaborative plugins receive')).toBe('The bundled collaborative plugins receive a few plain-JSON control frames from the client. These are plugin contracts layered on the core protocol, listed here for completeness; an application that does not use a plugin never sees its frames. Plugin server-to-client output is not a distinct control type - it rides the data-event envelope (section 4) under reserved `__`-prefixed topics (appendix C.2), or the `0x03` binary frame when a binary token is negotiated. The `__replay:{topic}` events of section 8.1 can also carry a resume\'s gap-fill and its truncation (sections 7 and 15.7), so a client that recovers topics sees them whether or not it uses a plugin.');
+		expect(paragraphAt('`replay` results arrive')).toBe('`replay` results arrive as data-event frames on the reserved topic `__replay:{topic}`. Six events can appear; the client dispatches them by `event`. The `reqId` field echoes the request\'s `reqId` and is OMITTED when the request omitted it (a client that always sends `reqId` always sees it back).');
+		expect(paragraphAt('`gap` is the only unsolicited event')).toBe('`gap` is the only unsolicited event: a multi-worker server that detects it lost cluster-relayed frames (section 9\'s fan-out is otherwise invisible to a client) MAY push it, at any time, to the subscribers of the affected topic that opted in - it never carries `reqId`. The distinction from `truncated`/`rehydrate` matters for the offset: by the time a relay loss is confirmed, the delivered sequences have already stepped PAST the lost frames, so a resume from the current offset would silently skip them forever - which is exactly why the marker exists. The frame MAY carry the `j` de-herd window of section 4, and a client SHOULD honor it before re-snapshotting so one gap does not turn a large room into a synchronized stampede. A connection that did not advertise `relay.resync:1` never receives `gap` (section 5) and keeps the revision\'s original silence.');
+		expect(protocol.split('\n').find((line) => line.startsWith('| `end` |'))).toBe('| `end` | `{reqId?}` (or `null` with no `reqId`), or `{reqId?, truncated:true}` | Terminal: recovery complete. `truncated:true` means the history from the requested point could not be delivered whole: the buffer was trimmed past it (the in-memory backend inlines truncation here), or on section 15\'s stream a message was too large to carry. |');
+		expect(protocol.split('\n').find((line) => line.startsWith('| `truncated` |'))).toBe('| `truncated` | `null` | Standalone form of the same signal: the history from the requested point cannot be delivered whole (for example a trimmed buffer, or on section 15\'s stream a message too large to carry). Some backends emit it before `end`; it can also arrive on its own (below). |');
+		expect(protocol.split('\n').find((line) => line.startsWith('| `denied` |'))).toBe('| `denied` | `{code, reqId?}` | Terminal: the resume-time subscribe was denied; `code` is the denial reason (section 3.2.2). |');
+		expect(protocol.split('\n').find((line) => line.startsWith('| `rehydrate` |'))).toBe('| `rehydrate` | `{epoch}` | Terminal: the reported epoch did not match the topic\'s current epoch (section 7); the topic must cold-rehydrate. `epoch` is the current generation. |');
+		expect(paragraphAt('1. The server\'s first stream record MUST')).toBe('1. The server\'s first stream record MUST be the unchanged `welcome` frame, unless the server closes the lane before admitting it: then its first and only record is a close record (15.4). A close record is carriage, not one of the frames whose order section 11 promises. 2. The client MAY send the unchanged `hello` frame. Inner capabilities are negotiated solely by `hello.caps`, not copied from CONNECT declarations. 3. Subscribe, batch, lease/request-n, resume, data-event, and `0x03` records then behave as sections 2-11 specify, except where this section says otherwise - 15.1\'s rules on a message larger than its sender may emit among them: recovery never replays one, the sequenced frames for a topic with an open recovery window are withheld from the first over-bound one until no window for it remains open, and a relayed `game` event too large for the lane is otherwise not delivered live.');
+		expect(paragraphAt('Recovery applies only after a different WebTransport')).toBe('Recovery applies only after a different WebTransport CONNECT session is created. The client declares `lantean.reliable:1`, opens its new reliable stream, receives the new `welcome`, re-sends `hello`, and uses the unchanged resume-on-subscribe `recover` fields (or compatibility `resume` frame) from section 7. Offset and epoch comparison is identical to WebSocket; only the gap-fill, and what the server writes for a topic while a recovery window for it is open, differ, by 15.1\'s rule for a message larger than its sender may emit. Datagram `game` membership is re-authorized independently at CONNECT and has no gap-fill.');
+		// Section 3.2 binds the server's gap-fill to the window shape and acks a
+		// batch per entry, which the 15.7 count relies on.
+		expect(flatProtocol).toContain('A `recover` outside that shape - not an object, or an `offset` that is not a non-negative integer - is treated as absent: the server performs the request as a plain subscribe, sends no history and acks it as one, and a server MUST NOT gap-fill for a `subscribe` or `subscribe-batch` that asks in any other way than the shape above; a client that wants its offset honoured sends that shape, with a number or string `ref`.');
+		expect(flatProtocol).toContain('emits one `subscribed` / `subscribe-denied` ack per entry of `topics`, all sharing the one `ref`; a topic named twice is acked twice. The second entry is a duplicate if the first installed the subscription, and is judged on its own otherwise.');
+		// The core sections carry the stream carriage's one exception to "gap-fill
+		// precedes the ack", so a reader of section 7 or 11 alone meets it.
+		expect(flatProtocol).toContain('On resume, a topic\'s gap-fill frames precede its `subscribed` ack (or the whole-session `resumed`); on section 15\'s carriage a gap-fill\'s `__replay:` `end` may follow that ack (15.1).');
+		expect(flatProtocol).toContain('Resume-on-subscribe is acked per topic by the ordinary `subscribed` frame (the gap-fill precedes it; on section 15\'s carriage its `__replay:` `end` may follow it, 15.1); the whole-session `resume` frame is acked once with `resumed`.');
+		// Every sentence of the placement bullet, so none is added unseen.
+		expect(bulletAt('- **Where a recovery\'s truncation goes**'), '15.1 placement bullet').toBe([
+			'- **Where a recovery\'s truncation goes** depends on how the recovery reaches the client.',
+			'A frame for T, in this section, is a data-event for T that carries a `seq`, alone in its record or inside a `batch` record, or a `0x03` record bound to T whose `seq` is not `0`; a message on `__replay:T` is not one.',
+			'The standalone truncations an answer gets, one per topic it is owed for, go out as an unbroken run immediately before that answer, in any order, each in its own record or in a `batch` record that carries no event after the run\'s: nothing but the run\'s events goes between the run\'s first event and the answer, and a `wire-id` the server would write there goes before the run. In this bullet, writing means admitting to the lane\'s send queue, not waiting for transport delivery. The server MUST admit the complete run and its answer and close the windows that answer covers as one operation serialized with the handling of every frame for those topics. That operation MUST finish before any record in the run or its answer can be transmitted, and MUST NOT await transport progress between them. If admitting the group would cross a section 15.6 bound, the server resets with `SLOW_CONSUMER` without admitting any part of the group. A frame handled after that operation is ordered after the answer and sees the remaining windows, if any.',
+			'A recovery of topic T on `__replay:T` - a `replay` request, or a resume whose gap-fill uses that channel - is truncated at the message: the server writes neither that `msg` nor any later `msg` of the same recovery, and still ends the recovery with its `end`, which then carries `truncated:true`, section 8.1\'s inline form; a cut `replay` request\'s `end` always does, and a cut on that channel never resets the lane.',
+			'If a resume\'s own gap-fill on that channel, with or without a `reqId` (one there echoes no request of the client\'s), is cut and has written no `end` when the server answers its request for T, the server writes the standalone `truncated` for T in that answer\'s run and writes no `end` for that gap-fill afterwards; section 11\'s promise covers the gap-fill\'s `msg` events, and its `end` may follow the answer, which is how a cut gap-fill reaches the answer without one.',
+			'A gap-fill written as frames for T has no `end` to carry a truncation, so it is truncated by its recovery window.',
+			'A recovery window for T belongs to one request that asks the server to recover T: a `subscribe` for T whose `recover` is an object with a non-negative integer `offset`, a `subscribe-batch` that names T in `topics` and whose `recover` entry for T is such an object (section 3.2), or a `resume` frame of section 3.5\'s shape whose `lastSeenSeqs` names T.',
+			'It opens when the server takes up that request for T, before it awaits any authorization or resume hook, unless the server will answer that request with none of `subscribed`, `subscribe-denied` and `resumed`: it refuses the request (section 3.7), or it performs the request silently (section 3.2), which it decides when it takes the request up.',
+			'For a `subscribe-batch` or a `resume` frame, every window the frame opens opens when the server takes up the frame, before it awaits a hook for any topic the frame names.',
+			'Whether the server can recover T does not matter: a topic it does not recover, an epoch that does not match and history it no longer holds all open a window, so whether a window opens never depends on what the server knows about T.',
+			'Nothing the server learns later changes that; the window closes only when the server answers that request for T, with the first of the request\'s `subscribed` or `subscribe-denied` acks for T or with its `resumed`, and, unless the lane ends first, the server MUST give that answer.',
+			'A server MUST NOT gap-fill for a request that opens no window for T (section 3.2 performs such a request plain), so a frame for T written as gap-fill while no window for T is open is the server\'s own defect: it has nowhere to place a truncation, and one larger than its sender may emit resets the lane.',
+			'A data-event for T without a `seq`, or a `0x03` record bound to T whose `seq` is `0`, is never gap-fill, which section 7 addresses by `seq`, so the hold never covers it, and an over-bound one resets the lane as the bullet above says.',
+			'From the first frame for T larger than its sender may emit that the server comes to while a recovery window for T is open, whether gap-fill, live, or a relayed `game` event, until no recovery window for T remains open, the server withholds every frame for T: it never writes one, and a `batch` record goes out without them, or not at all if they were all it carried.',
+			'The hold is bounded: while a hold for T is on, a server that has not answered a window for T within a bounded time of the later of the hold\'s start and that window\'s opening MUST reset the lane with `RECORD_TOO_LARGE` rather than withhold T any longer, and the client then gives that recovery up (15.7) instead of repeating it.',
+			'The bound is the server\'s own; it SHOULD be no shorter than the longest a request\'s authorization and resume hooks may take together, and a server that does not bound its hooks chooses it itself.',
+			'A withheld `0x03` record counts for sections 6.4 and 6.7 as a frame dropped under backpressure would: a stateful capability degrades to JSON, and a `game.fanout:1` topic falls back to its JSON envelope.',
+			'A `wire-id` frame is never withheld: the server allocates a binding and writes its `wire-id` where it would without the hold, so a binding arrives before the first `0x03` record that uses it, as section 11 promises, though not always immediately before it as section 6.2 describes, and a binding whose first `0x03` record is withheld, which degrades a stateful capability to JSON (6.4) or sends a `game.fanout:1` room back to its envelope (6.7), is then never used.',
+			'Every answer that closes a window for T while the hold is on gets one standalone truncation for T, `{"topic":"__replay:T","event":"truncated","data":null}`, in its run, after every frame the server has withheld so far, so each such answer\'s gap-fill, its truncation included, precedes it, as section 11 promises for `subscribed` and `resumed`.',
+			'One event serves both the hold and a cut gap-fill when they meet at the same answer.',
+			'The hold ends with the answer that closes the last window for T.',
+			'Live frames for T look the same as the gap-fill on the wire, which is why they are withheld too and why each event follows every frame withheld before it: a client that re-snapshots T as soon as it reads an event, as section 8.1 asks, does so after every frame covered by that event was withheld. The atomic queue operation prevents a frame from being withheld between the final event and its answer; a frame withheld for a window that remains open is followed by another event.'
+		].join(' '));
+
+		expect(flatProtocol).toContain('`truncated:true`, section 8.1\'s inline form; a cut `replay` request\'s `end` always does, and a cut on that channel never resets the lane. If a resume\'s own gap-fill on that channel, with or without a `reqId` (one there echoes no request of the client\'s), is cut and has written no `end` when the server answers its request for T, the server writes the standalone `truncated` for T in that answer\'s run and writes no `end` for that gap-fill afterwards; section 11\'s promise covers the gap-fill\'s `msg` events, and its `end` may follow the answer, which is how a cut gap-fill reaches the answer without one.');
+		expect(flatProtocol).toContain('The standalone truncations an answer gets, one per topic it is owed for, go out as an unbroken run immediately before that answer, in any order, each in its own record or in a `batch` record that carries no event after the run\'s: nothing but the run\'s events goes between the run\'s first event and the answer, and a `wire-id` the server would write there goes before the run. In this bullet, writing means admitting to the lane\'s send queue, not waiting for transport delivery. The server MUST admit the complete run and its answer and close the windows that answer covers as one operation serialized with the handling of every frame for those topics. That operation MUST finish before any record in the run or its answer can be transmitted, and MUST NOT await transport progress between them. If admitting the group would cross a section 15.6 bound, the server resets with `SLOW_CONSUMER` without admitting any part of the group. A frame handled after that operation is ordered after the answer and sees the remaining windows, if any.');
+		expect(flatProtocol).toContain('A gap-fill written as frames for T has no `end` to carry a truncation, so it is truncated by its recovery window.');
+		expect(flatProtocol).toContain('One event serves both the hold and a cut gap-fill when they meet at the same answer. The hold ends with the answer that closes the last window for T.');
+		expect(flatProtocol).toContain('A stream client MUST take a topic\'s resume offset only from frames for that topic, as 15.1 defines them, that a reliable lane or a WebSocket carries, never from `__replay:{topic}` events, which can keep flowing while the topic is withheld, and never from the datagram lane.');
+		expect(flatProtocol).toContain('A recovery of topic T on `__replay:T` - a `replay` request, or a resume whose gap-fill uses that channel - is truncated at the message: the server writes neither that `msg` nor any later `msg` of the same recovery, and still ends the recovery with its `end`, which then carries `truncated:true`, section 8.1\'s inline form');
+		expect(flatProtocol).toContain('A recovery window for T belongs to one request that asks the server to recover T: a `subscribe` for T whose `recover` is an object with a non-negative integer `offset`, a `subscribe-batch` that names T in `topics` and whose `recover` entry for T is such an object (section 3.2), or a `resume` frame of section 3.5\'s shape whose `lastSeenSeqs` names T. It opens when the server takes up that request for T, before it awaits any authorization or resume hook, unless the server will answer that request with none of `subscribed`, `subscribe-denied` and `resumed`: it refuses the request (section 3.7), or it performs the request silently (section 3.2), which it decides when it takes the request up. For a `subscribe-batch` or a `resume` frame, every window the frame opens opens when the server takes up the frame, before it awaits a hook for any topic the frame names. Whether the server can recover T does not matter: a topic it does not recover, an epoch that does not match and history it no longer holds all open a window, so whether a window opens never depends on what the server knows about T. Nothing the server learns later changes that; the window closes only when the server answers that request for T, with the first of the request\'s `subscribed` or `subscribe-denied` acks for T or with its `resumed`, and, unless the lane ends first, the server MUST give that answer.');
+		expect(flatProtocol).toContain('A server MUST NOT gap-fill for a request that opens no window for T (section 3.2 performs such a request plain), so a frame for T written as gap-fill while no window for T is open is the server\'s own defect: it has nowhere to place a truncation, and one larger than its sender may emit resets the lane.');
+		expect(flatProtocol).toContain('A frame for T, in this section, is a data-event for T that carries a `seq`, alone in its record or inside a `batch` record, or a `0x03` record bound to T whose `seq` is not `0`; a message on `__replay:T` is not one.');
+		expect(flatProtocol).toContain('A data-event for T without a `seq`, or a `0x03` record bound to T whose `seq` is `0`, is never gap-fill, which section 7 addresses by `seq`, so the hold never covers it, and an over-bound one resets the lane as the bullet above says.');
+		expect(flatProtocol).toContain('From the first frame for T larger than its sender may emit that the server comes to while a recovery window for T is open, whether gap-fill, live, or a relayed `game` event, until no recovery window for T remains open, the server withholds every frame for T: it never writes one, and a `batch` record goes out without them, or not at all if they were all it carried.');
+		expect(flatProtocol).toContain('The hold is bounded: while a hold for T is on, a server that has not answered a window for T within a bounded time of the later of the hold\'s start and that window\'s opening MUST reset the lane with `RECORD_TOO_LARGE` rather than withhold T any longer, and the client then gives that recovery up (15.7) instead of repeating it.');
+		expect(flatProtocol).toContain('A withheld `0x03` record counts for sections 6.4 and 6.7 as a frame dropped under backpressure would: a stateful capability degrades to JSON, and a `game.fanout:1` topic falls back to its JSON envelope.');
+		expect(flatProtocol).toContain('A `wire-id` frame is never withheld: the server allocates a binding and writes its `wire-id` where it would without the hold, so a binding arrives before the first `0x03` record that uses it, as section 11 promises, though not always immediately before it as section 6.2 describes, and a binding whose first `0x03` record is withheld, which degrades a stateful capability to JSON (6.4) or sends a `game.fanout:1` room back to its envelope (6.7), is then never used.');
+		expect(flatProtocol).toContain('The bound is the server\'s own; it SHOULD be no shorter than the longest a request\'s authorization and resume hooks may take together, and a server that does not bound its hooks chooses it itself.');
+		expect(flatProtocol).toContain('Every answer that closes a window for T while the hold is on gets one standalone truncation for T, `{"topic":"__replay:T","event":"truncated","data":null}`, in its run, after every frame the server has withheld so far, so each such answer\'s gap-fill, its truncation included, precedes it, as section 11 promises for `subscribed` and `resumed`.');
+		expect(flatProtocol).toContain('a client that re-snapshots T as soon as it reads an event, as section 8.1 asks, does so after every frame covered by that event was withheld. The atomic queue operation prevents a frame from being withheld between the final event and its answer; a frame withheld for a window that remains open is followed by another event.');
+		expect(flatProtocol).toContain('A standalone `truncated` can also arrive with no `end` after it, ahead of the frame that answers a topic\'s resume - its `subscribed`, `subscribe-denied` or `resumed` - when the server could not deliver everything the topic was owed while its recovery was open (section 15.1 is one such case); a client acts on it the same way.');
+		expect(flatProtocol).toContain('A client SHOULD treat `truncated` in either form - the event, or an `end` that carries `truncated:true` - and `denied`, `rehydrate`, and `gap` alike: delivery or recovery did not complete cleanly, so drop the topic\'s resume offset and re-snapshot the topic rather than trusting a gap-fill. Each truncation needs a snapshot requested after the client read it; one already in flight does not satisfy a later event, because what was lost after it was taken is signalled only by that later event. That holds for a `replay` request\'s own `end` too: the offset is the cheap thing to drop, and a client cannot always tell a resume\'s gap-fill from a replay.');
+		expect(flatProtocol).toContain('| `truncated` | `null` | Standalone form of the same signal: the history from the requested point cannot be delivered whole (for example a trimmed buffer, or on section 15\'s stream a message too large to carry). Some backends emit it before `end`; it can also arrive on its own (below). |');
+		expect(paragraphAt('For recognition as a `resume` frame, `sessionId` is a string and `lastSeenSeqs` is a non-null object (arrays also satisfy this recognition rule)')).toBe('For recognition as a `resume` frame, `sessionId` is a string and `lastSeenSeqs` is a non-null object (arrays also satisfy this recognition rule). A frame outside that shape is not acted on as a resume, follows section 1.4, and names no topic for sections 15.1 and 15.7. Unless the lane ends or the server refuses the frame under section 3.7, it MUST answer every recognized `resume` with `resumed`, even without a resume hook. The schema describes the canonical topic map clients send; array recognition is permissive input handling only.');
+		expect(paragraphAt('A terminal event below ends only that recovery\'s `msg` stream')).toBe('A terminal event below ends only that recovery\'s `msg` stream. While the topic\'s resume is unanswered, a standalone `truncated` can still follow `end` (with or without `truncated:true`), `denied` or `rehydrate`. A client MUST process that truncation even after a terminal event, until it has read the request\'s `subscribed`, `subscribe-denied` or `resumed`; it acts on each truncation as described below.');
+		// A reqId-less end is `null` from the reference backend and `{}` from others.
+		expect(flatProtocol).toContain('| `end` | `{reqId?}` (or `null` with no `reqId`), or `{reqId?, truncated:true}` | Terminal: recovery complete.');
+		expect(flatProtocol).toContain('The `__replay:{topic}` events of section 8.1 can also carry a resume\'s gap-fill and its truncation (sections 7 and 15.7), so a client that recovers topics sees them whether or not it uses a plugin.');
+		expect(flatProtocol).toContain('A client that recovers topics (section 7) over this carriage MUST also act on the truncation 15.1 answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an `end` there that carries `truncated:true`, with or without a `reqId` - even if it implements no section 8 plugin: it drops the topic\'s resume offset and surfaces the truncation to the application, which re-snapshots the topic as section 8.1 describes, once per truncation: a snapshot already in flight does not satisfy a later event, since frames withheld after it was taken are signalled only by that event.');
+		expect(flatProtocol).toContain('A client whose lane ends with `RECORD_TOO_LARGE`, whichever side reset it, MUST likewise drop the resume offset of every topic it asked that lane to recover and has not read every answer for, and surface a truncation for each such topic to the application, as for a `truncated` event, so its next session re-snapshots those topics instead of replaying that recovery. If a client\'s own receiver limit is lower than the sender\'s, a frame within the sender\'s bound can reset live delivery first and recovery on the next session; that second reset drops the unanswered recovery offset, so the following session re-snapshots. The requests that count are those 15.1\'s recovery windows belong to, in the shapes 15.1 defines: a `subscribe` or `subscribe-batch` that names the topic in `topic` or `topics` and carries a number or string `ref` and a `recover` entry for the topic that is an object with a non-negative integer `offset`, whose topic counts as answered only once the client has read as many `subscribed` or `subscribe-denied` frames for it as the times the client has named it in `topic` or `topics` of any `subscribe` or `subscribe-batch` on that lane that carries a number or string `ref`, with or without `recover`, since a `ref` can be reused (a request without one is never acked and does not count, section 3.2), and a `resume` frame of section 3.5\'s shape, answered by a `resumed`: since `resumed` names no frame, the client counts as unanswered the topics of every `resume` frame it sent after the last time it had read as many `resumed` frames as it had sent `resume` frames. A `replay` request does not count.');
+		expect(flatProtocol).toContain('The reset names no topic, so every unanswered recovery counts as truncated; the cost is a re-snapshot of each.');
+		expect(flatProtocol).toContain('A request the server refuses with an `error` (section 3.7) gets none of these answers, so its topics stay unanswered for the rest of the lane; for a `resume` frame that reaches the topics of every later `resume` frame too, since the two counts never meet again; that is the intended outcome, a re-snapshot of those topics at each later reset, and a client that resends a refused frame in smaller pieces names its topics again, which counts like any other request.');
+		expect(flatProtocol).toContain('or a server\'s recovery hold outlasted its bound (15.1). |');
+		// The whole 15.7 client paragraph and the whole 15.6 bound paragraph, so a
+		// sentence added between two pinned ones is caught.
+		expect(paragraphAt('A client SHOULD treat `truncated` in either form'), '8.1 client paragraph').toBe([
+			'A client SHOULD treat `truncated` in either form - the event, or an `end` that carries `truncated:true` - and `denied`, `rehydrate`, and `gap` alike: delivery or recovery did not complete cleanly, so drop the topic\'s resume offset and re-snapshot the topic rather than trusting a gap-fill.',
+			'Each truncation needs a snapshot requested after the client read it; one already in flight does not satisfy a later event, because what was lost after it was taken is signalled only by that later event.',
+			'That holds for a `replay` request\'s own `end` too: the offset is the cheap thing to drop, and a client cannot always tell a resume\'s gap-fill from a replay.',
+			'Not every backend emits every event: the in-memory backend signals truncation inline on `end` and never emits `denied` or `rehydrate`; clustered backends emit the standalone `truncated`, `denied`, and `rehydrate` forms.',
+			'A standalone `truncated` can also arrive with no `end` after it, ahead of the frame that answers a topic\'s resume - its `subscribed`, `subscribe-denied` or `resumed` - when the server could not deliver everything the topic was owed while its recovery was open (section 15.1 is one such case); a client acts on it the same way.'
+		].join(' '));
+		expect(paragraphAt('A client or server claiming the reliable-stream binding'), '15.7 client paragraph').toBe([
+			'A client or server claiming the reliable-stream binding MUST implement Core conformance from section 13 over this carriage, the framing/topology/lifecycle rules of section 15, and every optional inner capability it advertises or emits.',
+			'Binary conformance continues to require JSON fallback.',
+			'A client that recovers topics (section 7) over this carriage MUST also act on the truncation 15.1 answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an `end` there that carries `truncated:true`, with or without a `reqId` - even if it implements no section 8 plugin: it drops the topic\'s resume offset and surfaces the truncation to the application, which re-snapshots the topic as section 8.1 describes, once per truncation: a snapshot already in flight does not satisfy a later event, since frames withheld after it was taken are signalled only by that event.',
+			'A client whose lane ends with `RECORD_TOO_LARGE`, whichever side reset it, MUST likewise drop the resume offset of every topic it asked that lane to recover and has not read every answer for, and surface a truncation for each such topic to the application, as for a `truncated` event, so its next session re-snapshots those topics instead of replaying that recovery. If a client\'s own receiver limit is lower than the sender\'s, a frame within the sender\'s bound can reset live delivery first and recovery on the next session; that second reset drops the unanswered recovery offset, so the following session re-snapshots.',
+			'The requests that count are those 15.1\'s recovery windows belong to, in the shapes 15.1 defines: a `subscribe` or `subscribe-batch` that names the topic in `topic` or `topics` and carries a number or string `ref` and a `recover` entry for the topic that is an object with a non-negative integer `offset`, whose topic counts as answered only once the client has read as many `subscribed` or `subscribe-denied` frames for it as the times the client has named it in `topic` or `topics` of any `subscribe` or `subscribe-batch` on that lane that carries a number or string `ref`, with or without `recover`, since a `ref` can be reused (a request without one is never acked and does not count, section 3.2), and a `resume` frame of section 3.5\'s shape, answered by a `resumed`: since `resumed` names no frame, the client counts as unanswered the topics of every `resume` frame it sent after the last time it had read as many `resumed` frames as it had sent `resume` frames.',
+			'A `replay` request does not count.',
+			'A request the server refuses with an `error` (section 3.7) gets none of these answers, so its topics stay unanswered for the rest of the lane; for a `resume` frame that reaches the topics of every later `resume` frame too, since the two counts never meet again; that is the intended outcome, a re-snapshot of those topics at each later reset, and a client that resends a refused frame in smaller pieces names its topics again, which counts like any other request.',
+			'The reset names no topic, so every unanswered recovery counts as truncated; the cost is a re-snapshot of each.',
+			'A stream client MUST take a topic\'s resume offset only from frames for that topic, as 15.1 defines them, that a reliable lane or a WebSocket carries, never from `__replay:{topic}` events, which can keep flowing while the topic is withheld, and never from the datagram lane.',
+			'A datagram-only implementation claims section 14, not section 15.'
+		].join(' '));
+		expect(paragraphAt('An endpoint MUST bound, per session, the message bytes'), '15.6 bound paragraph').toBe([
+			'An endpoint MUST bound, per session, the message bytes of complete records framed for this lane but not yet sent.',
+			'A byte counts until the transport has sent it, whether or not the peer has acknowledged it: a byte a stack holds only because the peer\'s flow control has not admitted it is still pending, and a byte in flight is not, so acknowledgement delay cannot eat into the floor.',
+			'An endpoint whose stack does not show what it has sent counts a byte until the write carrying it settles (the W3C WebTransport API\'s `write()` promise), accepting that such a stack may settle a write flow control still holds; a stack whose write settles only on acknowledgement reports only acknowledgement.',
+			'An endpoint whose stack reports only acknowledgement counts unsent and unacknowledged bytes together against one bound of at least the unsent-byte floor plus 1,048,576 bytes - **2,097,152 bytes** unless out-of-band knowledge raised that floor.',
+			'The unsent-byte bound MUST be at least **1,048,576 bytes per session**, and at least the largest record this endpoint may itself emit (15.1) where out-of-band knowledge raised that above the unnegotiated maximum - otherwise emitting a record the sender is permitted to emit would force it to reset its own lane.',
+			'The sum is over the unsent message bytes of each queued record; the length prefix (at most 5 bytes, 15.1) and the `kind` byte are fixed framing overhead and do not count.',
+			'One maximum-size message therefore always fits.',
+			'Because an empty message adds nothing to that sum, an endpoint MAY also bound the number of pending records per session; that bound MUST be at least **65,536 records**.',
+			'A close record (15.4) counts against neither bound.',
+			'The endpoint MUST stop pulling or producing optional work while the stream is blocked.',
+			'If adding the next complete record would cross either bound, it MUST reset the reliable lane with `SLOW_CONSUMER`.',
+			'Recoverable topics then resume on a new connection by section 15.5; non-recoverable topics re-snapshot as section 7 already requires.',
+			'The datagram lane may continue after the reset.',
+			'While the lane is open it MUST NOT drop that record or any queued record, or spill into a second stream; section 6.4\'s drop under backpressure does not apply on this carriage.',
+			'This binding leaves out a message the server would otherwise write only where 15.1 withholds it (a `batch` record that would have carried only withheld events included), cuts it from a `__replay:{topic}` recovery, drops the `end` of a cut gap-fill whose standalone `truncated` came first, or does not deliver it, and such a message never enters the send queue: 15.1\'s truncation signals the gaps that withheld frames and cut messages leave, the room `seq` shows the gap an undelivered `game` event leaves, and a withheld or undelivered `0x03` record degrades a capability or a room only as 15.1 says.'
+		].join(' '));
 	});
 
 	it('counts a byte until it is sent, and bounds records and unacknowledged bytes', () => {
@@ -1255,7 +2004,7 @@ describe('WebTransport reliable-stream carriage', () => {
 		expect(flatProtocol).toContain(`Its floor of ${minimumPendingRecords.toLocaleString('en-US')} is the byte floor divided by 16`);
 		expect(flatProtocol).toContain('A close record (15.4) counts against neither bound');
 		expect(flatProtocol).toContain('If adding the next complete record would cross either bound, it MUST reset the reliable lane with `SLOW_CONSUMER`');
-		expect(flatProtocol).toContain('While the lane is open it MUST NOT drop that record or any queued record, skip a `seq`, or spill into a second stream; section 6.4\'s drop under backpressure does not apply on this carriage');
+		expect(flatProtocol).toContain('While the lane is open it MUST NOT drop that record or any queued record, or spill into a second stream; section 6.4\'s drop under backpressure does not apply on this carriage.');
 		expect(flatProtocol).toContain('a byte a stack holds only because the peer\'s flow control has not admitted it is still pending, and a byte in flight is not');
 		expect(flatProtocol).toContain('counts a byte until the write carrying it settles (the W3C WebTransport API\'s `write()` promise), accepting that such a stack may settle a write flow control still holds');
 		expect(flatProtocol).toContain('a stack whose write settles only on acknowledgement reports only acknowledgement');

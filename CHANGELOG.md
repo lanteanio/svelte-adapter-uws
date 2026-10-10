@@ -46,11 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Percent-encoded targets are served as before, non-ASCII page names included, and a static file with a non-ASCII name is now served for its encoded spelling. Built assets pay one read of the query and a scan of the target, which measured within run-to-run noise (bench/40). A handshake refused for its query counts as `upgrade_rejected_total{reason="malformed_handshake"}`; one whose path carries such a byte misses the WebSocket route and is refused like any other request. node's HTTP parser refuses the raw bytes itself and passes a `#` on, so under `vite dev` the WebSocket handshake and the auth path refuse a fragment and pages are served as Vite serves them. `createTestServer` refuses on the routes it mirrors.
   - **Detail:** [Changed engineering detail](#changed).
-- **Changed: the WebTransport reliable stream carries empty messages and close codes.** Section 15 of PROTOCOL.md, still a freeze candidate, carries an empty WebSocket message as a zero-length record and a close as a close record (`kind` `0x02`) with its code and reason, so a stream client can tell a throttle or terminal close from a disconnect.
-  - **Affects:** Authors of a runtime or client that implements the section 15 reliable-stream binding. The JavaScript adapter and its client do not implement it and behave exactly as before.
-  - **Action:** Accept a zero-length record; wherever a WebSocket would send a close frame, other than for an error in the frames themselves, write a close record with the same payload and then FIN, and refuse any byte after one; reset with `RECORD_TOO_LARGE` instead of sending a message larger than you may emit, except a live relayed `game` event, which is not delivered; open the stream only after the CONNECT response; re-pin `test-vectors/webtransport-stream.json`, which now has eight records, names the check behind every refusal, and flags the entries that hold only at its assumed receiver limit or only for a receiver that reads on after a close.
+- **Changed: the WebTransport reliable stream carries empty messages and close codes, and truncates a recovery it cannot carry whole.** Section 15 of PROTOCOL.md carries an empty message as a zero-length record and a close as a close record (`kind` `0x02`), and places a recovery's truncation where a client can re-snapshot at once.
+  - **Affects:** Authors of a runtime or client that implements the section 15 reliable-stream binding, and of a client that reads section 8.1's replay events. The JavaScript adapter and its client do not implement the binding and behave exactly as before.
+  - **Action:** Accept a zero-length record; wherever a WebSocket would send a close frame, other than for an error in the frames themselves, write a close record with the same payload and then FIN, and refuse any byte after one; reset with `RECORD_TOO_LARGE` instead of sending a message larger than you may emit, except for a `msg` on `__replay:{topic}`, a sequenced frame for a topic with an open recovery window, and a live relayed `game` event outside such a window for its room, which is not delivered; never form a `batch` record over that bound; on `__replay:{topic}`, write neither the over-bound `msg` nor any later one of that recovery and end it with `end` carrying `truncated:true`, except that a resume's own gap-fill there that has written no `end` by its own request's answer gets the standalone `truncated` just before that answer and no `end` after it; while a recovery window for a topic is open, withhold every sequenced frame for it from the first over-bound one, live frames included, until no window for it remains open, admitting the complete run of standalone `truncated` events and its answer to the send queue and closing the answered windows as one step with respect to frame handling, before transport transmission, and resetting instead if the hold exceeds its bound; open such a window for every request that asks to recover a topic and that you answer with `subscribed`, `subscribe-denied` or `resumed`, whether or not you can recover the topic, while a malformed `recover` or a `resume` frame you do not act on opens none; as a stream client, drop the topic's offset and surface the truncation on a standalone `truncated` or an `end` carrying `truncated:true`, and after a `RECORD_TOO_LARGE` reset, whichever side reset the lane, drop the offset of every topic whose `recover` subscribe or `resume` frame you had not seen answered and surface a truncation for each, and never take a topic's offset from `__replay:{topic}` events; any client that reads section 8.1's events should accept a standalone `truncated` with no `end` after it, including one after a terminal `end`, `denied` or `rehydrate` but before the core answer, and treat an `end` that carries `truncated:true`, a `replay` request's own included, as it treats that event; open the stream only after the CONNECT response; re-pin `test-vectors/webtransport-stream.json`, which now has eight records, names the check behind every refusal, flags the entries that hold only at its assumed receiver limit or only for a receiver that reads on after a close, and lists recovery transcripts in `recoveryTruncation`.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Section 15 stays provisional until its wire-status line reads frozen, so the change lands inside revision 1. A zero-length record that used to be a `PROTOCOL_ERROR` is now an empty message, `kind` `0x02` is now a close record, a well-formed record whose inner message is malformed no longer resets the lane and is dropped, denied or passed through as on WebSocket, and bytes the stack holds unsent now count against the pending bound. An endpoint may also cap its pending records at no fewer than 65,536, a server must bound bytes sent but not yet acknowledged at no less than 1 MiB, a receiver limit is never below 125 bytes, a server may refuse a stream that arrived before it sent its successful response, and `NO_ERROR` (`0x00`) joins the stream errors.
+  - **Compatibility:** Section 15 stays provisional until its wire-status line reads frozen, so the change lands inside revision 1. A zero-length record that used to be a `PROTOCOL_ERROR` is now an empty message, `kind` `0x02` is now a close record, a well-formed record whose inner message is malformed no longer resets the lane and is dropped, denied or passed through as on WebSocket, and bytes the stack holds unsent now count against the pending bound. An endpoint may also cap its pending records at no fewer than 65,536, a server must bound bytes sent but not yet acknowledged at no less than 1 MiB, a receiver limit is never below 125 bytes, a server may refuse a stream that arrived before it sent its successful response, and `NO_ERROR` (`0x00`) joins the stream errors. A withheld `0x03` record counts as dropped for sections 6.4 and 6.7, so a stateful capability degrades to JSON and a `game.fanout:1` topic falls back to its JSON envelope. Section 8.1 now also says a standalone `truncated` can arrive with no `end` after it, ahead of a topic's resume answer, as the reference server already sends it when a resume cannot deliver everything a topic is owed.
   - **Detail:** [Changed engineering detail](#changed).
 - **Changed: the package no longer carries its roadmap, claim register or decision records.** `ROADMAP.md`, `docs/claim-register.md`, `docs/decisions/`, `docs/desync-coverage.md` and the release pages of earlier prereleases leave the repository and the npm package, so a link that follows the newest version or the dev branch to one of them ends at a missing file.
   - **Affects:** Readers, sites and tools that link to those files in the package or the repository.
@@ -286,11 +286,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A sender holding a message larger than it may emit resets the lane with
     `RECORD_TOO_LARGE` (`senderOverBoundError`) instead of emitting,
     dropping or splitting it. Recovery never replays such a message and never
-    gap-fills past it: it answers with section 8.1's truncation at or before
-    it, so the client re-snapshots. A relayed `game` event whose fan-out is
-    too large for the lane is not delivered to that subscriber, as the
-    datagram carriage already treats an over-size event, and the room `seq`
-    shows the gap.
+    gap-fills past it: it answers with section 8.1's truncation, placed as
+    "Section 15 places a recovery's truncation" and "Section 15 truncates a
+    gap-fill of ordinary frames by its recovery window" describe, so the
+    client re-snapshots. Outside a recovery window for its room, a relayed
+    `game` event whose fan-out is too large for the lane is not delivered to
+    that subscriber, as the datagram carriage already treats an over-size
+    event, and the room `seq` shows the gap.
   - A byte stays pending until the transport has sent it, acknowledged or
     not; an endpoint whose stack does not show that counts until the write
     settles, and one whose stack reports only acknowledgement keeps one
@@ -306,6 +308,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     only after the successful response. A server that can tell a stream
     arrived earlier may refuse it with `STREAM_LIMIT`, and the session then
     has no lane.
+
+- **Section 15 places a recovery's truncation.** PROTOCOL.md 15.1, 15.6 and
+  C.6, `protocol.schema.json`, `test-vectors/webtransport-stream.json`:
+  - On `__replay:{topic}` neither the over-bound `msg` nor any later `msg` of
+    that recovery is written, and its `end` carries `truncated:true`; a cut
+    `replay` request always ends that way. If a resume's own gap-fill there,
+    with or without a `reqId`, has written no `end` by its request's answer,
+    the standalone `truncated` goes just before that answer and no `end`
+    follows.
+  - A server never forms a `batch` record over the bound (an event larger than
+    the sender may emit goes out as a bare data-event in its place), and an
+    undelivered `game.fanout:1` record is dropped for 6.7. 15.6 now says the
+    binding leaves out a message only where 15.1 withholds it, cuts it from a
+    `__replay:` recovery, drops the `end` of a cut gap-fill whose standalone
+    `truncated` came first, or does not deliver it.
+
+- **Section 15 truncates a gap-fill of ordinary frames by its recovery
+  window.** PROTOCOL.md 15.1, 15.3 and 15.5: a window belongs to one request
+  that asks to recover the topic. It opens when the server takes the request
+  up, before it awaits any authorization or resume hook, for every such
+  request it answers with `subscribed`, `subscribe-denied` or `resumed`,
+  whether or not it can recover the topic. A refused or silent request, a
+  malformed `recover`, or a `resume` frame the server does not act on opens
+  none. It closes only with that request's answer, which the server must
+  give unless the lane ends first. From the first over-bound sequenced
+  frame while a window is open, live and relayed `game` frames included,
+  every sequenced frame for the topic is withheld until no window remains:
+  `batch` records go out without them, a withheld `0x03` record counts as
+  dropped for 6.4 and 6.7, and `wire-id` frames are never withheld. Every
+  answer that closes a window during the hold gets one standalone
+  `truncated` for each held topic whose window it closes, in an unbroken
+  run immediately before it (any order for several topics, after any
+  `wire-id` queued before the run).
+  Each answer's gap-fill still precedes it, as section 11 promises. The
+  server admits the complete event run and answer to its send queue and
+  closes the answered windows as one step with respect to frame handling,
+  before transport transmission; no frame is handled between the run and
+  closure. A window still open a bounded time after the later of the hold's
+  start and its own opening resets the lane; the bound should be no shorter
+  than a request's hooks may take together. The hold never covers an
+  unsequenced frame (an over-bound one resets the lane), and a gap-fill
+  frame with no window open resets on an over-bound message.
+
+- **Section 15 says what a stream client does with a truncation.** PROTOCOL.md
+  15.7, 8 and 8.1: a client that recovers topics drops a topic's offset and
+  surfaces the truncation on a standalone `truncated` or on an `end`
+  carrying `truncated:true`, even without a section 8 plugin. After a
+  `RECORD_TOO_LARGE` reset, whichever side reset the lane, it drops the
+  offset of every topic whose `recover` subscribe or `resume` frame it had
+  not seen answered and surfaces a truncation for each, so the next session
+  re-snapshots those topics rather than replaying that recovery. A lower
+  client receiver limit can first reset live delivery, then reset recovery
+  on the next session; the second reset drops the unanswered recovery
+  offset. A topic counts as answered only once the client has read an
+  answer for every time a subscribe carrying a `ref`
+  named it, since a `ref` can be reused; a `replay` request does not count,
+  and a refused request stays unanswered. It takes a topic's offset only
+  from frames a reliable lane or a WebSocket carries, never from `__replay:`
+  events or datagrams. 8.1's client action names both forms of `truncated`,
+  a `replay` request's own `end` included, says a standalone `truncated` can
+  arrive with no `end`, and shows that a reqId-less `end` can be `null`.
+  A terminal `end`, `denied` or `rehydrate` ends only that recovery's
+  `msg` stream; a client still processes a later standalone `truncated`
+  before the core answer. Section 8 says a client that recovers sees
+  `__replay:` events whether or not it uses a plugin.
+
+- **The section 15 vectors carry recovery transcripts.**
+  `recoveryTruncation` in `test-vectors/webtransport-stream.json` holds 46
+  transcripts. Each pairs the client's requests, with the topics each opens a
+  recovery window for, with what the server would write and what it does
+  write; each answer names the request it answers, a `__replay:` event of a
+  resume's own gap-fill names that request, with or without a `reqId` (the
+  standalone events the rule adds name none), and a `0x03` record of a
+  degrading capability carries, unless over-bound, the data-event it stands
+  for. They cover every kind of window, an epoch that does not match,
+  overlapping and successive windows, answers to other requests and resume
+  frames answered out of order, refused and non-recovering requests, `batch`
+  and `0x03` records, stateful and per-room `game.fanout:1` degradation, a
+  `wire-id` inside a hold, unsequenced frames, resume gap-fills on `__replay:`
+  cut with and without an `end` and with and without a `reqId`, two of them
+  cut at once, a cut answered during a hold, one answer closing windows for
+  two topics, a replay cut inside another request's window, a replay running
+  beside a hold, relayed `game` events inside and outside a window, a hold
+  that outlasts its bound, a bound that runs out with no hold on, a message
+  exactly at the bound, and the lane resets for over-bound frames neither
+  exception covers.
+
+- **The section 15 recovery transcripts are checked against a model of the
+  rule.** `test/protocol-schema.test.js` checks them against its own model,
+  with one coverage check per case and a check that each transcript is one
+  consistent history: no seq missing for a topic, each topic's seq rising, and
+  each recovery's first frame continuing from its offset. It also pins every
+  sentence of the two 15.1 bullets the rule lives in.
+  `test/client-real.test.js` feeds two cases' written frames to the bundled
+  client. The first case makes it stop presenting the offset from before
+  the hole; leaving the event out keeps that offset. The case with an epoch
+  mismatch makes it resume from live frames under the epoch the ack reports.
 
 - **The request target is checked on every route.** `invalidRequestTarget`
   (utils/request-target.js) refuses a path or query carrying a byte outside

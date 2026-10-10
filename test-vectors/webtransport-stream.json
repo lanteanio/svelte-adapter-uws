@@ -1,5 +1,5 @@
 {
-  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length, one kind byte restating the WebSocket text, binary, or close opcode, plus the unchanged WebSocket message bytes. Records four and five are the ambiguous pair: identical valid-UTF-8 JSON bytes carried once as a text data-event and once as an opaque binary application payload (section 1.4), so a decoder that ignores kind provably cannot tell them apart. Record six is an empty text message, whose zero length is a complete prefix the kind byte still follows. Records seven and eight are a draining server's reconnect advisory and its close record, the last record that direction carries before FIN. fragmentLengths deliberately split the first record's prefix, kind, and body across separate reads, place a read boundary one byte before the first record ends, coalesce later records, end one read on the empty record's prefix and the next exactly where that record ends, and split the close code across two reads; a decoder delivers each record in the read that completes it. validRecords are single-record streams ending in FIN for edges the transcript cannot hold. Each invalidPrefixes and invalidRecords entry names the check that refuses it, and checks says what each check means; each invalidRecords entry is a complete stream ending in FIN. Entries marked dependsOnReceiverLimit can have a different verdict at some other receiver limit, and every unmarked entry holds at every limit of 125 bytes or more; entries marked assumesReceiverReadsOn hold for a receiver that reads on after a close record. reportsCode is the close code a receiver of that stream reports: the first close record it read (1005 for an empty one), or 1006 when the only close record is refused as malformed.",
+  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length, one kind byte restating the WebSocket text, binary, or close opcode, plus the unchanged WebSocket message bytes. Records four and five are the ambiguous pair: identical valid-UTF-8 JSON bytes carried once as a text data-event and once as an opaque binary application payload (section 1.4), so a decoder that ignores kind provably cannot tell them apart. Record six is an empty text message, whose zero length is a complete prefix the kind byte still follows. Records seven and eight are a draining server's reconnect advisory and its close record, the last record that direction carries before FIN. fragmentLengths deliberately split the first record's prefix, kind, and body across separate reads, place a read boundary one byte before the first record ends, coalesce later records, end one read on the empty record's prefix and the next exactly where that record ends, and split the close code across two reads; a decoder delivers each record in the read that completes it. validRecords are single-record streams ending in FIN for edges the transcript cannot hold. Each invalidPrefixes and invalidRecords entry names the check that refuses it, and checks says what each check means; each invalidRecords entry is a complete stream ending in FIN. Entries marked dependsOnReceiverLimit can have a different verdict at some other receiver limit, and every unmarked entry holds at every limit of 125 bytes or more; entries marked assumesReceiverReadsOn hold for a receiver that reads on after a close record. reportsCode is the close code a receiver of that stream reports: the first close record it read (1005 for an empty one), or 1006 when the only close record is refused as malformed. recoveryTruncation holds section 15.1's placement of a recovery's truncation. Each transcript starts on an established session and interleaves the client's requests, each with the topics it opens a recovery window for (recovers; empty for a request that opens none, a replay request included), with the messages the server would write if no message were too large to send; an answer carries answers, the index of the request it answers, a transcript's __replay:{topic} event that belongs to a resume's own gap-fill carries fills, the index of that request, with or without a reqId (every __replay event without a reqId belongs to such a gap-fill and carries one; the standalone truncated events the rule adds carry none), relayedGame marks a live relayed game event (section 3.10), and holdExpires marks a point by which, if a hold for that topic is on, an open window for it has outlasted the server's bound. written is what the server writes, and thenResets is the error it resets the lane with after that; standalone truncated events that go before the same answer may come in any order, and written lists them by topic. Entries describe messages, not bytes: a text message is its decoded frame, a binary one its hex, and an entry with a length is a message of that many bytes shown without the event data that makes it so (or by its first bytes, headHex); overBound marks one larger than a sender may emit. A 0x03 record with a capability belongs to the one stateful capability every record tagged stateful shares (section 6.4) or to game.fanout:1 (section 6.7) and, unless overBound, carries json, the data-event it stands for, which the server writes in its place once that capability has degraded or that room has fallen back to JSON; a wire-id with a capability binds such records, and once the stateful capability has degraded the server allocates no binding. Every other 0x03 record belongs to a capability that is neither, so withholding one degrades nothing.",
   "assumedReceiverMessageBytes": 1048576,
   "connectQuery": "lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1",
   "decodedConnectCapabilities": [
@@ -410,6 +410,853 @@
       "check": "over-limit",
       "dependsOnReceiverLimit": true,
       "reportsCode": 1006
+    }
+  ],
+  "recoveryTruncation": [
+    {
+      "reason": "resume-on-subscribe gap-fill as ordinary frames with two over-bound messages: from the first, no sequenced frame for room:1 is written until the ack, the live frame included; the truncated event goes just before the ack; lobby and an unsequenced room:1 frame are written as usual; room:1 is live again after the ack",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":1,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"lobby","event":"say","data":{"n":40},"seq":40}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"room:1","event":"note","data":{"n":1}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":5},"overBound":true},
+        {"kind":"text","frame":{"topic":"lobby","event":"say","data":{"n":41},"seq":41}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":1,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":7},"seq":7}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"lobby","event":"say","data":{"n":40},"seq":40}},
+        {"kind":"text","frame":{"topic":"room:1","event":"note","data":{"n":1}}},
+        {"kind":"text","frame":{"topic":"lobby","event":"say","data":{"n":41},"seq":41}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":1,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":7},"seq":7}}
+      ]
+    },
+    {
+      "reason": "subscribe-batch recovers two topics, each in its own window: room:2 flows while room:1 is withheld, and room:1's ack closes only room:1's window, so room:2's over-bound message after it is still withheld and truncated just before room:2's own ack; a hold bound that runs out for room:2 before room:2 has a hold does nothing",
+      "transcript": [
+        {"client":{"type":"subscribe-batch","topics":["room:1","room:2"],"ref":2,"recover":{"room:1":{"offset":1,"epoch":7},"room:2":{"offset":10,"epoch":7}}},"recovers":["room:1","room:2"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"holdExpires":"room:2"},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":12},"seq":12}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":2,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:2","event":"put","seq":13},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":14},"seq":14}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":2,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":12},"seq":12}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":2,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":2,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "a whole-session resume frame recovers room:1: a batch record before its over-bound message goes out whole; after it, room:1's sequenced events leave every batch record, an unsequenced one stays, a batch that held only withheld events is not written, and the truncated event goes just before resumed",
+      "transcript": [
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:1":1},"lastSeenEpochs":{"room:1":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"batch","events":[{"topic":"room:1","event":"put","data":{"n":3},"seq":3},{"topic":"lobby","event":"say","data":{"n":40},"seq":40}]}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":4},"overBound":true},
+        {"kind":"text","frame":{"type":"batch","events":[{"topic":"room:1","event":"put","data":{"n":5},"seq":5},{"topic":"lobby","event":"say","data":{"n":41},"seq":41},{"topic":"room:1","event":"note","data":{"n":2}}]}},
+        {"kind":"text","frame":{"type":"batch","events":[{"topic":"room:1","event":"put","data":{"n":6},"seq":6}]}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"batch","events":[{"topic":"room:1","event":"put","data":{"n":3},"seq":3},{"topic":"lobby","event":"say","data":{"n":40},"seq":40}]}},
+        {"kind":"text","frame":{"type":"batch","events":[{"topic":"lobby","event":"say","data":{"n":41},"seq":41},{"topic":"room:1","event":"note","data":{"n":2}}]}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0}
+      ]
+    },
+    {
+      "reason": "binary gap-fill for a stateless capability: 0x03 records bound to room:1 by its wire-id are withheld like data-events, a single-target 0x03 record (seq 0) is written as usual, and room:1 binary frames flow again after the ack",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":3,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"binary","hex":"0301ac0202aa"},
+        {"kind":"binary","length":1048577,"headHex":"0301ac0203","overBound":true},
+        {"kind":"binary","hex":"0301ac0204aa"},
+        {"kind":"binary","hex":"0301ac0200bb"},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":3,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0205aa"}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"binary","hex":"0301ac0202aa"},
+        {"kind":"binary","hex":"0301ac0200bb"},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":3,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0205aa"}
+      ]
+    },
+    {
+      "reason": "an over-bound data-event starts the hold, and room:1's first 0x03 record arrives inside the window with its wire-id: the wire-id is written and the 0x03 record is not, so the 0x03 record after the ack that uses the id can be decoded",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":4,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"binary","hex":"0301ac0204aa"},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":4,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0205aa"}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":4,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0205aa"}
+      ]
+    },
+    {
+      "reason": "with room:1 already live on this session, a window answered with subscribe-denied: the truncated event still goes just before that answer",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":5,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribe-denied","topic":"room:1","ref":5,"reason":"FORBIDDEN"},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribe-denied","topic":"room:1","ref":5,"reason":"FORBIDDEN"},"answers":0}
+      ]
+    },
+    {
+      "reason": "a replay request on __replay:room:1 is truncated at the message: neither it nor any later msg of that recovery is written, its end carries truncated:true, and a live room:1 frame is written, since a cut on __replay:room:1 never withholds an ordinary frame",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":3,"event":"put"}},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1","truncated":true}}}
+      ]
+    },
+    {
+      "reason": "two replay requests for room:1 at once, r2 from after the over-bound message: the cut belongs only to r1, so r2 is delivered whole and only r1 ends truncated",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"client":{"type":"replay","topic":"room:1","since":3,"reqId":"r2"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":3,"event":"put"}},"overBound":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r2","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r2"}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r2","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r2"}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1","truncated":true}}}
+      ]
+    },
+    {
+      "reason": "two replay requests for different topics that carry the same reqId: the over-bound message cuts only room:1, so room:2 is delivered whole",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"client":{"type":"replay","topic":"room:2","since":1,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put"}},"overBound":true},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":3,"event":"put","data":{"n":3}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"end","data":{"reqId":"r1"}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"end","data":{"reqId":"r1"}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1","truncated":true}}}
+      ]
+    },
+    {
+      "reason": "a resume-on-subscribe whose gap-fill uses __replay:room:1 keeps that channel's rule inside the window: the over-bound msg and the later ones are not written, the end carries truncated:true, and the live room:1 frame before the ack is written",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":6,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":4,"event":"put","data":{"n":4}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":null},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":6,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"truncated":true}},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":6,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "a second recovery window for room:1 opens while the hold is on, its own gap-fill on __replay:room:1 cut and ended: the first answer closes only its own window, so the hold runs on, and each answer that closes a window during the hold gets a truncated event just before it",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":10,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"client":{"type":"subscribe","topic":"room:1","ref":11,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":3},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":3},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":null},"fills":3},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":10,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":11,"epoch":7},"answers":3},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":3},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"truncated":true}},"fills":3},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":10,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":11,"epoch":7},"answers":3},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ]
+    },
+    {
+      "reason": "a subscribe's own gap-fill on __replay:room:1 is cut while a second subscribe's ordinary gap-fill starts a hold: the first answer gets the event, as every answer that closes a window during a hold does, the cut gap-fill's end after it is not written, and the hold runs on to the second answer",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":55,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"client":{"type":"subscribe","topic":"room:1","ref":56,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":55,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":null},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":56,"epoch":7},"answers":3},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":55,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":56,"epoch":7},"answers":3},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ]
+    },
+    {
+      "reason": "a whole-session resume frame recovers room:1 and room:2: room:1's ordinary gap-fill starts a hold and room:2's gap-fill on __replay:room:2 is cut with no end, so the one resumed gets a truncated event for each topic just before it, in either order",
+      "transcript": [
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:1":1,"room:2":10},"lastSeenEpochs":{"room:1":7,"room:2":7}},"recovers":["room:1","room:2"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"msg","data":{"seq":11,"event":"put","data":{"n":11}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:2","event":"msg","data":{"seq":12,"event":"put"}},"overBound":true,"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":13},"seq":13}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"msg","data":{"seq":11,"event":"put","data":{"n":11}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":13},"seq":13}}
+      ]
+    },
+    {
+      "reason": "the hold ends with the last window, so a later recovery window for room:1, from an offset the client took from a live frame after the truncation, starts fresh: its gap-fill is written and its answer gets no truncated event",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":30,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":30,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"client":{"type":"subscribe","topic":"room:1","ref":31,"recover":{"offset":4,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":31,"epoch":7},"answers":5}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":30,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":31,"epoch":7},"answers":5}
+      ]
+    },
+    {
+      "reason": "an answer to another request for room:1 does not close the recovery window: the client resubscribes without recover while the recovery is still running, the server answers that plain subscribe, and room:1 stays withheld until the recovery is answered",
+      "transcript": [
+        {"client":{"type":"subscribe-batch","topics":["room:1"],"ref":12,"recover":{"room:1":{"offset":1,"epoch":7}}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"client":{"type":"unsubscribe","topic":"room:1"},"recovers":[]},
+        {"client":{"type":"subscribe","topic":"room:1","ref":13},"recovers":[]},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":13,"epoch":7},"answers":3},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":12,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":13,"epoch":7},"answers":3},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":12,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ]
+    },
+    {
+      "reason": "a resume frame recovering room:2 is answered while a subscribe's window for room:1 is still open: resumed closes only the resume frame's window, so room:1 stays withheld until its own answer",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":20,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:2":10}},"recovers":["room:2"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"resumed"},"answers":1},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":20,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":1},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":20,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "a resume frame followed by a plain subscribe of the same topic, answered first: that answer does not close the resume window, so room:1 stays withheld and the truncated event goes just before resumed",
+      "transcript": [
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:1":1},"lastSeenEpochs":{"room:1":7}},"recovers":["room:1"]},
+        {"client":{"type":"subscribe","topic":"room:1","ref":21},"recovers":[]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":21,"epoch":7},"answers":1},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":21,"epoch":7},"answers":1},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ]
+    },
+    {
+      "reason": "two resume frames answered out of order: the frame that recovers room:1 and room:2 arrives first, but the one that recovers only room:3 is answered first, so room:2 stays withheld until the frame that recovers it is answered",
+      "transcript": [
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:1":1,"room:2":10}},"recovers":["room:1","room:2"]},
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:3":1}},"recovers":["room:3"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:2","event":"put","seq":11},"overBound":true},
+        {"kind":"text","frame":{"type":"resumed"},"answers":1},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":12},"seq":12}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":3},"seq":3}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":1},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":3},"seq":3}},
+        {"kind":"text","frame":{"topic":"__replay:room:2","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":0}
+      ]
+    },
+    {
+      "reason": "a replay request for room:1 from after the over-bound message runs beside a subscribe window whose ordinary-frame gap-fill starts the hold: the replay messages and their plain end are written, the gap-fill past the over-bound message is withheld, and the truncated event goes just before the ack",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":50,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"client":{"type":"replay","topic":"room:1","since":3,"reqId":"r9"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r9","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r9","seq":5,"event":"put","data":{"n":5}}}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r9"}}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":50,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r9","seq":4,"event":"put","data":{"n":4}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r9","seq":5,"event":"put","data":{"n":5}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r9"}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":50,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}}
+      ]
+    },
+    {
+      "reason": "a replay request for room:1 is cut inside a subscribe window that recovers room:1 from past the over-bound message, and the window is answered before the replay ends: a replay request is not the window's gap-fill, so no standalone event goes before the answer and its end carries truncated:true",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":52,"recover":{"offset":3,"epoch":7}},"recovers":["room:1"]},
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r7"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r7","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r7","seq":3,"event":"put"}},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":52,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r7"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r7","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":52,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r7","truncated":true}}}
+      ]
+    },
+    {
+      "reason": "a resume's own gap-fill on __replay:room:1 is cut and has written no end when its request is answered: the standalone truncated event goes immediately before the answer, and the end the gap-fill writes after the answer is not written",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":51,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":4,"event":"put","data":{"n":4}}},"fills":0},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":51,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":null},"fills":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":51,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "a resume's own gap-fill on __replay:room:1 carries a reqId and is cut, and a live room:1 frame arrives before the answer: the standalone truncated event still goes immediately before the answer, so a client that took its offset from the live frame drops it there, and the gap-fill's later end is not written",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":57,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"g","seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"g","seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"g","seq":4,"event":"put","data":{"n":4}}},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":57,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"g"}},"fills":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"g","seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":57,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "two requests recover room:1 over __replay:room:1, the second taken up after the first one's gap-fill was cut, and neither gap-fill writes an end: each cut is signalled immediately before its own request's answer, so the subscribe answered first and the resume frame answered after it each get a standalone truncated event",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":53,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"client":{"type":"resume","sessionId":"00000000-0000-4000-8000-000000000001","lastSeenSeqs":{"room:1":1},"lastSeenEpochs":{"room:1":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":3},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":3},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":53,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"type":"resumed"},"answers":3}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":3},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":53,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"resumed"},"answers":3}
+      ]
+    },
+    {
+      "reason": "an over-bound live room:1 frame starts the hold while the subscribe's own gap-fill on __replay:room:1 is cut and writes no end: the answer closes the last window and is the cut gap-fill's own, so one standalone truncated event serves both",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":54,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":3,"event":"put"}},"overBound":true,"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":4,"event":"put","data":{"n":4}}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":5},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":6},"seq":6}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":54,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":7},"seq":7}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"seq":2,"event":"put","data":{"n":2}}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":54,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":7},"seq":7}}
+      ]
+    },
+    {
+      "reason": "an epoch that does not match still opens a window: the server answers with rehydrate, an over-bound live room:1 frame in the new epoch starts the hold before the ack, and the truncated event goes just before the ack",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":66,"recover":{"offset":1,"epoch":6}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"rehydrate","data":{"epoch":7}},"fills":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":1},"overBound":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":66,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"rehydrate","data":{"epoch":7}},"fills":0},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":66,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ]
+    },
+    {
+      "reason": "a later replay request that reuses the reqId of a truncated one is a new recovery: its messages are written and its end is plain",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","length":1048577,"frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put"}},"overBound":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}},
+        {"client":{"type":"replay","topic":"room:1","since":2,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":3,"event":"put","data":{"n":3}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1","truncated":true}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":3,"event":"put","data":{"n":3}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ]
+    },
+    {
+      "reason": "an over-bound relayed game event while no recovery window for its room is open is not delivered and does not reset the lane; the room seq shows the gap",
+      "transcript": [
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"move","seq":6},"overBound":true,"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true}
+      ]
+    },
+    {
+      "reason": "an over-bound relayed game event for room:1 while only room:2 has a recovery window open is not delivered and does not reset the lane",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:2","ref":42,"recover":{"offset":10,"epoch":7}},"recovers":["room:2"]},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"move","seq":6},"overBound":true,"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":42,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":11},"seq":11}},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":42,"epoch":7},"answers":0}
+      ]
+    },
+    {
+      "reason": "an over-bound relayed game event inside a recovery window for its room starts the hold like any other frame for the room",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":40,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"move","seq":3},"overBound":true,"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":4},"seq":4},"relayedGame":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":40,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":40,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true}
+      ]
+    },
+    {
+      "reason": "a replay request opens no window, so an over-bound relayed game event for its room during the replay is not delivered, while the replay itself is written whole",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"move","seq":3},"overBound":true,"relayedGame":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ]
+    },
+    {
+      "reason": "a replay request opens no window, so an over-bound live frame for its room that is not a relayed game event resets the lane",
+      "transcript": [
+        {"client":{"type":"replay","topic":"room:1","since":1,"reqId":"r1"},"recovers":[]},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"end","data":{"reqId":"r1"}}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"msg","data":{"reqId":"r1","seq":2,"event":"put","data":{"n":2}}}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "an over-bound unsequenced frame for room:1 inside its window, before any hold, is not a frame the hold covers, so it resets the lane",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":41,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"note"},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":3},"seq":3}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":41,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "an over-bound unsequenced frame for room:1 that arrives while its hold is on is not covered by the hold either, so it resets the lane",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":67,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"note"},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":67,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "a stateful capability: the withheld 0x03 record degrades the capability to JSON for the rest of the connection, so room:1 and room:2 records after the ack go out as their JSON data-events",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":60,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300},"capability":"stateful"},
+        {"kind":"binary","hex":"0301ac0202aa","capability":"stateful","json":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"binary","length":1048577,"headHex":"0301ac0203","overBound":true,"capability":"stateful"},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":60,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0204aa","capability":"stateful","json":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:2","id":301},"capability":"stateful"},
+        {"kind":"binary","hex":"0301ad0207aa","capability":"stateful","json":{"topic":"room:2","event":"put","data":{"n":7},"seq":7}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300},"capability":"stateful"},
+        {"kind":"binary","hex":"0301ac0202aa","capability":"stateful","json":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":60,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"topic":"room:2","event":"put","data":{"n":7},"seq":7}}
+      ]
+    },
+    {
+      "reason": "a game.fanout:1 record the game exception leaves undelivered poisons its room, so the next record for that room goes out as its JSON envelope, while another room keeps its records binary",
+      "transcript": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301ae0205060205046d6f76650701016e030a","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true},
+        {"kind":"binary","length":1048577,"headHex":"0301ae0206","overBound":true,"capability":"game.fanout:1","relayedGame":true},
+        {"kind":"binary","hex":"0301ae0207060205046d6f76650701016e030e","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true},
+        {"kind":"binary","hex":"0301ae0208060205046d6f76650701016e0310","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":8},"seq":8},"relayedGame":true},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:2","id":303},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301af0209060205046d6f76650701016e0312","capability":"game.fanout:1","json":{"topic":"room:2","event":"move","data":{"n":9},"seq":9},"relayedGame":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301ae0205060205046d6f76650701016e030a","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":7},"seq":7},"relayedGame":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":8},"seq":8},"relayedGame":true},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:2","id":303},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301af0209060205046d6f76650701016e0312","capability":"game.fanout:1","json":{"topic":"room:2","event":"move","data":{"n":9},"seq":9},"relayedGame":true}
+      ]
+    },
+    {
+      "reason": "an over-bound data-event starts the hold and a game.fanout:1 record for the same room is withheld in it, which sends the room back to JSON, so its next record after the ack goes out as its JSON envelope",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":63,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301ae0204060205046d6f76650701016e0308","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":4},"seq":4},"relayedGame":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":63,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ae0205060205046d6f76650701016e030a","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":63,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":5},"seq":5},"relayedGame":true}
+      ]
+    },
+    {
+      "reason": "an over-bound data-event starts the hold and a stateful 0x03 record for the same topic is withheld in it, which degrades the capability, so the next stateful record after the ack goes out as its JSON data-event",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":64,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300},"capability":"stateful"},
+        {"kind":"binary","hex":"0301ac0204aa","capability":"stateful","json":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":64,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ac0205aa","capability":"stateful","json":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300},"capability":"stateful"},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":64,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ]
+    },
+    {
+      "reason": "an over-bound game.fanout:1 record inside its room's window starts the hold and sends the room back to JSON, so the next record for the room after the ack goes out as its JSON envelope",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":65,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301ae0202060205046d6f76650701016e0304","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":2},"seq":2},"relayedGame":true},
+        {"kind":"binary","length":1048577,"headHex":"0301ae0203","overBound":true,"capability":"game.fanout:1","relayedGame":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":65,"epoch":7},"answers":0},
+        {"kind":"binary","hex":"0301ae0204060205046d6f76650701016e0308","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":4},"seq":4},"relayedGame":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":302},"capability":"game.fanout:1"},
+        {"kind":"binary","hex":"0301ae0202060205046d6f76650701016e0304","capability":"game.fanout:1","json":{"topic":"room:1","event":"move","data":{"n":2},"seq":2},"relayedGame":true},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":65,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"move","data":{"n":4},"seq":4},"relayedGame":true}
+      ]
+    },
+    {
+      "reason": "an over-bound single-target 0x03 record (seq 0) inside a window is unsequenced, so the hold does not cover it and it resets the lane",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":61,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"binary","hex":"0301ac0202aa"},
+        {"kind":"binary","length":1048577,"headHex":"0301ac0200","overBound":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":61,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"wire-id","topic":"room:1","id":300}},
+        {"kind":"binary","hex":"0301ac0202aa"}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "the hold outlasts its bound before its window is answered, so the server resets the lane rather than withhold room:1 any longer",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":62,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"holdExpires":"room:1"},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":62,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "with room:1 already live on this session, a ref-less recover that the server refuses opens no window, so a later over-bound live frame for room:1 resets the lane",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","recover":{"offset":1,"epoch":7}},"recovers":[]},
+        {"kind":"text","frame":{"type":"error","code":"RECOVER_REQUIRES_REF","topic":"room:1"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":6},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":7},"seq":7}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"error","code":"RECOVER_REQUIRES_REF","topic":"room:1"},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "with room:1 already live on this session, a recover map that names room:1 while topics leaves it out recovers nothing for room:1 and opens no window, so its over-bound live frame resets the lane",
+      "transcript": [
+        {"client":{"type":"subscribe-batch","topics":["room:2"],"ref":14,"recover":{"room:1":{"offset":1,"epoch":7}}},"recovers":[]},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":14,"epoch":7},"answers":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":6},"overBound":true}
+      ],
+      "written": [
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:2","ref":14,"epoch":7},"answers":0}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "a topic in the same subscribe-batch that carries no recover has no recovery window, so its over-bound message resets the lane while room:1 has nothing to truncate",
+      "transcript": [
+        {"client":{"type":"subscribe-batch","topics":["room:1","room:3"],"ref":9,"recover":{"room:1":{"offset":1,"epoch":7}}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:3","event":"put","seq":1},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":3},"seq":3}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":9,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:3","ref":9,"epoch":7},"answers":0}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "a gap-fill with no over-bound message, one of its messages exactly at the bound, is written unchanged, and a hold bound running out with no hold on does nothing",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":7,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048576,"frame":{"topic":"room:1","event":"put","seq":3}},
+        {"holdExpires":"room:1"},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":7,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048576,"frame":{"topic":"room:1","event":"put","seq":3}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":7,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}}
+      ]
+    },
+    {
+      "reason": "an over-bound message after the answer is outside every recovery window, so the sender resets the lane rather than truncating",
+      "transcript": [
+        {"client":{"type":"subscribe","topic":"room:1","ref":8,"recover":{"offset":1,"epoch":7}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":8,"epoch":7},"answers":0},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":8,"epoch":7},"answers":0}
+      ],
+      "thenResets": "RECORD_TOO_LARGE"
+    },
+    {
+      "reason": "duplicate entries for one topic open one recovery window, whose first ack ends the hold before a live frame and the second ack",
+      "transcript": [
+        {"client":{"type":"subscribe-batch","topics":["room:1","room:1"],"ref":91,"recover":{"room:1":{"offset":1,"epoch":7}}},"recovers":["room:1"]},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","length":1048577,"frame":{"topic":"room:1","event":"put","seq":3},"overBound":true},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":91,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":91,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ],
+      "written": [
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":2},"seq":2}},
+        {"kind":"text","frame":{"topic":"__replay:room:1","event":"truncated","data":null}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":91,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":4},"seq":4}},
+        {"kind":"text","frame":{"type":"subscribed","topic":"room:1","ref":91,"epoch":7},"answers":0},
+        {"kind":"text","frame":{"topic":"room:1","event":"put","data":{"n":5},"seq":5}}
+      ]
     }
   ],
   "checks": {

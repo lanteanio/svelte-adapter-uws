@@ -256,19 +256,22 @@ advertising a token the server does not know is harmless.
   is performed but NOT acked - the server sends no `subscribed` and no
   `subscribe-denied`. An emitted ack therefore always carries a number or string
   `ref`, never `null`. One exception, and it is not an ack: a `subscribe`
-  carrying `recover` against a server with a resume hook is REFUSED rather than
-  performed silently, with `{"type":"error","code":"RECOVER_REQUIRES_REF"}`
-  (section 3.7). Silent mode trades away hearing the outcome; it cannot trade
-  away history the client asked to be sent, because a client that never learns
-  the gap-fill did not happen resumes over a hole in its own stream.
-- `subscribe-batch` caps at **256 topics per frame** and emits one
-  `subscribed` / `subscribe-denied` ack per topic, all sharing the one `ref`.
-  Topics past the cap are NOT subscribed and are each answered
-  `subscribe-denied` with reason `BATCH_OVERFLOW` (under the silent-mode rule
-  above: a ref-less batch stays silent) - never dropped without a signal. A
-  client MUST NOT exceed the cap; it SHOULD chunk instead. (The reference
-  client chunks well below this, at 8000 bytes and 200 topics, to respect the
-  control-frame ceiling of section 1.2.)
+  carrying a `recover` of the shape below against a server with a resume hook is
+  REFUSED rather than performed silently, with
+  `{"type":"error","code":"RECOVER_REQUIRES_REF"}` (section 3.7). Silent mode
+  trades away hearing the outcome; it cannot trade away history the client asked
+  to be sent, because a client that never learns the gap-fill did not happen
+  resumes over a hole in its own stream.
+- `subscribe-batch` caps at **256 topics per frame** and emits one `subscribed`
+  / `subscribe-denied` ack per entry of `topics`, all sharing the one `ref`; a
+  topic named twice is acked twice. The second entry is a duplicate if the first
+  installed the subscription, and is judged on its own otherwise. Topics past
+  the cap are NOT subscribed and are each answered `subscribe-denied` with
+  reason `BATCH_OVERFLOW` (under the silent-mode rule above: a ref-less batch
+  stays silent) - never dropped without a signal. A client MUST NOT exceed the
+  cap; it SHOULD chunk instead. (The reference client chunks well below this, at
+  8000 bytes and 200 topics, to respect the control-frame ceiling of section
+  1.2.)
 - `unsubscribe` carries no `ref` and is not acked; the server drops the
   subscription silently.
 - A duplicate `subscribe` to a topic already subscribed is acked idempotently
@@ -283,9 +286,15 @@ advertising a token the server does not know is harmless.
   recovery for many topics rides the same already-chunked batch instead of a
   separate whole-session `resume` frame that would overflow the control-frame
   ceiling. For each recover-tagged topic the server gap-fills the missed tail
-  ahead of the first live frame, exactly as the `resume` frame does, and omits it
-  for a topic the auth gate denied. A client that omits `recover` (or a server
-  that does not implement it) is byte-identical to a plain subscribe.
+  ahead of the first live frame, exactly as the `resume` frame does, and omits
+  it for a topic the auth gate denied. A client that omits `recover` (or a
+  server that does not implement it) is byte-identical to a plain subscribe. A
+  `recover` outside that shape - not an object, or an `offset` that is not a
+  non-negative integer - is treated as absent: the server performs the request
+  as a plain subscribe, sends no history and acks it as one, and a server MUST
+  NOT gap-fill for a `subscribe` or `subscribe-batch` that asks in any other way
+  than the shape above; a client that wants its offset honoured sends that
+  shape, with a number or string `ref`.
 
 #### 3.2.1 Topic names (normative)
 
@@ -364,6 +373,15 @@ frame (which carries only the numeric id). See section 6.
 See section 7. Resume-on-subscribe (`recover`, section 3.2) is the reference
 client's mechanism; the whole-session `resume` frame is retained for compatibility.
 
+For recognition as a `resume` frame, `sessionId` is a string and `lastSeenSeqs`
+is a non-null object (arrays also satisfy this recognition rule). A frame
+outside that shape is not acted on as a resume, follows section 1.4, and names
+no topic for sections 15.1 and 15.7. Unless the lane ends or the server refuses
+the frame under section 3.7, it MUST answer every recognized `resume` with
+`resumed`, even without a resume hook.
+The schema describes the canonical topic map clients send; array recognition
+is permissive input handling only.
+
 ### 3.6 Flow control (optional)
 
 | Frame | Dir | Shape |
@@ -405,14 +423,14 @@ application). Revision 1 defines these `code` values:
   overflowed. The client SHOULD reduce the frame (chunk a batch, move a large
   payload off the control path) and MAY surface the error to a developer.
 
-- `RECOVER_REQUIRES_REF` - a `subscribe` carrying `recover` arrived without a
-  `ref` while the server has a resume hook. `topic` names the topic, or is
-  `null` when a whole `subscribe-batch` frame is refused. History is the one
-  reply a client must correlate, so the silent-mode rule of section 3.2 cannot
-  apply to it: staying silent would leave the client believing it had
-  subscribed AND been gap-filled, and resuming over a hole in its history. The
-  subscription is NOT installed. The client MUST send a `ref` on any subscribe
-  that asks for recovery.
+- `RECOVER_REQUIRES_REF` - a `subscribe` carrying a `recover` of section 3.2's
+  shape arrived without a `ref` while the server has a resume hook. `topic`
+  names the topic, or is `null` when a whole `subscribe-batch` frame is refused.
+  History is the one reply a client must correlate, so the silent-mode rule of
+  section 3.2 cannot apply to it: staying silent would leave the client
+  believing it had subscribed AND been gap-filled, and resuming over a hole in
+  its history. The subscription is NOT installed. The client MUST send a `ref`
+  on any subscribe that asks for recovery.
 
 A server bounds the bytes of control frames it will send one connection per
 unit of time - every frame in this section is an answer the client asked for, so
@@ -923,10 +941,11 @@ reported epoch to the topic's current epoch:
   topic (signalled by a `rehydrate` replay event, section 8).
 
 Resume-on-subscribe is acked per topic by the ordinary `subscribed` frame (the
-gap-fill precedes it); the whole-session `resume` frame is acked once with
-`resumed`. The epoch is optional in both: a client that has no epoch for a topic
-omits it, and the server treats an absent epoch as a match (single-generation
-legacy behaviour). Epochs and recovery are additive - a new client against an old
+gap-fill precedes it; on section 15's carriage its `__replay:` `end` may follow
+it, 15.1); the whole-session `resume` frame is acked once with `resumed`. The
+epoch is optional in both: a client that has no epoch for a topic omits it, and
+the server treats an absent epoch as a match (single-generation legacy
+behaviour). Epochs and recovery are additive - a new client against an old
 server, or an old client against a new server, degrade to offset-only recovery
 (or, for resume-on-subscribe against a server that predates it, to a plain
 resubscribe) without breaking.
@@ -946,6 +965,9 @@ for completeness; an application that does not use a plugin never sees its frame
 Plugin server-to-client output is not a distinct control type - it rides the
 data-event envelope (section 4) under reserved `__`-prefixed topics
 (appendix C.2), or the `0x03` binary frame when a binary token is negotiated.
+The `__replay:{topic}` events of section 8.1 can also carry a resume's
+gap-fill and its truncation (sections 7 and 15.7), so a client that recovers
+topics sees them whether or not it uses a plugin.
 
 | Frame | Dir | Shape |
 |---|---|---|
@@ -963,23 +985,40 @@ data-event envelope (section 4) under reserved `__`-prefixed topics
 `event`. The `reqId` field echoes the request's `reqId` and is OMITTED when the
 request omitted it (a client that always sends `reqId` always sees it back).
 
+A terminal event below ends only that recovery's `msg` stream. While the topic's
+resume is unanswered, a standalone `truncated` can still follow `end` (with or
+without `truncated:true`), `denied` or `rehydrate`. A client MUST process that
+truncation even after a terminal event, until it has read the request's
+`subscribed`, `subscribe-denied` or `resumed`; it acts on each truncation as
+described below.
+
 | Event | Payload | Meaning |
 |---|---|---|
 | `msg` | `{reqId?, seq, event, data}` | One recovered message. |
-| `end` | `{reqId?}`, or `{reqId?, truncated:true}` | Terminal: recovery complete. `truncated:true` means the buffer was trimmed past the requested point (in-memory backend inlines truncation here). |
-| `truncated` | `null` | Standalone terminal-precursor emitted by some backends before `end` to signal the buffer was trimmed past the requested point. |
+| `end` | `{reqId?}` (or `null` with no `reqId`), or `{reqId?, truncated:true}` | Terminal: recovery complete. `truncated:true` means the history from the requested point could not be delivered whole: the buffer was trimmed past it (the in-memory backend inlines truncation here), or on section 15's stream a message was too large to carry. |
+| `truncated` | `null` | Standalone form of the same signal: the history from the requested point cannot be delivered whole (for example a trimmed buffer, or on section 15's stream a message too large to carry). Some backends emit it before `end`; it can also arrive on its own (below). |
 | `denied` | `{code, reqId?}` | Terminal: the resume-time subscribe was denied; `code` is the denial reason (section 3.2.2). |
 | `rehydrate` | `{epoch}` | Terminal: the reported epoch did not match the topic's current epoch (section 7); the topic must cold-rehydrate. `epoch` is the current generation. |
 | `gap` | `{lost}` | Unsolicited, and only on a connection that advertised `relay.resync:1` (section 5.1): the server proved it lost at least `lost` relayed frames for this topic, so the connection's view of it is short and its resume offset can no longer be trusted. `lost` is a lower bound. |
 
-A client SHOULD treat `truncated`, `denied`, `rehydrate`, and `gap` alike:
-delivery or recovery did not complete cleanly, so drop the topic's resume
-offset and re-snapshot the topic rather than trusting a gap-fill.
-Not every backend emits every event: the in-memory backend signals truncation
-inline on `end` and never emits `denied` or `rehydrate`; clustered backends emit
-the standalone `truncated`, `denied`, and `rehydrate` forms.
+A client SHOULD treat `truncated` in either form - the event, or an `end` that
+carries `truncated:true` - and `denied`, `rehydrate`, and `gap` alike: delivery
+or recovery did not complete cleanly, so drop the topic's resume offset and
+re-snapshot the topic rather than trusting a gap-fill. Each truncation needs a
+snapshot requested after the client read it; one already in flight does not
+satisfy a later event, because what was lost after it was taken is signalled
+only by that later event. That holds for a `replay` request's own `end` too: the
+offset is the cheap thing to drop, and a client cannot always tell a resume's
+gap-fill from a replay. Not every backend emits every event: the in-memory
+backend signals truncation inline on `end` and never emits `denied` or
+`rehydrate`; clustered backends emit the standalone `truncated`, `denied`, and
+`rehydrate` forms. A standalone `truncated` can also arrive with no `end` after
+it, ahead of the frame that answers a topic's resume - its `subscribed`,
+`subscribe-denied` or `resumed` - when the server could not deliver everything
+the topic was owed while its recovery was open (section 15.1 is one such case);
+a client acts on it the same way.
 
-`gap` is the one event that arrives outside any `replay` request or resume: a
+`gap` is the only unsolicited event: a
 multi-worker server that detects it lost cluster-relayed frames (section 9's
 fan-out is otherwise invisible to a client) MAY push it, at any time, to the
 subscribers of the affected topic that opted in - it never carries `reqId`. The
@@ -1054,7 +1093,8 @@ What the protocol PROMISES (a client MAY rely on these):
 - A `wire-id` for an id arrives at or before the first `0x03` frame that uses
   that id (section 6.2).
 - On resume, a topic's gap-fill frames precede its `subscribed` ack (or the
-  whole-session `resumed`).
+  whole-session `resumed`); on section 15's carriage a gap-fill's `__replay:`
+  `end` may follow that ack (15.1).
 - `subscribe-batch` acks preserve the submission order of `topics` within a batch.
 - Delivery of every event for a topic, across a disconnect, is guaranteed ONLY
   when that topic is recoverable AND the client resumes with a matching epoch and
@@ -1400,24 +1440,124 @@ Each stream record is:
 - **A sender MUST NOT emit a record whose `messageBytes` exceed 1,048,576
   bytes**, unless it knows out of band that its peer accepts more. Nothing on
   this carriage negotiates a size, so this bound is fixed and every sender can
-  evaluate it against the record in hand. A sender holding a message larger
-  than it may emit MUST NOT emit it, drop it, or split it across records - a
-  drop loses a reliable message without a word, and a split hands the
-  receiver messages nobody sent - so it MUST reset the reliable lane with
-  `RECORD_TOO_LARGE` instead. Recovery over this carriage - section 7's
-  resume by either mechanism, and section 8's `replay` - MUST NOT replay such
-  a message and MUST NOT gap-fill past it: the server MUST answer that
-  topic's recovery with section 8.1's truncation, at or before that message,
-  so the client re-snapshots and recovery does not repeat the reset. On this
-  carriage truncation therefore also covers history the server holds but
-  cannot carry; 8.1's client action is unchanged. Live delivery on the relayed
-  `game` lane (section 3.10) is the one exception to the reset, because its
-  WebTransport carriage already treats an over-size event as loss: the server
-  MUST NOT deliver a relayed event whose fan-out to a stream subscriber is
-  larger than it may emit, and MUST NOT reset that subscriber's lane for it,
-  as section 14.3 handles an over-size datagram. The room `seq` advances
-  regardless, so the gap is visible. Recovery of such an event follows the
-  truncation rule above.
+  evaluate it against the record in hand. Except in the two cases below, a
+  sender holding a message larger than it may emit MUST NOT emit it, drop it, or
+  split it across records - a drop loses a reliable message without a word, and
+  a split hands the receiver messages nobody sent - so it MUST reset the
+  reliable lane with `RECORD_TOO_LARGE` instead. The first exception is
+  recovery. Recovery over this carriage - section 7's resume by either
+  mechanism, and section 8's `replay` - MUST NOT replay such a message and MUST
+  NOT gap-fill past it: the server MUST answer that topic's recovery with
+  section 8.1's truncation instead, placed as the next bullet says, so the
+  client re-snapshots instead of replaying a message the sender cannot emit;
+  only a gap-fill for which the next bullet leaves no place to put a truncation
+  resets the lane instead. While a recovery window for a topic is open (next
+  bullet), that answer also covers a live sequenced frame for the topic, which
+  the wire cannot tell from the gap-fill. On this carriage truncation therefore
+  also covers history the server holds but cannot carry; 8.1's client action
+  applies as written. The second exception is live delivery on the relayed
+  `game` lane (section 3.10) while no recovery window for its room is open,
+  because its WebTransport carriage already treats an over-size event as loss:
+  the server MUST NOT deliver a relayed event whose fan-out to a stream
+  subscriber is larger than it may emit, and MUST NOT reset that subscriber's
+  lane for it, as section 14.3 handles an over-size datagram. A `game.fanout:1`
+  record left undelivered this way is a dropped frame for section 6.7. The room
+  `seq` advances regardless, so the gap is visible. Recovery of such an event
+  follows the truncation rule above. A `batch` record (section 3.3) is one
+  message on the wire, but which events share one is the server's own choice, so
+  a server MUST NOT form one larger than it may emit: an event larger than the
+  sender may emit goes out as a bare data-event in its place and is judged as
+  above, so no event queued after it goes out in an earlier record.
+- **Where a recovery's truncation goes** depends on how the recovery reaches the
+  client. A frame for T, in this section, is a data-event for T that carries a
+  `seq`, alone in its record or inside a `batch` record, or a `0x03` record
+  bound to T whose `seq` is not `0`; a message on `__replay:T` is not one. The
+  standalone truncations an answer gets, one per topic it is owed for, go out as
+  an unbroken run immediately before that answer, in any order, each in its own
+  record or in a `batch` record that carries no event after the run's: nothing
+  but the run's events goes between the run's first event and the answer, and a
+  `wire-id` the server would write there goes before the run. In this bullet,
+  writing means admitting to the lane's send queue, not waiting for transport
+  delivery. The server MUST admit the complete run and its answer and close the
+  windows that answer covers as one operation serialized with the handling of
+  every frame for those topics. That operation MUST finish before any record in
+  the run or its answer can be transmitted, and MUST NOT await transport
+  progress between them. If admitting the group would cross a section 15.6
+  bound, the server resets with `SLOW_CONSUMER` without admitting any part of
+  the group. A frame handled after that operation is ordered after the answer
+  and sees the remaining windows, if any. A recovery of topic T on `__replay:T`
+  - a `replay` request, or a resume whose gap-fill uses that channel - is
+  truncated at the message: the server writes neither that `msg` nor any later
+  `msg` of the same recovery, and still ends the recovery with its `end`, which
+  then carries `truncated:true`, section 8.1's inline form; a cut `replay`
+  request's `end` always does, and a cut on that channel never resets the lane.
+  If a resume's own gap-fill on that channel, with or without a `reqId` (one
+  there echoes no request of the client's), is cut and has written no `end` when
+  the server answers its request for T, the server writes the standalone
+  `truncated` for T in that answer's run and writes no `end` for that gap-fill
+  afterwards; section 11's promise covers the gap-fill's `msg` events, and its
+  `end` may follow the answer, which is how a cut gap-fill reaches the answer
+  without one. A gap-fill written as frames for T has no `end` to carry a
+  truncation, so it is truncated by its recovery window. A recovery window for T
+  belongs to one request that asks the server to recover T: a `subscribe` for T
+  whose `recover` is an object with a non-negative integer `offset`, a
+  `subscribe-batch` that names T in `topics` and whose `recover` entry for T is
+  such an object (section 3.2), or a `resume` frame of section 3.5's shape whose
+  `lastSeenSeqs` names T. It opens when the server takes up that request for T,
+  before it awaits any authorization or resume hook, unless the server will
+  answer that request with none of `subscribed`, `subscribe-denied` and
+  `resumed`: it refuses the request (section 3.7), or it performs the request
+  silently (section 3.2), which it decides when it takes the request up. For a
+  `subscribe-batch` or a `resume` frame, every window the frame opens opens when
+  the server takes up the frame, before it awaits a hook for any topic the frame
+  names. Whether the server can recover T does not matter: a topic it does not
+  recover, an epoch that does not match and history it no longer holds all open
+  a window, so whether a window opens never depends on what the server knows
+  about T. Nothing the server learns later changes that; the window closes only
+  when the server answers that request for T, with the first of the request's
+  `subscribed` or `subscribe-denied` acks for T or with its `resumed`, and,
+  unless the lane ends first, the server MUST give that answer. A server MUST
+  NOT gap-fill for a request that opens no window for T (section 3.2 performs
+  such a request plain), so a frame for T written as gap-fill while no window
+  for T is open is the server's own defect: it has nowhere to place a
+  truncation, and one larger than its sender may emit resets the lane. A
+  data-event for T without a `seq`, or a `0x03` record bound to T whose `seq` is
+  `0`, is never gap-fill, which section 7 addresses by `seq`, so the hold never
+  covers it, and an over-bound one resets the lane as the bullet above says.
+  From the first frame for T larger than its sender may emit that the server
+  comes to while a recovery window for T is open, whether gap-fill, live, or a
+  relayed `game` event, until no recovery window for T remains open, the server
+  withholds every frame for T: it never writes one, and a `batch` record goes
+  out without them, or not at all if they were all it carried. The hold is
+  bounded: while a hold for T is on, a server that has not answered a window for
+  T within a bounded time of the later of the hold's start and that window's
+  opening MUST reset the lane with `RECORD_TOO_LARGE` rather than withhold T any
+  longer, and the client then gives that recovery up (15.7) instead of repeating
+  it. The bound is the server's own; it SHOULD be no shorter than the longest a
+  request's authorization and resume hooks may take together, and a server that
+  does not bound its hooks chooses it itself. A withheld `0x03` record counts
+  for sections 6.4 and 6.7 as a frame dropped under backpressure would: a
+  stateful capability degrades to JSON, and a `game.fanout:1` topic falls back
+  to its JSON envelope. A `wire-id` frame is never withheld: the server
+  allocates a binding and writes its `wire-id` where it would without the hold,
+  so a binding arrives before the first `0x03` record that uses it, as section
+  11 promises, though not always immediately before it as section 6.2 describes,
+  and a binding whose first `0x03` record is withheld, which degrades a stateful
+  capability to JSON (6.4) or sends a `game.fanout:1` room back to its envelope
+  (6.7), is then never used. Every answer that closes a window for T while the
+  hold is on gets one standalone truncation for T,
+  `{"topic":"__replay:T","event":"truncated","data":null}`, in its run, after
+  every frame the server has withheld so far, so each such answer's gap-fill,
+  its truncation included, precedes it, as section 11 promises for `subscribed`
+  and `resumed`. One event serves both the hold and a cut gap-fill when they
+  meet at the same answer. The hold ends with the answer that closes the last
+  window for T. Live frames for T look the same as the gap-fill on the wire,
+  which is why they are withheld too and why each event follows every frame
+  withheld before it: a client that re-snapshots T as soon as it reads an event,
+  as section 8.1 asks, does so after every frame covered by that event was
+  withheld. The atomic queue operation prevents a frame from being withheld
+  between the final event and its answer; a frame withheld for a window that
+  remains open is followed by another event.
 - **A receiver's limit is its section 1.3 inbound message limit applied to this
   carriage** - `maxPayloadLength` under another name: deployment-configurable,
   and **1,048,576 bytes** absent configuration - except that it is never below
@@ -1441,7 +1581,7 @@ Each stream record is:
   refused by a peer that accepts less, exactly as on WebSocket. What the
   carriage improves is diagnosis: an over-limit server-to-client message is a
   SILENT drop on WebSocket (section 1.3) but a signalled `RECORD_TOO_LARGE`
-  here (15.1's relayed `game` exception aside), so the same mistake is visible
+  here (15.1's two exceptions aside), so the same mistake is visible
   instead of invisible.
 - `kind` re-supplies the part of WebSocket framing a byte stream discards: the
   frame type. `0x00` is a text message, `0x01` is a binary message, and `0x02`
@@ -1534,8 +1674,10 @@ Opening the stream creates one logical protocol connection:
 3. Subscribe, batch, lease/request-n, resume, data-event, and `0x03` records
    then behave as sections 2-11 specify, except where this section says
    otherwise - 15.1's rules on a message larger than its sender may emit
-   among them: recovery never replays one, and a relayed `game` event too
-   large for the lane is not delivered live.
+   among them: recovery never replays one, the sequenced frames for a topic
+   with an open recovery window are withheld from the first over-bound one
+   until no window for it remains open, and a relayed `game` event too large
+   for the lane is otherwise not delivered live.
 
 The `welcome.sessionId`, capability set, wire-id space, ingress-id space,
 subscriptions, leases, and resume state belong to the reliable stream. The
@@ -1646,9 +1788,10 @@ created. The client declares `lantean.reliable:1`, opens its new reliable
 stream, receives the new `welcome`, re-sends `hello`, and uses the unchanged
 resume-on-subscribe `recover` fields (or compatibility `resume` frame) from
 section 7. Offset and epoch comparison is identical to WebSocket; only the
-gap-fill differs, by 15.1's rule for a message larger than its sender may
-emit. Datagram `game` membership is re-authorized independently at CONNECT and
-has no gap-fill.
+gap-fill, and what the server writes for a topic while a recovery window for
+it is open, differ, by 15.1's rule for a message larger than its sender may
+emit. Datagram `game` membership is re-authorized independently at CONNECT
+and has no gap-fill.
 
 ### 15.6 Flow control and slow consumers
 
@@ -1661,36 +1804,41 @@ apply:
 
 An endpoint MUST bound, per session, the message bytes of complete records
 framed for this lane but not yet sent. A byte counts until the transport has
-sent it, whether or not the peer has acknowledged it: a byte a stack holds
-only because the peer's flow control has not admitted it is still pending,
-and a byte in flight is not, so acknowledgement delay cannot eat into the
-floor. An endpoint whose stack does not show what it has sent counts a byte
-until the write carrying it settles (the W3C WebTransport API's `write()`
-promise), accepting that such a stack may settle a write flow control still
-holds; a stack whose write settles only on acknowledgement reports only
-acknowledgement. An endpoint whose stack reports only acknowledgement counts
-unsent and unacknowledged bytes together against one bound of at least the
-unsent-byte floor plus 1,048,576 bytes - **2,097,152 bytes** unless
-out-of-band knowledge raised that floor. The unsent-byte bound MUST be at least
-**1,048,576 bytes per session**, and at least the largest record this endpoint
-may itself emit (15.1) where out-of-band knowledge raised that above the
-unnegotiated maximum - otherwise emitting a record the sender is permitted to
-emit would force it to reset its own lane. The sum is over the unsent message
-bytes of each queued record; the length prefix (at most 5 bytes, 15.1) and the
-`kind` byte are fixed framing overhead and do not count. One maximum-size
-message therefore always fits. Because an empty message adds nothing to that
-sum, an endpoint MAY also bound the number of pending records per session;
-that bound MUST be at least **65,536 records**. A close record (15.4) counts
-against neither bound. The endpoint MUST stop pulling or producing optional
-work while the stream is blocked. If adding the next complete record would
-cross either bound, it MUST reset the reliable lane with `SLOW_CONSUMER`.
-While the lane is open it MUST NOT drop that record or any queued record,
-skip a `seq`, or spill into a second stream; section 6.4's drop under
-backpressure does not apply on this carriage. The relayed `game` events 15.1
-does not deliver are never queued, so they are no exception to this.
-Recoverable topics then resume on a new connection by section 15.5;
-non-recoverable topics re-snapshot as section 7 already requires. The datagram
-lane may continue after the reset.
+sent it, whether or not the peer has acknowledged it: a byte a stack holds only
+because the peer's flow control has not admitted it is still pending, and a byte
+in flight is not, so acknowledgement delay cannot eat into the floor. An
+endpoint whose stack does not show what it has sent counts a byte until the
+write carrying it settles (the W3C WebTransport API's `write()` promise),
+accepting that such a stack may settle a write flow control still holds; a stack
+whose write settles only on acknowledgement reports only acknowledgement. An
+endpoint whose stack reports only acknowledgement counts unsent and
+unacknowledged bytes together against one bound of at least the unsent-byte
+floor plus 1,048,576 bytes - **2,097,152 bytes** unless out-of-band knowledge
+raised that floor. The unsent-byte bound MUST be at least **1,048,576 bytes per
+session**, and at least the largest record this endpoint may itself emit (15.1)
+where out-of-band knowledge raised that above the unnegotiated maximum -
+otherwise emitting a record the sender is permitted to emit would force it to
+reset its own lane. The sum is over the unsent message bytes of each queued
+record; the length prefix (at most 5 bytes, 15.1) and the `kind` byte are fixed
+framing overhead and do not count. One maximum-size message therefore always
+fits. Because an empty message adds nothing to that sum, an endpoint MAY also
+bound the number of pending records per session; that bound MUST be at least
+**65,536 records**. A close record (15.4) counts against neither bound. The
+endpoint MUST stop pulling or producing optional work while the stream is
+blocked. If adding the next complete record would cross either bound, it MUST
+reset the reliable lane with `SLOW_CONSUMER`. Recoverable topics then resume on
+a new connection by section 15.5; non-recoverable topics re-snapshot as section
+7 already requires. The datagram lane may continue after the reset. While the
+lane is open it MUST NOT drop that record or any queued record, or spill into a
+second stream; section 6.4's drop under backpressure does not apply on this
+carriage. This binding leaves out a message the server would otherwise write
+only where 15.1 withholds it (a `batch` record that would have carried only
+withheld events included), cuts it from a `__replay:{topic}` recovery, drops the
+`end` of a cut gap-fill whose standalone `truncated` came first, or does not
+deliver it, and such a message never enters the send queue: 15.1's truncation
+signals the gaps that withheld frames and cut messages leave, the room `seq`
+shows the gap an undelivered `game` event leaves, and a withheld or undelivered
+`0x03` record degrades a capability or a room only as 15.1 says.
 
 Bytes sent but not yet acknowledged are a separate store: a peer that grants
 flow control yet never acknowledges one range would otherwise hold that
@@ -1702,7 +1850,8 @@ withholding acknowledgement meets `SLOW_CONSUMER`.
 
 An inbound declared record above the receiver's 15.1 limit is stopped/reset with
 `RECORD_TOO_LARGE`, and a sender holding a message larger than it may emit
-resets its lane with the same code (15.1). A non-canonical prefix, a prefix
+resets its lane with the same code (15.1), as does a server whose recovery
+hold outlasts its bound (15.1). A non-canonical prefix, a prefix
 over 5 bytes, an unknown `kind` (anything but `0x00`-`0x02`, 15.1), a text
 record that is not valid UTF-8, a malformed close record or any byte after one
 (15.4), or FIN inside a record is reset with `PROTOCOL_ERROR`. Of the checks
@@ -1750,9 +1899,48 @@ WebSocket message is; a close record is not a message.
 
 A client or server claiming the reliable-stream binding MUST implement Core
 conformance from section 13 over this carriage, the framing/topology/lifecycle
-rules of section 15, and every optional inner capability it advertises or
-emits. Binary conformance continues to require JSON fallback. A datagram-only
-implementation claims section 14, not section 15.
+rules of section 15, and every optional inner capability it advertises or emits.
+Binary conformance continues to require JSON fallback. A client that recovers
+topics (section 7) over this carriage MUST also act on the truncation 15.1
+answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an
+`end` there that carries `truncated:true`, with or without a `reqId` - even if
+it implements no section 8 plugin: it drops the topic's resume offset and
+surfaces the truncation to the application, which re-snapshots the topic as
+section 8.1 describes, once per truncation: a snapshot already in flight does
+not satisfy a later event, since frames withheld after it was taken are
+signalled only by that event. A client whose lane ends with `RECORD_TOO_LARGE`,
+whichever side reset it, MUST likewise drop the resume offset of every topic it
+asked that lane to recover and has not read every answer for, and surface a
+truncation for each such topic to the application, as for a `truncated` event,
+so its next session re-snapshots those topics instead of replaying that
+recovery. If a client's own receiver limit is lower than the sender's, a frame
+within the sender's bound can reset live delivery first and recovery on the next
+session; that second reset drops the unanswered recovery offset, so the
+following session re-snapshots. The requests that count are those 15.1's
+recovery windows belong to, in the shapes 15.1 defines: a `subscribe` or
+`subscribe-batch` that names the topic in `topic` or `topics` and carries a
+number or string `ref` and a `recover` entry for the topic that is an object
+with a non-negative integer `offset`, whose topic counts as answered only once
+the client has read as many `subscribed` or `subscribe-denied` frames for it as
+the times the client has named it in `topic` or `topics` of any `subscribe` or
+`subscribe-batch` on that lane that carries a number or string `ref`, with or
+without `recover`, since a `ref` can be reused (a request without one is never
+acked and does not count, section 3.2), and a `resume` frame of section 3.5's
+shape, answered by a `resumed`: since `resumed` names no frame, the client
+counts as unanswered the topics of every `resume` frame it sent after the last
+time it had read as many `resumed` frames as it had sent `resume` frames. A
+`replay` request does not count. A request the server refuses with an `error`
+(section 3.7) gets none of these answers, so its topics stay unanswered for the
+rest of the lane; for a `resume` frame that reaches the topics of every later
+`resume` frame too, since the two counts never meet again; that is the intended
+outcome, a re-snapshot of those topics at each later reset, and a client that
+resends a refused frame in smaller pieces names its topics again, which counts
+like any other request. The reset names no topic, so every unanswered recovery
+counts as truncated; the cost is a re-snapshot of each. A stream client MUST
+take a topic's resume offset only from frames for that topic, as 15.1 defines
+them, that a reliable lane or a WebSocket carries, never from `__replay:{topic}`
+events, which can keep flowing while the topic is withheld, and never from the
+datagram lane. A datagram-only implementation claims section 14, not section 15.
 
 A session may therefore be:
 
@@ -1945,7 +2133,7 @@ the transport itself also closes.
 |---|---|---|
 | `0x00` | `NO_ERROR` | The lane is already closing and this direction closes with it - answering the peer's reset before it has received any STOP_SENDING from the peer, stopping reads the endpoint no longer needs, or abandoning a record it cannot finish - or the application named no code (15.4, 15.6). It reports no error. |
 | `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened, or a stream arrived before the server sent its successful response, where the server can tell (15.2). |
-| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; deployment-configurable, 1 MiB absent configuration, never below 125 bytes - a sender within the unnegotiated 1 MiB bound may still exceed a lowered limit, and refusing it is conforming), or a sender held a message larger than it may emit (15.1). |
+| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; deployment-configurable, 1 MiB absent configuration, never below 125 bytes - a sender within the unnegotiated 1 MiB bound may still exceed a lowered limit, and refusing it is conforming), or a sender held a message larger than it may emit (15.1), or a server's recovery hold outlasted its bound (15.1). |
 | `0x03` | `PROTOCOL_ERROR` | Record framing or body was malformed: a bad prefix (including one over 5 bytes), an unknown `kind` byte, an invalid-UTF-8 text record, a malformed close record or bytes after one, or FIN inside a record (15.1, 15.4, 15.6). A malformed inner message is handled as on WebSocket instead. |
 | `0x04` | `SLOW_CONSUMER` | Pending unsent message bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB, and at least the largest record this endpoint may itself emit), or pending records would exceed its optional record bound (at least 65,536); also the combined bound of an endpoint whose stack reports only acknowledgement (at least 2 MiB), and a peer withholding acknowledgement until the pending bounds fill (15.6). |
 
