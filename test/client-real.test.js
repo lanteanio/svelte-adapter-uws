@@ -3154,7 +3154,7 @@ describe('client.js (real module)', () => {
 				.map((s) => JSON.parse(s))
 				.find((m) => (m.type === 'subscribe-batch' && m.topics?.includes('holed')) || (m.type === 'subscribe' && m.topic === 'holed'));
 			expect(resub, 'the subscription itself survives the reconnect').toBeTruthy();
-			expect(resub.recover?.holed, 'the poisoned offset and epoch must not be presented').toBeUndefined();
+			expect(resub.recover?.holed, 'the poisoned offset must not be presented').toBeUndefined();
 
 			unsub();
 			warnSpy.mockRestore();
@@ -3169,12 +3169,12 @@ describe('client.js (real module)', () => {
 		// offset from before the hole, and keep the epoch the ack reports.
 		// A case with one recovering subscribe, a standalone truncated event and no
 		// reset; `withRehydrate` picks the one whose ack reports a new epoch.
-		const truncationVector = (withRehydrate = false) => {
+		const truncationVector = (withRehydrate = false, inline = false) => {
 			const vector = JSON.parse(readFileSync(new URL('../test-vectors/webtransport-stream.json', import.meta.url), 'utf8'));
 			const vectorCase = vector.recoveryTruncation.find((c) => {
 				const requests = c.transcript.filter((e) => e.client);
 				return requests.length === 1 && requests[0].client.type === 'subscribe' && requests[0].recovers.length === 1 &&
-					c.written.some((m) => m.frame?.event === 'truncated') && !c.thenResets &&
+					c.written.some((m) => inline ? m.frame?.event === 'end' && m.frame.data?.truncated : m.frame?.event === 'truncated') && !c.thenResets &&
 					c.written.some((m) => m.frame?.event === 'rehydrate') === withRehydrate;
 			});
 			const request = vectorCase.transcript.find((e) => e.client).client;
@@ -3192,8 +3192,8 @@ describe('client.js (real module)', () => {
 		// resubscribe with the first `count` written frames (less the truncated
 		// event when `withoutEvent` is set), reconnect again, and return what the
 		// client then asks to recover.
-		async function recoverAfterTruncation(count, { withoutEvent = false, withRehydrate = false } = {}) {
-			const { request, topic, frames } = truncationVector(withRehydrate);
+		async function recoverAfterTruncation(count, { withoutEvent = false, withRehydrate = false, inline = false } = {}) {
+			const { request, topic, frames } = truncationVector(withRehydrate, inline);
 			vi.useFakeTimers();
 			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			const conn = clientModule.connect();
@@ -3214,7 +3214,7 @@ describe('client.js (real module)', () => {
 				// The client asks for the same recover entry as the vector's request.
 				expect(recoverOf(recovering, topic)).toEqual(request.recover);
 				for (const frame of frames.slice(0, count)) {
-					if (withoutEvent && frame.event === 'truncated') continue;
+					if (withoutEvent && (frame.event === 'truncated' || (frame.event === 'end' && frame.data?.truncated))) continue;
 					ws2._receive(frame.type === 'subscribed' ? { ...frame, ref: recovering.ref } : frame);
 				}
 				ws2.readyState = MockWebSocket.CLOSED;
@@ -3248,12 +3248,23 @@ describe('client.js (real module)', () => {
 			expect(control.recover).toEqual({ offset: before.at(-1).seq, epoch: frames[ackAt].epoch });
 		});
 
+		it('drops the offset on a protocol vector inline truncation before its recovery ack', async () => {
+			const { request, frames } = truncationVector(false, true);
+			const endAt = frames.findIndex(frame => frame.event === 'end' && frame.data?.truncated);
+			expect(endAt).toBeGreaterThanOrEqual(0);
+			const result = await recoverAfterTruncation(endAt + 1, { inline: true });
+			expect(result.markers, 'the inline terminal event reaches application listeners').toContain('end');
+			expect(result.recover).toBeUndefined();
+			const control = await recoverAfterTruncation(endAt + 1, { inline: true, withoutEvent: true });
+			expect(control.recover).toEqual(request.recover);
+		});
+
 		it('resumes after a truncated recovery from the frames past the ack, under the epoch the ack reports', async () => {
 			const { request, topic, frames, ackAt } = truncationVector(true);
 			const live = frames.slice(ackAt + 1).filter((f) => f.topic === topic && typeof f.seq === 'number');
 			expect(live.length).toBeGreaterThan(0);
-			// The ack reports a new epoch, so a client that kept the one it held
-			// through the event, or took none from the ack, presents the wrong one.
+			// Rehydrate and the ack report the replacement generation. Later
+			// truncation must retain it when the following live frame seeds an offset.
 			expect(frames[ackAt].epoch).not.toBe(request.recover.epoch);
 			const { recover } = await recoverAfterTruncation(frames.length, { withRehydrate: true });
 			expect(recover).toEqual({ offset: live.at(-1).seq, epoch: frames[ackAt].epoch });

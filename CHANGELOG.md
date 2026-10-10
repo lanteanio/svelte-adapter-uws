@@ -657,6 +657,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Static `If-None-Match` uses weak comparison against the selected representation, so its quoted tag revalidates with or without `W/`, including lists. `If-Match` retains exact issued-tag matching across codings; real GET and HEAD regressions cover the independent policies and precedence.
 
+- Recovery markers clear stale topic offsets without losing their sequence-space identity. Both truncation forms and denials retain the epoch, relay gaps keep the old generation for a safe mismatch, and rehydrate records its announced generation.
+
 - Replay stores report a standalone truncation marker while their request is outstanding, once per replay, including when the end marker repeats the signal. Request IDs still isolate concurrent replay responses.
 
 - Large static responses resume from the shared cache under socket backpressure, avoiding a full unsent-body copy for every slow reader while preserving complete ranges and encoded bytes.

@@ -1798,24 +1798,19 @@ function createConnection(options) {
 			if (typeof msg.seq === 'number') {
 				const prev = lastSeenSeqs.get(msg.topic);
 				if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
-			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate' || msg.event === 'gap') &&
+			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate' || msg.event === 'gap' ||
+				msg.event === 'denied' || (msg.event === 'end' && msg.data?.truncated === true)) &&
 				typeof msg.topic === 'string' && msg.topic.charCodeAt(0) === 95 &&
 				msg.topic.charCodeAt(1) === 95 && msg.topic.startsWith('__replay:')) {
-				// The server signalled that this topic's history can no longer be
-				// trusted from our offset: the seq space reset since we last saw
-				// it (`truncated` / `rehydrate` - a process restart or a per-topic
-				// authority bump), or the server proved it lost relayed frames we
-				// were owed (`gap`, negotiated via the relay.resync:1 cap) - and
-				// there our watermark has already stepped PAST the hole, so a
-				// resume from it would silently skip frames forever. Drop the
-				// stale per-topic offset and recorded epoch so the next live
-				// frame re-seeds lastSeenSeqs from scratch, and so a subsequent
-				// reconnect does not present an offset the server cannot honor.
-				// The frame still dispatches to the store ladder below for any
-				// higher-level consumer of the marker.
+				// A lost window invalidates the offset, not its sequence-space
+				// identity. Truncation keeps that identity; a gap keeps the old
+				// epoch so the server's new one forces a cold rehydrate. Only an
+				// explicit rehydrate announces the replacement generation.
 				const baseTopic = msg.topic.slice('__replay:'.length);
 				lastSeenSeqs.delete(baseTopic);
-				lastSeenEpochs.delete(baseTopic);
+				if (msg.event === 'rehydrate' && typeof msg.data?.epoch === 'number') {
+					lastSeenEpochs.set(baseTopic, msg.data.epoch);
+				}
 			}
 			eventsStore.set(wsEvent);
 			const tStore = topicStores.get(msg.topic);
