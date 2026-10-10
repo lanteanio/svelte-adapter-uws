@@ -55,8 +55,7 @@ deployments should follow the ordered [ecosystem sequence](./docs/migrations/eco
 
 ## Public entry points
 
-This catalog is generated from the package export map. Each entry must declare
-its role, execution environment, stability, owned guide route, and deprecation state before CI will accept a new public subpath.
+Each exported entry declares its role, execution environment, stability, owned guide route, and deprecation state in this generated catalog.
 
 <!-- public-entry-points:start -->
 | Entry point | Role | Environment | Stability | Guide | Deprecation |
@@ -65,6 +64,7 @@ its role, execution environment, stability, owned guide route, and deprecation s
 | `svelte-adapter-uws/upgrade-response` | WebSocket 101 response headers | Node runtime | supported | [Custom 101 headers](#custom-101-response-headers-svelte-adapter-uwsupgrade-response) | none |
 | `svelte-adapter-uws/connection` | Stable connection identity | Node runtime | supported | [Session resume](#session-resume) | none |
 | `svelte-adapter-uws/subscriptions` | Accounted topic membership for plugins | Node runtime | supported | [Plugins](#plugins) | none |
+| `svelte-adapter-uws/platform-contract` | Authoritative public platform member inventory | Universal | supported | [Platform contract](./docs/platform-contract.md) | none |
 | `svelte-adapter-uws/client` | Reactive connection and topic stores | Browser | supported | [Client store API](#client-store-api) | none |
 | `svelte-adapter-uws/vite` | Development WebSocket and handler build plugin | Node build/dev | supported | [Development parity](#development-preview--production) | none |
 | `svelte-adapter-uws/testing` | In-process handler integration harness | Node test | supported | [Test harness](#test-harness-for-websocket-handlers) | none |
