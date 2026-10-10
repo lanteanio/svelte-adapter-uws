@@ -68,7 +68,7 @@ if (!hasUWS && (process.env.REQUIRE_UWS === '1' || process.env.CI === 'true')) {
  * fails if that file grows one this list does not have.
  */
 export const EVAL_TIME_ENV = [
-	'ADDRESS_HEADER', 'BODY_SIZE_LIMIT', 'HOST_HEADER', 'ORIGIN', 'PORT_HEADER',
+	'ADDRESS_HEADER', 'BODY_SIZE_LIMIT', 'CANONICAL_HOST_ALIASES', 'HOST_HEADER', 'ORIGIN', 'PORT_HEADER',
 	'PROTOCOL_HEADER', 'PROXY_PROTOCOL', 'RECONNECT_DISPERSAL_MS', 'SSL_CERT',
 	'SSL_KEY', 'SSL_RELOAD_DEBOUNCE_MS', 'SSL_SNI_HOSTS', 'SSL_WATCH',
 	'TRUSTED_PROXIES', 'WS_DEBUG', 'XFF_DEPTH',
@@ -128,6 +128,7 @@ export const OBSERVABLE = [
 		expect: (raw) => (raw ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean)
 	},
 	{ env: 'ORIGIN', read: (c) => c.origin, expect: (raw) => parse_origin(raw) },
+	{ env: 'CANONICAL_HOST_ALIASES', read: (c) => c.canonical_host_aliases, expect: (raw) => [...new Set((raw ?? '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean))] },
 	{ env: 'ADDRESS_HEADER', read: (c) => c.address_header, expect: (raw) => (raw ?? '').toLowerCase() },
 	{ env: 'PROTOCOL_HEADER', read: (c) => c.protocol_header, expect: (raw) => (raw ?? '').toLowerCase() },
 	{ env: 'HOST_HEADER', read: (c) => c.host_header, expect: (raw) => (raw ?? '').toLowerCase() },

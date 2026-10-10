@@ -6,6 +6,7 @@ const expected = new Set([
 	'HOST',
 	'PORT',
 	'ORIGIN',
+	'CANONICAL_HOST_ALIASES',
 	'XFF_DEPTH',
 	'ADDRESS_HEADER',
 	'TRUSTED_PROXIES',

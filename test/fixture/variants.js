@@ -32,6 +32,19 @@ export const FIXTURE_VARIANTS = {
 		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
 	},
 
+	canonicalhost: {
+		out: 'build-canonical-host',
+		handler: null,
+		healthCheckPath: '/alive-canonical',
+		readinessCheckPath: '/ready-canonical',
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
+	},
+	canonicalproxy: {
+		out: 'build-canonical-proxy',
+		envPrefix: 'TEST_CANON_',
+		handler: null,
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
+	},
 	// Readiness assertions need a fresh lifecycle even when serial suites reuse
 	// the default built module after another file has shut it down.
 	'requestlanes': {

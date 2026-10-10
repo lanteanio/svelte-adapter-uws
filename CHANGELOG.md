@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: opt-in canonical site hosts.** `CANONICAL_HOST_ALIASES` redirects explicitly listed aliases to `ORIGIN` before cached assets, prerendered pages and SSR requests, so a www alias can no longer bypass an application hook's canonical-host policy while configured liveness and readiness probes remain reachable.
+  - **Affects:** Deployments serving the same site through multiple hostnames.
+  - **Action:** Set `ORIGIN` and a comma-separated `CANONICAL_HOST_ALIASES` list when canonical redirects are desired.
+  - **Requires:** No new dependency; both runtime settings are required to enable the feature.
+  - **Compatibility:** Disabled by default; redirects preserve the method with 308, and mounted adapter probes remain available.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
   - **Affects:** Applications that react to disconnects or send application messages through the client connection.
   - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
@@ -324,6 +331,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- Opt-in `CANONICAL_HOST_ALIASES` redirects listed site hosts to `ORIGIN` with 308 before static, prerendered and SSR deduplication, preserving methods and raw targets while keeping mounted health probes available.
 
 - **Pre-serialized client text sends.** `WSConnection.sendSerialized(text): boolean`
   validates the primitive-string input and calls `WebSocket.send` only when the

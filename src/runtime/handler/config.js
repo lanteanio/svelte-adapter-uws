@@ -6,6 +6,7 @@ import uWS from 'uWebSockets.js';
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { env } from '../env.js';
+import { parseCanonicalHostAliases } from '../utils/canonical-host.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { parse_as_bytes, parse_origin, originFromHeaders, OriginHeaderError, refusedHeaderSetting } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
@@ -38,7 +39,9 @@ export const ssl_reload_debounce_ms = Number.isFinite(_ssl_debounce_raw) && _ssl
 /** Optional comma-separated SNI host override; empty = auto-discover from the cert SAN. */
 export const ssl_sni_hosts = env('SSL_SNI_HOSTS', '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 
-export const origin = parse_origin(env('ORIGIN', undefined));
+const originEnv = env('ORIGIN', undefined);
+export const origin = parse_origin(originEnv);
+export const canonical_host_aliases = parseCanonicalHostAliases(env('CANONICAL_HOST_ALIASES', ''), originEnv);
 
 export const xff_depth = parseInt(env('XFF_DEPTH', '1'), 10);
 

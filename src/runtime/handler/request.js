@@ -11,6 +11,7 @@ import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.
 import { windowsReservedPath } from '../utils/windows-path.js';
 import { invalidRequestTarget } from '../utils/request-target.js';
 import { entersExactMount } from './route-registry.js';
+import { canonicalRedirectEnabled, tryCanonicalHostRedirect } from './canonical-host.js';
 
 // Read once: the platform does not change under a running process.
 const WINDOWS = process.platform === 'win32';
@@ -86,6 +87,7 @@ export function handleRequest(res, req) {
 	// router truncated. bench/40 put the query read and the scan inside the
 	// noise of a built-asset answer.
 	if (invalidRequestTarget(pathname, query)) return send400(res, method === 'head');
+	if (canonicalRedirectEnabled && tryCanonicalHostRedirect(res, req, pathname, query, method)) return;
 
 	// === STATIC FILE FAST PATH ===
 	// Minimum work: 1 Map lookup + 7 header reads (negotiation, the entity
