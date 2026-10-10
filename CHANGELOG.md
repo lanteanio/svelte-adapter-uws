@@ -94,18 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
-- **Fixed: local smooth respawns snap to authority.** Ordinary-cadence corrections that imply movement far beyond recent commanded speed now snap the local sprite to its reconciled state, clearing the old render sweep while preserving unacknowledged input replay, with ordinary corrections still easing and the existing speed-snap setting controlling both local and remote placement handling.
-  - **Affects:** Applications using smooth local prediction for teleports, respawns or server placements.
-  - **Action:** Keep the automatic default, supply a known movement ceiling, or use zero to disable speed checks.
-  - **Requires:** No new dependency or wire change.
-  - **Compatibility:** Automatic local detection needs two tick-like command intervals; an explicit numeric ceiling also works before that baseline exists.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: static text explicitly declares UTF-8.** Plain text, HTML, CSS, JavaScript and other indexed text assets now advertise UTF-8 in their HTTP Content-Type, so browsers decode non-ASCII bytes consistently and applications can identify legacy files that need conversion before deploying this header behavior.
-  - **Affects:** Static and prerendered text assets, including legacy Windows-1252 HTML, CSS or JavaScript files.
-  - **Action:** Re-encode non-UTF-8 text assets as UTF-8 before deploying.
+- **Fixed: deferred coalesced send failures reach application telemetry.** A value that cannot be serialized after backpressure now emits a structured operational event, allowing the application sink to react while the connection and remaining queue keep serving without turning a delayed application mistake into an uncaught transport callback failure.
+  - **Affects:** Applications using server sendCoalesced with values that fail delayed serialization.
+  - **Action:** Optionally register setOperationalEventSink and handle ws.send-coalesced.unserializable.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** The HTTP charset overrides HTML charset metadata and CSS @charset declarations. Files with another encoding are now interpreted as UTF-8; staticHeaders cannot override Content-Type per file.
+  - **Compatibility:** Immediate serialization failures still throw to the caller; the default sink prints the event, and identifier fields use private references and bounded error text remains application-provided.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
@@ -120,6 +113,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** No application change is required.
   - **Requires:** No new dependency.
   - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: local smooth respawns snap to authority.** Ordinary-cadence corrections that imply movement far beyond recent commanded speed now snap the local sprite to its reconciled state, clearing the old render sweep while preserving unacknowledged input replay, with ordinary corrections still easing and the existing speed-snap setting controlling both local and remote placement handling.
+  - **Affects:** Applications using smooth local prediction for teleports, respawns or server placements.
+  - **Action:** Keep the automatic default, supply a known movement ceiling, or use zero to disable speed checks.
+  - **Requires:** No new dependency or wire change.
+  - **Compatibility:** Automatic local detection needs two tick-like command intervals; an explicit numeric ceiling also works before that baseline exists.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: static text explicitly declares UTF-8.** Plain text, HTML, CSS, JavaScript and other indexed text assets now advertise UTF-8 in their HTTP Content-Type, so browsers decode non-ASCII bytes consistently and applications can identify legacy files that need conversion before deploying this header behavior.
+  - **Affects:** Static and prerendered text assets, including legacy Windows-1252 HTML, CSS or JavaScript files.
+  - **Action:** Re-encode non-UTF-8 text assets as UTF-8 before deploying.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The HTTP charset overrides HTML charset metadata and CSS @charset declarations. Files with another encoding are now interpreted as UTF-8; staticHeaders cannot override Content-Type per file.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
@@ -780,6 +787,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The release-note CLI now rejects consumer summaries whose categories are not grouped in Added, Changed, Fixed order, so the standard repository checks enforce the same ordering as the copy regression suite.
 
 - Cookie serialization rejects unpaired UTF-16 surrogates in names, raw values, domains and paths before relative URL normalization. Expires accepts only finite native Date values and formats them through the native Date method, preventing duck-typed or overridden formatters from supplying header bytes. Valid paired Unicode and normal cookie defaults remain unchanged.
+
+- Deferred coalesced serialization failures now reach the operational event sink with a stable error ID, connection request ID, private identifier references and bounded error details; throwing or rejecting observers cannot interrupt draining.
 
 - Request body cancellation stops both preallocated and streaming native upload callbacks before they copy or enqueue later chunks. Payload-limit errors use a private identity brand so hostile application rejection objects cannot throw during auth or SSR failure classification.
 

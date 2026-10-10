@@ -6,7 +6,8 @@ import { counters, wsConnections } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { sendControl } from './control-egress.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
-import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
+import { ADAPTER_ERROR_IDS } from '../error-registry.js';
+import { privateValueMetadata } from '../utils/observability-privacy.js';
 
 /**
  * True when `ref` is a usable handle for subscribe acks. Numeric refs
@@ -230,6 +231,28 @@ export function sendSubscribeDenied(ws, topic, ref, reason) {
 
 const coalescedContinuations = new WeakSet();
 
+/** Report a dropped entry with private identifier fields and bounded application error text. */
+function reportCoalescedFailure(userData, msg, key, err) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.websocket',
+			event: 'ws.send-coalesced.unserializable',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'A queued sendCoalesced value has no JSON form and was dropped.',
+			attributes: {
+				errorId: ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE,
+				requestId: userData[WS_PLATFORM]?.requestId ?? null,
+				key: privateValueMetadata(key, 'coalesced-key'),
+				topic: privateValueMetadata(msg.topic, 'topic'),
+				event: privateValueMetadata(msg.event, 'event'),
+				error: diagnosticError(err)
+			}
+		});
+	} catch { /* reporting must not escape drain */ }
+}
+
 /**
  * Drain any pending coalesce-by-key messages on a single connection.
  * Serializes lazily: only the surviving (latest) value per key pays
@@ -271,7 +294,7 @@ export function flushCoalescedFor(ws, callerEntry) {
 		if (payload === undefined) {
 			const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 			if (msg === callerEntry) callerError = err;
-			else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
+			else reportCoalescedFailure(userData, msg, key, err);
 			return 1;
 		}
 		let result;

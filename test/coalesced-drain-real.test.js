@@ -11,11 +11,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
+import { parseDiagnostic, setOperationalEventSink } from '../src/observability.js';
 import { coalescedBadValue, coalescedNameProbe, coalescedReentrantProbe } from './fixture/src/coalesced-probe.js';
 
 let teardown = [];
 
 afterEach(async () => {
+	setOperationalEventSink(null);
 	for (const fn of teardown.reverse()) {
 		try { await fn(); } catch { /* already down */ }
 	}
@@ -73,8 +75,8 @@ async function bootTesting() {
  * A real client. With `stall`, it stops reading from the upgrade on and
  * resumes when told, so the server backs up in uWS rather than the kernel.
  */
-async function client(url, { stall = false } = {}) {
-	const ws = new WebSocket(url);
+async function client(url, { stall = false, requestId } = {}) {
+	const ws = new WebSocket(url, requestId ? { headers: { 'x-request-id': requestId } } : {});
 	const state = { frames: [], binaryBytes: 0, error: null };
 	ws.on('error', (err) => { state.error = err.message; });
 	ws.on('message', (d, isBinary) => {
@@ -133,6 +135,38 @@ describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
 		expect(await until(() => c.state.frames.some((f) => f.includes('"after":true')))).toBe(true);
 	}, 30000);
 
+	it.each(['capture', 'throw', 'reject'])('delivers a deferred failure to the operational sink (%s)', async (mode) => {
+		vi.spyOn(console, 'error').mockImplementation(() => {});
+		const records = [];
+		setOperationalEventSink((record) => {
+			if (record.event !== 'ws.send-coalesced.unserializable') return;
+			records.push(record);
+			if (mode === 'throw') throw new Error('sink failed');
+			if (mode === 'reject') return Promise.reject(new Error('sink rejected'));
+		});
+		const { url } = await boot();
+		const requestId = 'coalesced-sink-' + mode;
+		const c = await client(url, { stall: true, requestId });
+		c.ws.send(JSON.stringify({ type: 'coalesce-probe', kind: 'bigint' }));
+		await new Promise((r) => setTimeout(r, 300));
+		c.resume();
+		expect(await until(() => records.length > 0), 'the app operational sink receives the deferred failure').toBe(true);
+		expect(records).toHaveLength(1);
+		const record = records[0];
+		expect(record).toMatchObject({ source: 'svelte-adapter-uws', component: 'runtime.websocket', severity: 'error', dataClass: 'pseudonymous' });
+		expect(record.attributes).toMatchObject({ errorId: 'ADAPTER-ERR-COALESCED-UNSERIALIZABLE', error: { name: 'TypeError' } });
+		expect(record.attributes.requestId).toBe(requestId);
+		for (const [field, kind] of [['key', 'coalesced-key'], ['topic', 'topic'], ['event', 'event']]) {
+			expect(record.attributes[field]).toMatchObject({ dataClass: 'pseudonymous', kind, valueType: 'string', ref: expect.stringMatching(new RegExp('^' + kind + ':')) });
+		}
+		expect(JSON.stringify(record)).not.toContain('coalesced-bad');
+		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesced-good"')))).toBe(true);
+		expect(c.state.binaryBytes).toBeGreaterThan(1024 * 1024);
+		expect(c.state.frames.some((f) => f.includes('"coalesced-bad"'))).toBe(false);
+		c.ws.send(JSON.stringify({ type: 'echo', payload: { after: true } }));
+		expect(await until(() => c.state.frames.some((f) => f.includes('"after":true')))).toBe(true);
+	}, 30000);
+
 	it('continues draining when the error reporter throws', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('reporter failed'); });
 		const { url } = await boot();
@@ -157,9 +191,9 @@ describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
 
 		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesced-good"'))), 'the serializable value is delivered after the drain').toBe(true);
 		expect(c.state.binaryBytes, 'the backlog drained before it').toBeGreaterThan(1024 * 1024);
-		expect(await until(() => error.mock.calls.some((call) => String(call[0]).includes('[ADAPTER-ERR-COALESCED-UNSERIALIZABLE]'))), 'the dropped value is reported').toBe(true);
-		const line = error.mock.calls.find((call) => String(call[0]).includes('[ADAPTER-ERR-COALESCED-UNSERIALIZABLE]'));
-		expect(line[1]).toBeInstanceOf(TypeError);
+		expect(await until(() => error.mock.calls.some((call) => String(call[0]).includes('ADAPTER-ERR-COALESCED-UNSERIALIZABLE'))), 'the dropped value is reported').toBe(true);
+		const line = error.mock.calls.find((call) => String(call[0]).includes('ADAPTER-ERR-COALESCED-UNSERIALIZABLE'));
+		expect(parseDiagnostic(line[0])?.record).toMatchObject({ event: 'ws.send-coalesced.unserializable', attributes: { errorId: 'ADAPTER-ERR-COALESCED-UNSERIALIZABLE', error: { name: 'TypeError' } } });
 		expect(c.state.frames.some((f) => f.includes('"coalesced-bad"'))).toBe(false);
 
 		// The worker and the connection are both still serving.

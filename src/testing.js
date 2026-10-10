@@ -728,6 +728,28 @@ export async function createTestServer(options = {}) {
 	 * @param {object} [callerEntry]
 	 */
 	const coalescedContinuationsT = new WeakSet();
+
+	/** Report a dropped entry with private identifier fields and bounded application error text. */
+	function reportCoalescedFailureT(userData, msg, key, err) {
+		try {
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.websocket',
+				event: 'ws.send-coalesced.unserializable',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'A queued sendCoalesced value has no JSON form and was dropped.',
+				attributes: {
+					errorId: ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE,
+					requestId: userData[WS_PLATFORM]?.requestId ?? null,
+					key: privateValueMetadata(key, 'coalesced-key'),
+					topic: privateValueMetadata(msg.topic, 'topic'),
+					event: privateValueMetadata(msg.event, 'event'),
+					error: diagnosticError(err)
+				}
+			});
+		} catch { /* reporting must not escape drain */ }
+	}
 	function flushCoalescedForT(ws, callerEntry) {
 		let userData;
 		try { userData = ws.getUserData(); }
@@ -748,7 +770,7 @@ export async function createTestServer(options = {}) {
 			if (payload === undefined) {
 				const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 				if (msg === callerEntry) callerError = err;
-				else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
+				else reportCoalescedFailureT(userData, msg, key, err);
 				return 1;
 			}
 			return sendOutboundT(ws, payload);

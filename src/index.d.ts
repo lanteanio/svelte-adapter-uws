@@ -3363,9 +3363,14 @@ export interface Platform {
 	 * The flush attempts immediately and again on every uWS drain event.
 	 * On backpressure or drop from the underlying socket, pumping stops
 	 * and resumes when the connection drains. A value JSON cannot carry
-	 * throws a TypeError from this call when it flushes at once, as `send`
+	 * throws from this call when it flushes at once, as `send`
 	 * does; one queued behind backpressure is dropped when it drains and
-	 * reported as `ADAPTER-ERR-COALESCED-UNSERIALIZABLE`.
+	 * reported as `ADAPTER-ERR-COALESCED-UNSERIALIZABLE` through the operational
+	 * sink event `ws.send-coalesced.unserializable`. Register
+	 * `setOperationalEventSink` from `svelte-adapter-uws/observability` to act
+	 * on its connection requestId, bounded error and private key/topic/event
+	 * references. Queued payload objects are not retained; identifier
+	 * fields use private references and bounded error text is application-provided.
 	 *
 	 * @example
 	 * ```js

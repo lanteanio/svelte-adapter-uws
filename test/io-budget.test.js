@@ -1083,7 +1083,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// held memberships and history. These guards add no byte copies.
 	// Subscription rollback changes membership, grants and cohort bookkeeping
 	// through ws-symbols. It adds no frame byte access or copy primitive.
-	ingress: '8e5407261dd1f322989d648da8037a913bb55941f3e282c920a5464889f82047',
+	// Deferred coalesced failures now use the canonical operational sink.
+	// The registry emission shape and cold reporter changed; identifier metadata
+	// hashes strings only after failure. No queued payload/frame backing bytes,
+	// normal ingress or send ownership, or copy boundary changed.
+	ingress: 'b6ba42a3180a320043f254480643c53037c412a66f4c8bdb96ec613fb71acbbf',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -2046,7 +2050,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// without changing any frame construction or byte ownership. Canonical
 	// host aliases are parsed from configuration at startup; the new config
 	// dependency reads host strings only and introduces no frame copy.
-	platform: '4f528f19d8dc1d105c85ab13e5e98aa7da5cc076a5be8bfa45757ffbfb254ce4',
+	// Deferred coalesced failures now use the canonical operational sink.
+	// The registry emission shape and cold reporter changed; identifier metadata
+	// hashes strings only after failure. No queued payload/frame backing bytes,
+	// normal ingress or send ownership, or copy boundary changed.
+	platform: '48cdc102754123e4c1a53b053bc8c352cd4232ca23588e5a8bbbac7929b4eb99',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2446,7 +2454,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// no payload construction, copy, or fan-out write changes.
 	// Membership rollback is also reachable through this module's utils barrel.
 	// It changes grants and subscription bookkeeping, not frame byte ownership.
-	'wire-fanout': '35706e26666a036bfc83f63a2a849103954c51fbea549f3b8d75020a65c6eea4',
+	// The shared registry and cold coalesced failure reporter also change this
+	// reachable graph; no fan-out backing bytes or copy boundary changed.
+	'wire-fanout': 'fc3ad12de4e3a97ef40bf0587a201850ed31158b748497c01a8fdaec9c8f0569',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
