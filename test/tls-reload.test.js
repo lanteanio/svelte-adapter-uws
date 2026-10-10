@@ -284,6 +284,21 @@ describe('createCertWatcher (injected clock + fs)', () => {
 		expect(seen.length).toBe(1);
 	});
 
+	it('contains a throwing lost-watch reporter and closes the watcher once', () => {
+		const fake = emitterWatcher();
+		let reports = 0;
+		const watcher = createCertWatcher({
+			certPath: '/certs/live.crt', onChange: () => {}, watchFs: () => fake,
+			onError: () => { reports++; throw new Error('report failed'); }
+		});
+		watcher.start();
+		expect(() => fake.emit('error', new Error('watch died'))).not.toThrow();
+		expect(() => fake.emit('error', new Error('watch died again'))).not.toThrow();
+		expect(fake.closed).toBe(1);
+		expect(reports).toBe(1);
+		watcher.stop();
+	});
+
 	it('does not throw on an error event when no onError is configured', () => {
 		// The listener is attached unconditionally: not crashing is the point,
 		// and being told is the option. A caller that passes no onError still
@@ -621,6 +636,19 @@ describe('reloadClusterTls (cluster broadcast)', () => {
 		expect(() => reloadClusterTls({ workers: [good1, bad, good2] })).not.toThrow();
 		expect(good1.posted).toEqual([{ type: 'tls-reload' }]);
 		expect(good2.posted).toEqual([{ type: 'tls-reload' }]);
+	});
+
+	it('still broadcasts and keeps the prior state when its error reporter throws', () => {
+		const workers = [mockWorker(), mockWorker()];
+		const previous = { hosts: ['kept.example.com'], fingerprint: 'AA:BB' };
+		let reports = 0;
+		const state = reloadClusterTls({
+			workers, state: previous, source: { certPath: '/no/such/cert.crt' },
+			onError: () => { reports++; throw new Error('report failed'); }
+		});
+		expect(reports).toBe(1);
+		expect(state).toBe(previous);
+		for (const worker of workers) expect(worker.posted).toEqual([{ type: 'tls-reload' }]);
 	});
 
 	it('reports an unreadable cert via onError but still broadcasts and keeps the prior state', () => {

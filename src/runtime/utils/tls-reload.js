@@ -366,7 +366,7 @@ export function createCertWatcher(config) {
 		watcher = null;
 		if (timer) { clearTimer(timer); timer = null; }
 		try { started.close(); } catch { /* already gone */ }
-		if (config.onError) config.onError(err);
+		try { config.onError?.(err); } catch { /* reporting must not kill the watch owner */ }
 	}
 
 	function onEvent(started, name) {
@@ -470,7 +470,7 @@ export function reloadClusterTls({ workers, source, state, onError }) {
 		try {
 			next = readCertIdentity(source.certPath, source.hosts);
 		} catch (err) {
-			if (onError) onError(err);
+			try { onError?.(err); } catch { /* reporting must not interrupt the worker broadcast */ }
 		}
 	}
 	for (const worker of workers) {
