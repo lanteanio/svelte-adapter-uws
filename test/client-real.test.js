@@ -47,7 +47,7 @@ globalThis.window = /** @type {any} */ ({
 });
 
 // Import the real module - vitest.config.js aliases 'svelte/store'
-const clientModule = await import('../src/client.js');
+let clientModule = await import('../src/client.js');
 
 // - Helpers ------------------------------------------------------------------
 
@@ -67,12 +67,14 @@ function get(store) {
 // - Tests --------------------------------------------------------------------
 
 describe('client.js (real module)', () => {
-	beforeEach(() => {
-		// Reset singleton between tests by closing any existing connection
+	beforeEach(async () => {
+		// Each case starts a fresh module lifetime; close is a permanent barrier.
 		try {
 			const conn = clientModule.connect();
 			conn.close();
 		} catch { /* no existing connection */ }
+		vi.resetModules();
+		clientModule = await import('../src/client.js');
 		MockWebSocket._last = null;
 	});
 

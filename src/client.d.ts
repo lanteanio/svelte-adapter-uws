@@ -205,7 +205,8 @@ export function on<T = unknown>(topic: string): TopicStore<WSEvent<T>>;
 export function on<T = unknown>(topic: string, event: string): TopicStore<{ data: T }>;
 
 /**
- * Readable store - connection status. Auto-connects on first access.
+ * Readable store - connection status. Auto-connects on first access and follows
+ * explicit connection replacement. After close(), access alone never reconnects.
  *
  * Five states drive distinct UI affordances:
  * - `'connecting'` - establishing a connection (initial attempt or retry)
@@ -693,7 +694,12 @@ export interface WSConnection {
 	 */
 	resumeOnline(): void;
 
-	/** Close the connection permanently. Will not auto-reconnect. */
+	/**
+	 * Close this connection permanently. Module stores and plugin accessors stay
+	 * inert until a later explicit connect() creates a replacement, which global
+	 * topic/diagnostic stores and ingress handles follow. Connection-bound stores
+	 * remain attached to this closed connection.
+	 */
 	close(): void;
 }
 

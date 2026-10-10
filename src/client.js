@@ -9,6 +9,9 @@ let singleton = null;
 
 /** @type {'explicit' | 'implicit' | ''} */
 let singletonCreatedBy = '';
+let singletonClosed = false;
+/** @type {Set<(connection: ReturnType<typeof createConnection>) => void>} */
+const connectionFollowers = new Set();
 
 /**
  * Client-side binary wire codecs, keyed by topic-name prefix. A plugin (e.g.
@@ -98,14 +101,28 @@ export function registerWireCodec(prefix, codec) {
  *   - `dispose()` releases the binding.
  *
  * The transport is generic (any consumer can encode any payload); the server
- * decodes and routes by the registered `kind`. Auto-connects, like `on()`.
+ * decodes and routes by the registered `kind`. Follows the singleton, with the
+ * same auto-connect and permanent-close barrier as `on()`.
  *
  * @param {string} kind - the binding kind (e.g. `'smooth.command:1'`)
  * @param {any} target - opaque destination the server-side handler interprets
  * @returns {{ send: (schemaVersion: number, payload: Uint8Array) => boolean, live: () => boolean, dispose: () => void }}
  */
 export function bindIngress(kind, target) {
-	return ensureConnection()._bindIngress(kind, target);
+	let binding = null;
+	const stop = followStore(connection => ({
+		subscribe(fn) {
+			const next = connection._bindIngress(kind, target);
+			fn(next);
+			return () => next.dispose();
+		}
+	})).subscribe(value => { binding = value; });
+	return {
+		send(schemaVersion, payload) { return binding?.send(schemaVersion, payload) ?? false; },
+		live() { return binding?.live() ?? false; },
+		reannounce() { binding?.reannounce(); },
+		dispose() { stop(); binding = null; }
+	};
 }
 
 /**
@@ -175,12 +192,111 @@ function wireCodecForTopic(topic) {
  * @returns {ReturnType<typeof createConnection>}
  */
 function ensureConnection(options, explicit = false) {
-	if (!singleton) {
+	if (!singleton || (explicit && singletonClosed)) {
 		singletonCreatedBy = explicit ? 'explicit' : 'implicit';
-		singleton = createConnection(options || {});
+		singletonClosed = false;
+		const connection = createConnection(options || {});
+		singleton = connection;
+		for (const follow of [...connectionFollowers]) {
+			if (singleton !== connection) break;
+			follow(connection);
+		}
 	}
 	return singleton;
 }
+
+/**
+ * Follow explicit replacement without adding another writable store to dispatch.
+ * @template T
+ * @param {(connection: ReturnType<typeof createConnection>) => import('svelte/store').Readable<T>} select
+ * @returns {import('svelte/store').Readable<T>}
+ */
+function followStore(select) {
+	let selectedConnection = ensureConnection();
+	let selectedStore = select(selectedConnection);
+	return {
+		subscribe(fn) {
+			let active = true;
+			let generation = 0;
+			/** @type {(() => void) | null} */
+			let stop = null;
+			function follow(connection) {
+				if (!active) return;
+				const ownGeneration = ++generation;
+				const previous = stop;
+				stop = null;
+				previous?.();
+				if (!active || ownGeneration !== generation || singleton !== connection) return;
+				if (selectedConnection !== connection) {
+					selectedConnection = connection;
+					selectedStore = select(connection);
+				}
+				const cleanup = selectedStore.subscribe(value => {
+					if (active && ownGeneration === generation && singleton === connection) fn(value);
+				});
+				if (active && ownGeneration === generation && singleton === connection) stop = cleanup;
+				else cleanup();
+			}
+			connectionFollowers.add(follow);
+			follow(ensureConnection());
+			return () => {
+				if (!active) return;
+				active = false;
+				generation++;
+				connectionFollowers.delete(follow);
+				const cleanup = stop;
+				stop = null;
+				cleanup?.();
+			};
+		}
+	};
+}
+
+/**
+ * Create a .scan() method bound to a source store.
+ * @param {{ subscribe: (fn: (value: any) => void) => () => void }} source
+ */
+function makeScan(source) {
+	/**
+	 * @template A
+	 * @param {A} initial
+	 * @param {(acc: A, value: any) => A} reducer
+	 * @returns {import('svelte/store').Readable<A>}
+	 */
+	return function scan(initial, reducer) {
+		let acc = initial;
+		const accumulated = writable(initial);
+		/** @type {(() => void) | null} */
+		let sourceUnsub = null;
+		let subCount = 0;
+
+		return {
+			subscribe(fn) {
+				// Start listening to source when first subscriber arrives
+				if (subCount === 0) {
+					sourceUnsub = source.subscribe((value) => {
+						if (value !== null) {
+							acc = reducer(acc, value);
+							accumulated.set(acc);
+						}
+					});
+				}
+				subCount++;
+				const unsub = accumulated.subscribe(fn);
+				return () => {
+					unsub();
+					subCount--;
+					// Stop listening when last subscriber leaves
+					if (subCount === 0 && sourceUnsub) {
+						sourceUnsub();
+						sourceUnsub = null;
+					}
+				};
+			}
+		};
+	};
+}
+
 
 /**
  * Connect to the WebSocket server.
@@ -194,7 +310,7 @@ function ensureConnection(options, explicit = false) {
  * @returns {import('./client.js').WSConnection}
  */
 export function connect(options = {}) {
-	if (singleton && singletonCreatedBy === 'implicit' && Object.keys(options).length > 0) {
+	if (singleton && !singletonClosed && singletonCreatedBy === 'implicit' && Object.keys(options).length > 0) {
 		console.warn(
 			'[ws] connect() was called with options, but the connection already exists ' +
 			'(created automatically by on(), status, or ready()). ' +
@@ -207,7 +323,8 @@ export function connect(options = {}) {
 
 /**
  * Get a reactive Svelte store for a topic (and optionally a specific event).
- * Auto-connects and auto-subscribes - this is the only function most users need.
+ * Auto-connects and auto-subscribes on first use. After close(), stays inert
+ * until explicit connect(); existing stores then follow the new connection.
  *
  * @overload
  * @param {string} topic - Topic to subscribe to
@@ -224,12 +341,8 @@ export function connect(options = {}) {
  * @param {string} [event]
  */
 export function on(topic, event) {
-	const conn = ensureConnection();
-	if (event !== undefined) {
-		return conn._onEvent(topic, event);
-	}
-	const store = conn.on(topic);
-	return store;
+	const store = followStore(conn => event !== undefined ? conn._onEvent(topic, event) : conn.on(topic));
+	return { subscribe: store.subscribe, scan: makeScan(store) };
 }
 
 /**
@@ -277,7 +390,8 @@ export function onDerived(topicFn, store) {
 }
 
 /**
- * Readable store - connection status. Auto-connects on first access.
+ * Readable store - connection status. Auto-connects on first access and follows
+ * explicit connection replacement. After close(), access alone never reconnects.
  *
  * Five states drive distinct UI affordances:
  * - `'connecting'` - establishing a connection (initial attempt or retry)
@@ -291,7 +405,7 @@ export function onDerived(topicFn, store) {
  */
 export const status = {
 	subscribe(fn) {
-		return ensureConnection().status.subscribe(fn);
+		return followStore(conn => conn.status).subscribe(fn);
 	}
 };
 
@@ -306,7 +420,7 @@ export const status = {
  */
 export const denials = {
 	subscribe(fn) {
-		return ensureConnection().denials.subscribe(fn);
+		return followStore(conn => conn.denials).subscribe(fn);
 	}
 };
 
@@ -327,7 +441,7 @@ export const denials = {
  */
 export const failure = {
 	subscribe(fn) {
-		return ensureConnection().failure.subscribe(fn);
+		return followStore(conn => conn.failure).subscribe(fn);
 	}
 };
 
@@ -340,7 +454,7 @@ export const failure = {
  */
 export const overloads = {
 	subscribe(fn) {
-		return ensureConnection().overloads.subscribe(fn);
+		return followStore(conn => conn.overloads).subscribe(fn);
 	}
 };
 
@@ -498,8 +612,7 @@ export function crud(topic, initial = [], options = {}) {
 	}
 
 	// maxAge mode: track timestamps per key, sweep on interval
-	const conn = ensureConnection();
-	const source = conn.on(topic);
+	const source = on(topic);
 	const keyOf = (/** @type {any} */ x) => String(x[key]);
 	const reducerOpts = { keyOf, prepend };
 
@@ -603,8 +716,7 @@ export function lookup(topic, initial = [], options = {}) {
 	}
 
 	// maxAge mode: track timestamps per key, sweep on interval
-	const conn = ensureConnection();
-	const source = conn.on(topic);
+	const source = on(topic);
 	const keyOf = (/** @type {any} */ x) => x[key];
 	const reducerOpts = { keyOf };
 
@@ -2360,7 +2472,7 @@ function createConnection(options) {
 	function doUnsubscribe(topic) {
 		// Drop the managed mark (re-added on the next server-driven attach) to keep
 		// the set bounded across churn of dynamic topics.
-		managedTopics.delete(topic);
+		if (singleton === connection) managedTopics.delete(topic);
 		subscribedTopics.delete(topic);
 		pendingRecoveries.delete(topic);
 		pendingRetryRefs.delete(topic);
@@ -2395,50 +2507,6 @@ function createConnection(options) {
 		}
 	}
 
-	/**
-	 * Create a .scan() method bound to a source store.
-	 * @param {{ subscribe: (fn: (value: any) => void) => () => void }} source
-	 */
-	function makeScan(source) {
-		/**
-		 * @template A
-		 * @param {A} initial
-		 * @param {(acc: A, value: any) => A} reducer
-		 * @returns {import('svelte/store').Readable<A>}
-		 */
-		return function scan(initial, reducer) {
-			let acc = initial;
-			const accumulated = writable(initial);
-			/** @type {(() => void) | null} */
-			let sourceUnsub = null;
-			let subCount = 0;
-
-			return {
-				subscribe(fn) {
-					// Start listening to source when first subscriber arrives
-					if (subCount === 0) {
-						sourceUnsub = source.subscribe((value) => {
-							if (value !== null) {
-								acc = reducer(acc, value);
-								accumulated.set(acc);
-							}
-						});
-					}
-					subCount++;
-					const unsub = accumulated.subscribe(fn);
-					return () => {
-						unsub();
-						subCount--;
-						// Stop listening when last subscriber leaves
-						if (subCount === 0 && sourceUnsub) {
-							sourceUnsub();
-							sourceUnsub = null;
-						}
-					};
-				}
-			};
-		};
-	}
 
 	/**
 	 * Get a reactive store for a topic (all events).
@@ -2656,6 +2724,7 @@ function createConnection(options) {
 	}
 
 	function close() {
+		if (singleton === connection) singletonClosed = true;
 		intentionallyClosed = true;
 		cancelAttempt();
 		clearReconnect();
@@ -2676,8 +2745,6 @@ function createConnection(options) {
 		const sock = ws;
 		ws = null;
 		sock?.close();
-		singleton = null;
-		singletonCreatedBy = '';
 		// Intentional termination is not a failure cause. Clear any prior
 		// value here too because if the user calls close() while we are
 		// already disconnected (no live ws), onclose never re-enters and
@@ -2830,7 +2897,7 @@ function createConnection(options) {
 		}
 	}
 
-	return {
+	const connection = {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
 		denials: { subscribe: denialsStore.subscribe },
@@ -2881,4 +2948,5 @@ function createConnection(options) {
 		resumeOnline,
 		close
 	};
+	return connection;
 }

@@ -666,6 +666,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Static `If-None-Match` uses weak comparison against the selected representation, so its quoted tag revalidates with or without `W/`, including lists. `If-Match` retains exact issued-tag matching across codings; real GET and HEAD regressions cover the independent policies and precedence.
 
+- Global client stores and binary ingress handles follow an explicitly reopened connection, preserving accumulated helpers across logout/login. Store access and plugin construction after permanent close stay offline until connect() is called.
+
 - Reconnecting clients keep the requested recovery offset until the matching topic acknowledgement completes the gap-fill. Live frames still reach listeners, but an interrupted recovery cannot move its next request past history it never received.
 
 - Recovery markers clear stale topic offsets without losing their sequence-space identity. Both truncation forms and denials retain the epoch, relay gaps keep the old generation for a safe mismatch, and rehydrate records its announced generation.
