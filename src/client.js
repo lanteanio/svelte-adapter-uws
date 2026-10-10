@@ -55,6 +55,17 @@ const managedTopics = new Set();
  * subscribes the socket server-side calls this before attaching the client-side
  * store, so the store attach does not also send a client subscribe frame. Safe
  * to call repeatedly (idempotent) and before the connection exists.
+ *
+ * Management applies to every local holder of the topic. Releasing one holder
+ * does not transfer subscription authority to another: all holders depend on
+ * the server to authorize membership and restore it after reconnect. A denied
+ * managed attachment leaves remaining listeners waiting for a later authorized
+ * attachment; they do not fall back to client wire subscriptions.
+ *
+ * The mark clears when the last local reference is released or `unsubscribe(topic)`
+ * force-clears the topic. Release every holder before attaching a new ordinary
+ * client subscription. This preserves framework authorization even when a plain
+ * listener outlives the framework's own listener.
  * @param {string} topic
  */
 export function setTopicManaged(topic) {
