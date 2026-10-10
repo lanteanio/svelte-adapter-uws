@@ -220,9 +220,11 @@ describeMaybe('static preconditions follow the RFC evaluation order', () => {
 		expect(serve({ headOnly: true, ifMatch: 'W/"stranger"' }).status).toBe('412 Precondition Failed');
 	});
 
-	it('an immutable entry ignores preconditions entirely, exactly as before the date validator', () => {
+	it('an immutable entry ignores absent date validators but evaluates entity conditions', () => {
 		expect(serve({ entry: immutableEntry, ifModifiedSince: LATER }).status).toBe('200 OK');
-		expect(serve({ entry: immutableEntry, ifMatch: 'W/"stranger"' }).status).toBe('200 OK');
+		expect(serve({ entry: immutableEntry, ifMatch: 'W/"stranger"' }).status).toBe('412 Precondition Failed');
+		expect(serve({ entry: immutableEntry, ifMatch: '*' }).status).toBe('200 OK');
+		expect(serve({ entry: immutableEntry, ifNoneMatch: '*' }).status).toBe('304 Not Modified');
 	});
 
 	it('a configured last-modified cannot displace the file time', () => {

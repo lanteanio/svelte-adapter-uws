@@ -39,7 +39,7 @@ import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-di
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
-import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless, sendHandshakeRefusal } from './handler/http-helpers.js';
+import { PayloadTooLargeError, METHODS, send400, send413, send500, endText, endBodyless, sendHandshakeRefusal, assertResponseStatus } from './handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './utils/ws-handshake.js';
 import { invalidRequestTarget } from './utils/request-target.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
@@ -1537,6 +1537,7 @@ if (WS_ENABLED) {
 					}
 
 					if (result instanceof Response) {
+						assertResponseStatus(result.status);
 						// User returned a full Response - honour it, but merge any
 						// cookies set via cookies.set() so both APIs work together.
 						const buf = result.body ? Buffer.from(await result.arrayBuffer()) : null;

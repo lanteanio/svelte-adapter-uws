@@ -280,11 +280,12 @@ export const _t_static = monotonicNow();
  * splits on commas, which no validator this lane issues can contain.
  *
  * @param {string} header
- * @param {string} tag - a non-empty validator this lane issued
+ * @param {string} tag - a validator this lane issued, or empty for immutable assets
  * @returns {boolean}
  */
 function etagListHas(header, tag) {
 	if (header === '*') return true;
+	if (!tag) return false;
 	let start = 0;
 	while (start < header.length) {
 		let comma = header.indexOf(',', start);
@@ -296,7 +297,7 @@ function etagListHas(header, tag) {
 }
 
 /**
- * Evaluate the request's preconditions against a mutable entry, in the RFC's
+ * Evaluate the request's preconditions against an existing entry, in the RFC's
  * order (RFC 9110 13.2.2): If-Match first, If-Unmodified-Since only in its
  * absence, then If-None-Match, then If-Modified-Since only when no entity
  * validator was sent - so a failed If-Match is never converted into a 304 by
@@ -312,9 +313,9 @@ function etagListHas(header, tag) {
  * `*`. An unparseable date is an ignored header, never a refusal, and dates
  * compare at the whole-second precision HTTP dates carry.
  *
- * Pure and exported for the case table; the caller guards on the entry
- * carrying a validator at all (immutable assets carry none - their versioned
- * filename is the validator - and skip evaluation entirely).
+ * Pure and exported for the case table. Immutable assets carry no ETag or
+ * Last-Modified, but wildcard conditions still test their existence. A
+ * specific entity-tag cannot match an entry that carries no validator.
  *
  * @param {NegotiatedStaticEntry} entry
  * @param {string} repEtag - the selected representation's validator
@@ -416,9 +417,9 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 	// RFC's own order and against the validator of the representation this
 	// request would actually receive - matching the identity ETag for a
 	// client that negotiated brotli would answer 304 for bytes that client
-	// never held. Only entries carrying validators evaluate; immutable
-	// assets carry none, their versioned filename is the validator.
-	if (repEtag && (ifNoneMatch !== '' || ifMatch !== '' || ifUnmodifiedSince !== '' || ifModifiedSince !== '')) {
+	// never held. Immutable assets carry no validator, but a wildcard still
+	// tests their existence and must run through the same precedence rules.
+	if (ifNoneMatch !== '' || ifMatch !== '' || ifUnmodifiedSince !== '' || ifModifiedSince !== '') {
 		const verdict = staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, ifNoneMatch, ifModifiedSince);
 		if (verdict === 412) {
 			// The precondition the caller staked the request on does not hold.

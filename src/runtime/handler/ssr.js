@@ -7,7 +7,7 @@ import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
-import { PayloadTooLargeError, send400, send413, send500, endText, endBodyless } from './http-helpers.js';
+import { PayloadTooLargeError, send400, send413, send500, endText, endBodyless, assertResponseStatus } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { declaresBodyPastCap, isDedupBufferable, readBodyUpTo } from './ssr-dedup.js';
@@ -520,6 +520,7 @@ function writeHeaders(res, response) {
  *   body never does
  */
 async function writeResponse(res, response, state, acceptEncoding, headOnly = false) {
+	assertResponseStatus(response.status);
 	// No body - write headers + end in a single cork (one syscall). What the
 	// response may say about its length - and when a declared Content-Length
 	// counts - is endBodyless's rule.

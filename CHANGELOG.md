@@ -208,7 +208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Apps that run `vite dev` with `server.https`, and `authenticate` hooks that read `event.url` or `event.request.url`, or return a Response, under `vite dev`.
   - **Action:** None.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Dev only; production is unchanged. Under `server.https` a same-origin `Origin` on the WebSocket upgrade and the auth endpoint is the `https://` one, as under production's `SSL_CERT`, and the `http://` one for the same host is refused. The hook gets the request's own path and query in `event.url` and `request.url`, as in production, instead of `/` with the query. Another spelling of the auth path goes on to the app, as in production, and so does any dashboard spelling but its path and the paths under it; trailing slashes on `dashboard.path` are dropped. Over HTTP/2 the hook's `headers` carry no pseudo-headers and `host` is the `:authority`, and a Response the hook returns is written without the connection headers HTTP/2 does not carry, such as `transfer-encoding`. A hook Response whose body fails to read answers a 500 without the hook's headers and cookies, as in production. A status that is no final status node can write, such as the 0 of `Response.error()`, answers the same 500, and over HTTP/1.1 so does a header value or cookie that node's HTTP/1.1 writer refuses; production writes both as given. Header values and cookies with text past ASCII go out as their UTF-8 bytes, as production writes them. A client that leaves partway through an auth POST no longer ends the dev server. Over HTTP/1.1 a Response node refuses only as it writes it, such as a 204 announcing a `trailer`, closes the connection. A hook 304 keeps the `content-length` it declares when that reads as a length.
+  - **Compatibility:** Dev only; production is unchanged. Under `server.https` a same-origin `Origin` on the WebSocket upgrade and the auth endpoint is the `https://` one, as under production's `SSL_CERT`, and the `http://` one for the same host is refused. The hook gets the request's own path and query in `event.url` and `request.url`, as in production, instead of `/` with the query. Another spelling of the auth path goes on to the app, as in production, and so does any dashboard spelling but its path and the paths under it; trailing slashes on `dashboard.path` are dropped. Over HTTP/2 the hook's `headers` carry no pseudo-headers and `host` is the `:authority`, and a Response the hook returns is written without the connection headers HTTP/2 does not carry, such as `transfer-encoding`. A hook Response whose body fails to read answers a 500 without the hook's headers and cookies, as in production. A status that is no final status node can write, such as the 0 of `Response.error()`, answers the same 500, and over HTTP/1.1 so does a header value or cookie that node's HTTP/1.1 writer refuses; production rejects invalid final statuses too but writes these header values as given. Header values and cookies with text past ASCII go out as their UTF-8 bytes, as production writes them. A client that leaves partway through an auth POST no longer ends the dev server. Over HTTP/1.1 a Response node refuses only as it writes it, such as a 204 announcing a `trailer`, closes the connection. A hook 304 keeps the `content-length` it declares when that reads as a length.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: malformed bodyless response lengths no longer produce enormous headers.** An authenticate hook or endpoint that declares `abc`, a negative length or an unsafe integer now omits `Content-Length` on HEAD and 304 responses, while a network-error Response now produces a valid 500 before hook cookies or headers are written.
+  - **Affects:** Applications returning their own Responses from `authenticate`, endpoints or server hooks.
+  - **Action:** Declare the actual GET representation length when supplying a length on HEAD or 304; omit it when unknown.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Decimal-prefix parsing is retained: `42abc` still reports `42`, and zero and safe positive integers remain accepted. Responses with status 0, including `Response.error()`, now receive a clean 500. Valid statuses, 204 framing and ordinary bodyless responses are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: immutable assets honor wildcard cache conditions.** A GET or HEAD with `If-None-Match: *` now receives 304 when a versioned asset exists, including brotli and gzip variants, where these requests previously returned 200 because assets without an ETag skipped conditional handling despite the wildcard checking existence.
+  - **Affects:** Clients revalidating built assets under `/_app/immutable/`.
+  - **Action:** None. Existing wildcard requests receive the conditional response they requested.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Normal immutable requests still return 200 with the selected representation. Wildcard If-Match succeeds; a specific If-Match tag fails with 412 because no entity-tag exists. Missing date validators still cause date conditions to be ignored, and immutable range behavior is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: interrupted authentication body reads now reject and release request state.** When a client disconnected while an authentication hook awaited `request.text()`, `request.json()` or `request.formData()`, the body read could stay pending indefinitely and keep its request state out of the pool, so disconnects now reject that read and let the existing cleanup run.
   - **Affects:** Applications whose WebSocket `authenticate` hook reads the request body.
@@ -672,6 +684,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a separate asynchronous receipt API and distinguishes native local
   status, worker relay scheduling, and application acknowledgements. Runtime
   behavior and signatures are unchanged.
+
+- **Bodyless HTTP lengths are validated before reaching uWS.** `endBodyless`
+  accepts only non-negative safe integers from its existing decimal-prefix
+  parser, preserving `42abc` as 42. Invalid lengths are omitted on 304 and
+  HEAD. The auth and SSR writers reject invalid final Response statuses before
+  writing application headers or cookies. Raw HTTP tests cover both writers,
+  HEAD with and without an application body, boundary lengths, and status 0.
+
+- **Immutable static assets evaluate request preconditions.** Existence
+  wildcards work without an emitted ETag, in the same precedence order as
+  mutable assets; empty list elements cannot match an absent validator. Real
+  GET and HEAD requests cover identity, brotli and gzip, conditional metadata,
+  unchanged normal responses, precedence and missing date validators.
+
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

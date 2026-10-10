@@ -130,9 +130,22 @@ export function send413(res) {
 export function endBodyless(res, status, declaredLength, headOnly) {
 	if (status === 204) res.endWithoutBody();
 	else if (status === 304 || headOnly) {
-		if (declaredLength) res.endWithoutBody(parseInt(declaredLength, 10));
+		const length = declaredLength ? parseInt(declaredLength, 10) : NaN;
+		if (Number.isSafeInteger(length) && length >= 0) res.endWithoutBody(length);
 		else res.endWithoutBody();
 	} else res.endWithoutBody(0);
+}
+
+/**
+ * A network-error Response has status 0, which cannot be written as an HTTP
+ * final response. Validate before any application headers or cookies escape.
+ *
+ * @param {number} status
+ */
+export function assertResponseStatus(status) {
+	if (!(Number.isInteger(status) && status >= 200 && status <= 999)) {
+		throw new RangeError('Response has no valid final HTTP status: ' + status);
+	}
 }
 
 /**

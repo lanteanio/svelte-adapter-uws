@@ -63,6 +63,13 @@ const DECLARED_LENGTH_RESPONSES = {
 // lanes let a suite hold the dev plugin to production by running this same
 // function on both.
 export function authenticate({ cookies, headers, url, request }) {
+	if (headers['x-auth-response'] === 'error') {
+		cookies.set('error_cookie', 'must-not-escape', { path: '/' });
+		return Response.error();
+	}
+	if (headers['x-auth-response'] === '304-custom') {
+		return new Response(null, { status: 304, headers: { 'content-length': headers['x-auth-length'] || 'abc' } });
+	}
 	// A hook may answer with its own Response; these lanes return a bodyless
 	// 204, and Responses that declare a length of their own, so the wire the
 	// adapter writes for that branch is observable too.
