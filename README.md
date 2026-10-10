@@ -1462,9 +1462,9 @@ Two policy notes:
 
 ### Static file behavior
 
-All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:
+All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Large responses advance through the cached buffer as each socket becomes writable, so a slow reader does not retain a separate copy of the unsent body. Full responses and open-ended ranges retain their complete requested length. Each response automatically includes:
 
-- `Content-Type`: detected from the file extension
+- `Content-Type`: detected from the file extension, with `charset=utf-8` for plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML. XML and RTF retain their in-band encoding declarations.
 - `Vary: Accept-Encoding`: required for correct CDN/proxy caching when serving precompressed variants
 - `Accept-Ranges: bytes`: enables partial content requests (e.g. for download resume)
 - `X-Content-Type-Options: nosniff`: prevents MIME-type sniffing in browsers
@@ -1475,8 +1475,6 @@ All static assets (from the `client/` and `prerendered/` output directories) are
 **Range requests (HTTP 206):** The server handles `Range: bytes=start-end` requests for static files that carry a validator. Single byte ranges are supported (`bytes=0-499`, `bytes=-500`, `bytes=500-`). Multi-range requests (comma-separated) are served as full `200` responses. An unsatisfiable range returns `416 Range Not Satisfiable`, quoting the negotiated representation's length in `Content-Range: bytes */N`; a zero-length suffix (`bytes=-0`) is unsatisfiable too. A range is served from whichever representation the request negotiates, in that representation's own coordinates: a resume sent with `Accept-Encoding: br` gets a `206` of the brotli bytes, carrying `Content-Encoding: br` and a `Content-Range` measured against the brotli length, so the client can join it onto the prefix it already has. `If-Range` is matched against that representation's ETag, so a validator from a different representation does not match and the full body is returned rather than a slice whose offsets would be meaningless. A `Range` that cannot be honoured (malformed, multi-range, or a stale `If-Range`) falls through to a normal negotiated response, compression included. Versioned assets under `/_app/immutable/` carry no validator and are therefore never served as a range - a client could not tell a resume apart from a changed file.
 
 Files with extensions that browsers cannot render inline (`.zip`, `.tar`, `.tgz`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.img`, `.bin`, etc.) automatically receive `Content-Disposition: attachment` so browsers prompt a download dialog instead of attempting to display them.
-
-Static text responses declare `charset=utf-8` for plain text, CSV, Markdown, HTML, CSS, JavaScript, calendar, WebVTT, and YAML. XML and RTF retain their in-band encoding declarations.
 
 If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served by the weights in the client's `Accept-Encoding` header, read as RFC 9110 12.5.3 reads them: `q=0` refuses a coding, the highest weight wins, brotli breaks a tie, `*` stands for the codings not named, and identity is served when neither coding is acceptable. Dynamic SSR compression negotiates the same way. Precompressed variants are only used when they are smaller than the original file. Each variant is a separate representation: mutable assets carry a separate ETag for each coding, byte ranges into it are measured against its own length, and `Vary: Accept-Encoding` is sent on every response - including `304 Not Modified`, which repeats the validated representation's `ETag`, `Cache-Control` and every configured `staticHeaders` entry, so a shared cache updates the right stored variant under the right freshness policy and a revalidating client keeps seeing its security headers.
 

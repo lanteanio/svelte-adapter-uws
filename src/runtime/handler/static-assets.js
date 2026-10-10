@@ -374,6 +374,38 @@ export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, 
 	return 0;
 }
 
+// Small bodies keep the single-call path. Large bodies stay in the shared
+// static cache while each socket advances its own write offset; tryEnd never
+// copies the unsent remainder into a per-connection native buffer.
+const STATIC_BACKPRESSURE_THRESHOLD = 64 * 1024;
+
+/** @param {import('uWebSockets.js').HttpResponse} res @param {Buffer} body */
+function endStaticBody(res, body) {
+	if (body.byteLength <= STATIC_BACKPRESSURE_THRESHOLD) {
+		res.end(body);
+		return;
+	}
+	const total = body.byteLength;
+	/** @type {Buffer | null} */
+	let pending = body;
+	res.onAborted(() => { pending = null; });
+	const [, done] = res.tryEnd(body, total);
+	if (done) {
+		pending = null;
+		return;
+	}
+	res.onWritable((offset) => {
+		if (pending === null) return true;
+		let writable = false;
+		res.cork(() => {
+			const [ok, finished] = res.tryEnd(pending.subarray(offset), total);
+			writable = ok;
+			if (finished) pending = null;
+		});
+		return writable;
+	});
+}
+
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {NegotiatedStaticEntry} entry
@@ -497,7 +529,7 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 				res.writeHeader(headers[i][0], headers[i][1]);
 			}
 			if (headOnly) res.endWithoutBody(slice.byteLength);
-			else res.end(slice);
+			else endStaticBody(res, slice);
 		});
 		return;
 	}
@@ -514,7 +546,7 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 		if (headOnly) {
 			res.endWithoutBody(body.byteLength);
 		} else {
-			res.end(body);
+			endStaticBody(res, body);
 		}
 	});
 }
