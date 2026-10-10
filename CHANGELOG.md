@@ -547,6 +547,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while callers keep unprefixed names; real requests verify inherited body
   limits are scrubbed and unrelated bare variables remain unchanged.
 
+- **The handshake case-folding regression reaches the character comparison.**
+  Its Kelvin-sign input has the same length as `websocket` and is explicitly
+  shown to lowercase to that token, so a Unicode-folding implementation fails.
+
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as

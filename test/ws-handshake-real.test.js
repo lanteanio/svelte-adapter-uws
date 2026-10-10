@@ -132,7 +132,9 @@ describe('the handshake rule', () => {
 		expect(webSocketHandshakeRefusal(read(replaced('Connection', 'keep-alive,\tUPGRADE ')))).toBeNull();
 		// A Kelvin sign lowers to `k` under Unicode case mapping, and a vertical
 		// tab is whitespace to String#trim; neither is to the native runtime.
-		expect(webSocketHandshakeRefusal(read(replaced('Upgrade', 'websoc\u212At')))).toBe(400);
+		const kelvin = 'websoc\u212Aet';
+		expect(kelvin.toLowerCase()).toBe('websocket');
+		expect(webSocketHandshakeRefusal(read(replaced('Upgrade', kelvin)))).toBe(400);
 		expect(webSocketHandshakeRefusal(read(replaced('Connection', 'keep-alive,\u000bupgrade')))).toBe(400);
 	});
 
