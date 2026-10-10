@@ -101,6 +101,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Automatic local detection needs two tick-like command intervals; an explicit numeric ceiling also works before that baseline exists.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: static text explicitly declares UTF-8.** Plain text, HTML, CSS, JavaScript and other indexed text assets now advertise UTF-8 in their HTTP Content-Type, so browsers decode non-ASCII bytes consistently and applications can identify legacy files that need conversion before deploying this header behavior.
+  - **Affects:** Static and prerendered text assets, including legacy Windows-1252 HTML, CSS or JavaScript files.
+  - **Action:** Re-encode non-UTF-8 text assets as UTF-8 before deploying.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The HTTP charset overrides HTML charset metadata and CSS @charset declarations. Files with another encoding are now interpreted as UTF-8; staticHeaders cannot override Content-Type per file.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
+  - **Affects:** Endpoints that return custom ReadableStream response bodies.
+  - **Action:** None for valid string or binary chunks.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
+  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
+  - **Action:** No application change is required.
+  - **Requires:** No new dependency.
+  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
   - **Affects:** Applications that react to disconnects or send application messages through the client connection.
   - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
@@ -155,20 +176,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** No configuration change is needed.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
-  - **Affects:** Endpoints that return custom ReadableStream response bodies.
-  - **Action:** None for valid string or binary chunks.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
-  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
-  - **Action:** No application change is required.
-  - **Requires:** No new dependency.
-  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
@@ -767,6 +774,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- Static text release guidance now explains HTTP charset precedence and the required conversion of legacy-encoded assets, since staticHeaders cannot override Content-Type.
 
 - The release-note CLI now rejects consumer summaries whose categories are not grouped in Added, Changed, Fixed order, so the standard repository checks enforce the same ordering as the copy regression suite.
 
