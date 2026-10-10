@@ -677,6 +677,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.
 
+- Vite subscriber iteration passes the adapter socket and its user data to callbacks, so matching subscribers can be inspected and sent messages without throwing.
+
 - Pending hook-installed subscriptions no longer count as completed server grants. Server re-grants authorize the membership before acknowledging it, and wire, observer and resume gates reject unconfirmed membership.
 
 - A revoked subscribe cannot disclose recover history through membership installed by its own hook. Single and batch recover paths retain legitimate server re-grants.

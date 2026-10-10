@@ -1546,13 +1546,13 @@ export default function uws(options = {}) {
 		// Mirror production's per-subscriber walk over the ws -> Set<topic>
 		// map that also backs subscribers(). Passes (ws, userData) so dev
 		// exercises the same culling / backpressure call shape as prod.
-		// getUserData() is called unguarded, matching production handler.js and
-		// the dev subscribe/unsubscribe paths above (the `ws` library does not
-		// throw on a closed socket, so no guard is needed or wanted here).
+		// The registry keys are raw transport sockets; hooks receive their
+		// cached adapter wrappers and the same user data they expose.
 		forEachSubscriber(topic, fn) {
 			for (const [ws, topics] of subscriptions) {
 				if (!topics.has(topic)) continue;
-				fn(ws, /** @type {any} */ (ws).getUserData());
+				const wrapped = wsWrappers.get(ws);
+				if (wrapped) fn(wrapped, wrapped.getUserData());
 			}
 		},
 		// Broadcast-request to every local subscriber of `topic`, mirroring
