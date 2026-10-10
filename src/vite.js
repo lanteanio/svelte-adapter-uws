@@ -1,3 +1,4 @@
+import { isSet } from 'node:util/types';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -3599,7 +3600,8 @@ export default function uws(options = {}) {
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
 					const ud = /** @type {any} */ (ws).__userData || {};
 					messageAdmission.close(wrapped);
-					const subs = ud[WS_SUBSCRIPTIONS] || new Set();
+					const subscriptionSlot = ud[WS_SUBSCRIPTIONS];
+					const subs = isSet(subscriptionSlot) ? subscriptionSlot : new Set();
 					const pending = ud[WS_PENDING_REQUESTS];
 					if (pending && pending.size > 0) {
 						for (const entry of pending.values()) {

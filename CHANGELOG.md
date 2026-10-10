@@ -690,6 +690,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.
 
+- Close hooks receive an empty subscription Set when a connection's subscription registry is corrupt, preserving safe teardown on production, testing and Vite.
+
 - The raw subscription-accounting control removes its deliberately uncharged membership before closing, so it leaves the worker counters balanced.
 
 - Synthetic subscription-registry tests isolate their accounting callback, preserving real server counters when the suites run together.

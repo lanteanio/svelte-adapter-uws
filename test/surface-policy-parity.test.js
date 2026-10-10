@@ -828,6 +828,19 @@ function importedMembershipMutators(nodes, file) {
 function subscriptionDataEscapeOffenders(nodes, imports, file = '(synthetic)') {
 	const offenders = [];
 	const allowedMutators = file === '(synthetic)' ? new Set() : importedMembershipMutators(nodes, file);
+	// A native brand check cannot inspect subscription size or decide a cap.
+	const nativeSetBrandImported = !localBindings(nodes).has('isSet') && nodes.some(({ node }) => node.type === 'ImportDeclaration' &&
+		node.source.value === 'node:util/types' && node.specifiers.some((specifier) =>
+			specifier.type === 'ImportSpecifier' && specifier.imported.name === 'isSet' && specifier.local.name === 'isSet'));
+
+	// The canonical close boundary deliberately hands the snapshot to the app.
+	// It is allowed only as a terminal statement, never as a policy result.
+	const closeBoundaryImported = file !== '(synthetic)' && !localBindings(nodes).has('runCloseHook') &&
+		nodes.some(({ node }) => node.type === 'ImportDeclaration' &&
+			resolvedImport(file, node.source.value) === realpathSync(pathOf('src/runtime/utils/hook-boundary.js')) &&
+			node.specifiers.some((specifier) => specifier.type === 'ImportSpecifier' &&
+				specifier.imported.name === 'runCloseHook' && specifier.local.name === 'runCloseHook'));
+
 	const candidateNames = new Set();
 	let changed = true;
 	while (changed) {
@@ -859,7 +872,11 @@ function subscriptionDataEscapeOffenders(nodes, imports, file = '(synthetic)') {
 				imports.get(node.callee.name) === 'deniesUngrantedObserve');
 		const canonicalMutator = node.callee?.type === 'Identifier' && SAFE_SUBSCRIPTION_CALLEES.has(node.callee.name) &&
 			(allowedMutators.has(node.callee.name) || file === 'src/runtime/utils/ws-symbols.js');
-		if (canonicalPolicy || canonicalMutator) continue;
+		const nativeSetBrand = nativeSetBrandImported && node.callee?.type === 'Identifier' && node.callee.name === 'isSet';
+		const closeBoundary = closeBoundaryImported && node.callee?.type === 'Identifier' &&
+			node.callee.name === 'runCloseHook' && node.arguments.length === 3 &&
+			ancestors[0]?.type === 'ExpressionStatement';
+		if (canonicalPolicy || canonicalMutator || nativeSetBrand || closeBoundary) continue;
 		const possible = node.arguments.some((argument) => {
 			const pending = [argument];
 			while (pending.length) {
@@ -1018,6 +1035,35 @@ describe('the oracle itself rejects the padding classes found by review', () => 
 		expect(privateSubscriptionOrderOffenders(legitimate)).toEqual([]);
 		expect(capEquivalentSizeComparisonOffenders(legitimate)).toEqual([]);
 		expect(capCallContractOffenders(legitimate, imports)).toEqual([]);
+	});
+
+	it('permits only the native unshadowed Set brand check', () => {
+		const trusted = nodesWithAncestors(`
+			import { isSet } from 'node:util/types';
+			export function close(ud) { return isSet(ud[WS_SUBSCRIPTIONS]); }
+		`);
+		expect(subscriptionDataEscapeOffenders(trusted, new Map())).toEqual([]);
+		for (const source of [
+			`import { isSet } from './private-cap.js'; export function close(ud) { return isSet(ud[WS_SUBSCRIPTIONS]); }`,
+			`function isSet(value) { return value.size < 20; } export function close(ud) { return isSet(ud[WS_SUBSCRIPTIONS]); }`,
+			`import { isSet } from 'node:util/types'; export function close(ud, isSet) { return isSet(ud[WS_SUBSCRIPTIONS]); }`,
+			`import { isSet as inspect } from 'node:util/types'; export function close(ud) { return inspect(ud[WS_SUBSCRIPTIONS]); }`
+		]) expect(subscriptionDataEscapeOffenders(nodesWithAncestors(source), new Map())).not.toEqual([]);
+	});
+
+	it('permits only a terminal call to the canonical unshadowed close boundary', () => {
+		const file = 'src/testing.js';
+		const trusted = `import { runCloseHook } from './runtime/utils/hook-boundary.js';`;
+		const body = `const ctx = { subscriptions: ud[WS_SUBSCRIPTIONS] }; runCloseHook(handler, ws, ctx);`;
+		expect(subscriptionDataEscapeOffenders(nodesWithAncestors(`${trusted} export function close(ud) { ${body} }`), new Map(), file)).toEqual([]);
+		for (const source of [
+			`import { runCloseHook } from './runtime/utils/subscribe-policy.js'; export function close(ud) { ${body} }`,
+			`function runCloseHook(a, b, ctx) { return ctx.subscriptions.size < 20; } export function close(ud) { ${body} }`,
+			`${trusted} export function close(ud, runCloseHook) { ${body} }`,
+			`${trusted} export function close(ud) { if (runCloseHook(handler, ws, { subscriptions: ud[WS_SUBSCRIPTIONS] })) return 'RATE_LIMITED'; }`,
+			`${trusted} export function close(ud) { return runCloseHook(handler, ws, { subscriptions: ud[WS_SUBSCRIPTIONS] }); }`,
+			`import { runCloseHook as inspect } from './runtime/utils/hook-boundary.js'; export function close(ud) { inspect(handler, ws, { subscriptions: ud[WS_SUBSCRIPTIONS] }); }`
+		]) expect(subscriptionDataEscapeOffenders(nodesWithAncestors(source), new Map(), file)).not.toEqual([]);
 	});
 
 	it('rejects object laundering and opaque helper escapes of the live Set or its size', () => {

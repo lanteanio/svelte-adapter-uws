@@ -1,4 +1,5 @@
 import 'SHIMS';
+import { isSet } from 'node:util/types';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3271,7 +3272,8 @@ if (WS_ENABLED) {
 			const userData = ws.getUserData();
 			messageAdmission.close(ws);
 			assert(userData[WS_PLATFORM], 'ws.platform-missing-in-close', null);
-			const subscriptions = userData[WS_SUBSCRIPTIONS] || new Set();
+			const subscriptionSlot = userData[WS_SUBSCRIPTIONS];
+			const subscriptions = isSet(subscriptionSlot) ? subscriptionSlot : new Set();
 			// Reject any in-flight server-initiated requests so callers stop
 			// awaiting promises that can never resolve. Clearing the timer
 			// avoids the close-then-timer race that would otherwise reject
