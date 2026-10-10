@@ -71,31 +71,6 @@ import {
 } from './transport-metrics.js';
 import { activeTraceContext, extractTraceContext, traceOperation, tracingEnabled } from './tracing.js';
 
-/**
- * A stand-in for a uWS request, built from values read while it was still
- * valid. `createWaitingRoomRequest` is duck-typed over exactly these four
- * methods, so a refusal that runs after the tick has ended can still describe
- * the request without the waiting-room module needing to know that happened -
- * and without this fix reaching into that module, which sits inside the sealed
- * ingress/platform/wire-fanout graph.
- *
- * The method is handed over exactly as uWS reported it (lowercase); the builder
- * uppercases it, so the detached answer is identical to the live one rather
- * than a second normalisation that could drift from it.
- *
- * @param {{ method: string, url: string, query: string, headers: Record<string, string> }} snapshot
- */
-function detachedRequestFacade(snapshot) {
-	return {
-		getMethod: () => snapshot.method,
-		getUrl: () => snapshot.url,
-		getQuery: () => snapshot.query,
-		forEach: (visit) => {
-			for (const name of Object.keys(snapshot.headers)) visit(name, snapshot.headers[name]);
-		}
-	};
-}
-
 function traceUpgradeRejection(req, headers, reason) {
 	if (!tracingEnabled) return;
 	// `req` is optional: a caller that has already left the uWS tick passes null
@@ -1705,24 +1680,9 @@ if (WS_ENABLED) {
 			const cursorLaneEnabled = admission.cursorMaxConcurrent > 0;
 			const isCursor = cursorLaneEnabled && isCursorLaneUpgrade(req.getHeader('sec-websocket-protocol'));
 
-			// Serve an at-capacity upgrade refusal without ever consuming a
-			// gate slot. Shared by the gate-full reject and the siege
-			// short-circuit so both content-negotiate identically: a browser
-			// navigation gets the self-polling holding page (it holds no
-			// socket), everything else keeps the `503` + jittered
-			// `Retry-After`. The jitter band widens as the posture rises.
-			// A cursor-lane upgrade is never a browser navigation, so it always
-			// gets the bare `503` - never the holding page - and skips the
-			// Accept negotiation, but it backs off like every other refusal:
-			// EVERY refused lane carries `Retry-After`, room or no room,
-			// cursor or not, because the condition is the same full gate and a
-			// proxy or client that honors the header must not read one lane as
-			// "retry immediately". The room's configured base is used where a
-			// room exists, the shared default where none does.
-			// `detached` is the pre-read snapshot taken while `req` was still valid,
-			// passed only by the caller that runs after the uWS tick has ended. The
-			// four synchronous refusals pass nothing and read the live request
-			// exactly as before.
+			// A validated WebSocket handshake always receives a retry response.
+			// Browser navigation is handled by the separate HTTP route. Every
+			// refused lane uses the posture-widened Retry-After, room or no room.
 			const refusalRetryAfter = () => {
 				const lvl = postureLevel();
 				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
@@ -1730,53 +1690,7 @@ if (WS_ENABLED) {
 					? WAITING_ROOM.jitteredRetryAfter(spread)
 					: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
 			};
-			const serveUpgradeRefusal = (detached) => {
-				if (WAITING_ROOM === null || isCursor) {
-					// An HTML navigation keeps a minimal document baseline even
-					// when the interactive room is disabled.
-					if (!isCursor && negotiateRejection(
-						detached ? detached.accept : req.getHeader('accept'),
-						detached ? detached.upgrade : req.getHeader('upgrade')
-					) === 'html') {
-						sendWaitingRoomPage(res, {
-							body: buildAccessibleCapacityRefusalPage(),
-							lang: 'en',
-							dir: 'ltr',
-							headers: [['retry-after', String(refusalRetryAfter())]],
-							varyAcceptLanguage: false
-						}, '503 Service Unavailable');
-						return;
-					}
-					const retryAfter = refusalRetryAfter();
-					res.cork(() => {
-						res.writeStatus('503 Service Unavailable');
-						res.writeHeader('content-type', 'text/plain');
-						res.writeHeader('retry-after', String(retryAfter));
-						res.end('Server is at upgrade capacity, please retry');
-					});
-					return;
-				}
-
-				// One header read, no full walk on the reject path.
-				const accept = detached ? detached.accept : req.getHeader('accept');
-				if (negotiateRejection(accept, detached ? detached.upgrade : req.getHeader('upgrade')) === 'html') {
-					// Browser navigation: serve the self-polling holding page.
-					// The builder is duck-typed, so the detached path hands it a plain
-					// facade over the snapshot instead of a request handle that is no
-					// longer alive - which keeps this fix out of upgrade-admission.js,
-					// and therefore out of the sealed ingress/platform/wire-fanout
-					// module graph it sits inside.
-					const page = WAITING_ROOM.renderResponse(
-						undefined,
-						createWaitingRoomRequest(detached ? detachedRequestFacade(detached) : req)
-					);
-					sendWaitingRoomPage(res, page);
-					return;
-				}
-
-				// WebSocket upgrade / library client (Accept lacks text/html):
-				// keep the 503, refined with the posture-widened jittered
-				// Retry-After.
+			const serveUpgradeRefusal = () => {
 				const retryAfter = refusalRetryAfter();
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
@@ -1832,19 +1746,13 @@ if (WS_ENABLED) {
 				}
 				releaseConnectionPermit();
 			}
-			// `detached` is passed only by the caller that runs after an application
-			// upgrade hook resolved - by then uWS has ended the tick and every read
-			// of `req` throws, which turned a normal shed into a swallowed throw, a
-			// 500 the client cannot tell from a broken server, and a spurious
-			// error-severity hook_error that double-counted the rejection. The
-			// hookless caller passes nothing and is unchanged.
-			function rejectDeferredOverflow(headers, detached) {
+			function rejectDeferredOverflow(headers) {
 				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
 				mUpgradeRejected?.inc({ reason: 'deferred_overflow' });
 				mUpgradeDeferredRejected?.inc();
-				traceUpgradeRejection(detached ? null : req, headers, 'deferred_overflow');
+				traceUpgradeRejection(null, headers, 'deferred_overflow');
 				releaseInFlight();
-				serveUpgradeRefusal(detached);
+				serveUpgradeRefusal();
 			}
 
 			if (!admission.tryAcquireConnection()) {
@@ -1887,34 +1795,6 @@ if (WS_ENABLED) {
 				releaseInFlight();
 				return;
 			}
-			// Snapshot what a deferred-overflow refusal needs, here, where every
-			// other synchronous read happens. That refusal can only run after an
-			// application upgrade hook resolves, and uWS invalidates `req` at the
-			// end of the native tick - so every read it used to do threw, the catch
-			// turned a normal shed into a 500, and the client could not tell being
-			// shed from a broken server.
-			//
-			// Gated on pacing being configured: without a per-tick budget no upgrade
-			// is ever deferred, so an accepted upgrade on the default configuration
-			// pays nothing for this.
-			//
-			// `accept` and `upgrade` are read from `req`, NOT from the collected
-			// `headers`: collectRequestHeaders joins repeated lines with ', ' and
-			// neither header is single-valued, so a duplicated Accept would content-
-			// negotiate differently here than on the four synchronous refusals. The
-			// header bag is COPIED rather than aliased, because the same object is
-			// handed to the application hook, which may mutate it before the
-			// refusal reads it.
-			const deferredRefusal = ADMISSION_PER_TICK_BUDGET > 0
-				? {
-					accept: req.getHeader('accept'),
-					upgrade: req.getHeader('upgrade'),
-					method: req.getMethod(),
-					url: req.getUrl(),
-					query: req.getQuery(),
-					headers: { ...headers }
-				}
-				: null;
 
 			// Decode the client IP once. resolveTransportAddress applies the
 			// opt-in PROXY-protocol substitution, then resolveClientIp applies
@@ -2230,10 +2110,8 @@ if (WS_ENABLED) {
 							releaseInFlight();
 						}
 					});
-					// This one runs inside the upgrade hook's `.then()`, so the uWS
-					// tick has ended and `req` is dead - the refusal takes the
-					// snapshot read before the hook was ever called.
-					if (pacingOutcome === null) rejectDeferredOverflow(headers, deferredRefusal);
+					// This path runs after the native request handle has expired.
+					if (pacingOutcome === null) rejectDeferredOverflow(headers);
 				})
 				.catch((err) => {
 					clearTimer(timer);
