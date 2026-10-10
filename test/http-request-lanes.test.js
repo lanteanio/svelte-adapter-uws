@@ -78,7 +78,7 @@ describeUWS('request lanes against the real built runtime', () => {
 	let port;
 
 	beforeAll(async () => {
-		server = await startRealRuntime();
+		server = await startRealRuntime({ variant: 'requestlanes' });
 		port = Number(new URL(server.httpUrl).port);
 	}, 400000);
 

@@ -26,6 +26,14 @@ export const POSTURE_EXPORT_PATH = process.platform === 'win32'
 	: join(tmpdir(), 'svelte-adapter-uws-fixture-posture.sock');
 
 export const FIXTURE_VARIANTS = {
+	// Readiness assertions need a fresh lifecycle even when serial suites reuse
+	// the default built module after another file has shut it down.
+	'requestlanes': {
+		out: 'build-request-lanes',
+		handler: null,
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
+	},
+
 	subscriptionstate: {
 		out: 'build-subscription-state',
 		handler: './src/hooks.ws.subscription-state.js',

@@ -739,6 +739,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built drain case uses actual socket backpressure. A real control flood also
   verifies the existing protected diagnostic path still closes with 4429 when
   both warning and error logging throw.
+
+- Request-lane readiness tests use an isolated fixture lifecycle so serial suites cannot inherit a previously closed runtime.
+
 - **`vite dev` accepts `server.https` requests as production does.** The
   auth and upgrade origin checks pass `isTls` from `req.socket.encrypted`;
   they passed `false`, so under `server.https`, where Vite terminates TLS as
