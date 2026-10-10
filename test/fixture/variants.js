@@ -52,6 +52,11 @@ export const FIXTURE_VARIANTS = {
 		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
 	},
 
+	responseframing: {
+		out: 'build-response-framing',
+		handler: './src/hooks.ws.response-framing.js',
+		websocket: { allowedOrigins: '*', authPathRateLimit: 0, upgradeRateLimit: 100 }
+	},
 	ssrbody: {
 		out: 'build-ssr-body',
 		handler: null,

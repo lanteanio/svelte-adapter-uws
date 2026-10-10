@@ -3912,7 +3912,7 @@ export async function createTestServer(options = {}) {
 							res.writeStatus(String(response.status));
 							let hasCTO = false;
 							for (const [k, v] of response.headers) {
-								if (k === 'content-length' || k === 'set-cookie') continue;
+								if (k === 'content-length' || k === 'transfer-encoding' || k === 'set-cookie') continue;
 								if (k === 'x-content-type-options') hasCTO = true;
 								res.writeHeader(k, v);
 							}

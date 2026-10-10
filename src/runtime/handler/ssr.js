@@ -289,7 +289,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 		// spikes on public pages.
 		//
 		// Dedup is skipped for:
-		//   - Non-GET/HEAD methods (mutations must not be coalesced)
+		//   - Non-GET methods (HEAD must never consume the response body)
 		//   - Authenticated requests (cookie or authorization header present)
 		//   - When the dedup map is at capacity (safety valve)
 		//
@@ -301,7 +301,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 		// naturally, the header is no longer consulted.
 		const isCredentialedRequest = !!(headers.cookie || headers.authorization);
 		const canDedup =
-			(method === 'GET' || method === 'HEAD') &&
+			method === 'GET' &&
 			!isCredentialedRequest &&
 			ssrInflight.size < MAX_SSR_DEDUP;
 		// BREACH defense: suppress the accept-encoding signal for credentialed
@@ -504,7 +504,7 @@ function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
 	let hasContentTypeOptions = false;
 	for (const [key, value] of response.headers) {
-		if (key === 'set-cookie' || key === 'content-length' || key === 'date') continue;
+		if (key === 'set-cookie' || key === 'content-length' || key === 'transfer-encoding' || key === 'date') continue;
 		if (key === 'x-content-type-options') hasContentTypeOptions = true;
 		res.writeHeader(key, value);
 	}

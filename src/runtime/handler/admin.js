@@ -103,9 +103,9 @@ async function writeAdminResponse(res, response, state, headOnly = false) {
 		res.writeStatus(String(response.status));
 		let hasContentTypeOptions = false;
 		for (const [key, value] of response.headers) {
-			// content-length is implied by the body we write; set-cookie is
+			// Framing belongs to this writer; set-cookie is
 			// emitted via getSetCookie() so multiple cookies are not folded.
-			if (key === 'content-length' || key === 'set-cookie' || key === 'date') continue;
+			if (key === 'content-length' || key === 'transfer-encoding' || key === 'set-cookie' || key === 'date') continue;
 			if (key === 'x-content-type-options') hasContentTypeOptions = true;
 			res.writeHeader(key, value);
 		}

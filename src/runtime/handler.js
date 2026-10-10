@@ -1535,7 +1535,7 @@ if (WS_ENABLED) {
 						res.cork(() => {
 							res.writeStatus(String(result.status));
 							for (const [hk, hv] of result.headers) {
-								if (hk === 'set-cookie' || hk === 'content-length' || hk === 'date') continue;
+								if (hk === 'set-cookie' || hk === 'content-length' || hk === 'transfer-encoding' || hk === 'date') continue;
 								res.writeHeader(hk, hv);
 							}
 							for (const c of result.headers.getSetCookie()) res.writeHeader('set-cookie', c);

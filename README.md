@@ -5880,16 +5880,16 @@ The adapter applies several allocation and caching strategies to stay off the GC
 
 ### SSR request deduplication
 
-When multiple concurrent requests arrive for the same anonymous (no cookie/auth) GET or HEAD URL, only one is dispatched to SvelteKit. The others wait for the result and reconstruct their own response from the shared buffer. This prevents redundant rendering work during traffic spikes, a common pattern when a post goes viral or a cron job hits a popular page at the same time as real users.
+When multiple concurrent requests arrive for the same anonymous (no cookie/auth) GET URL, only one is dispatched to SvelteKit. The others wait for the result and reconstruct their own response from the shared buffer. This prevents redundant rendering work during traffic spikes, a common pattern when a post goes viral or a cron job hits a popular page at the same time as real users.
 
 Dedup is skipped for:
 
 - Any request with a `Cookie` or `Authorization` header (personalized responses must not be shared)
-- POST, PUT, PATCH, DELETE (mutations are excluded from dedup so each call reaches the handler)
+- All methods other than GET; HEAD cancels without pulling the response body and preserves only a declared identity length, while mutations reach the handler individually
 - Responses with a `Set-Cookie` header (personalized)
-- Response bodies larger than 512 KB, decided before the body is held: a declared length past the cap streams at once, an undeclared body streams once it passes the cap. Both shared and direct responses encode string chunks as UTF-8 and preserve the exact bytes of ArrayBuffers and views; unsupported chunks cancel the source and fail the response. String bytes count toward the cap and qualify for the same compression as byte chunks. Ready finite bodies retain length framing and compression. A subsequent body read still pending after one event-loop check-phase allowance for the buffered prefix switches both shared and direct responses to chunked streaming, sending a deferred page shell or SSE event without waiting for later data; these streams are not shared or compressed by the adapter. Socket disconnects cancel the active response producer even after a POST body has arrived.
+- Response bodies larger than 512 KB, decided before the body is held: a declared length past the cap streams at once, an undeclared body streams once it passes the cap. Both shared and direct responses encode string chunks as UTF-8 and preserve the exact bytes of ArrayBuffers and views; unsupported chunks cancel the source and fail the response. String bytes count toward the cap and qualify for the same compression as byte chunks. Ready finite bodies retain length framing and compression. A subsequent body read still pending after one event-loop check-phase allowance for the buffered prefix switches both shared and direct responses to chunked streaming, sending a deferred page shell or SSE event without waiting for later data; these streams are not shared or compressed by the adapter. Socket disconnects cancel the active response producer even after a POST body has arrived. SSR, authentication and admin relays discard upstream `Transfer-Encoding` because their writers choose the outgoing framing.
 
-For anonymous GET/HEAD requests that pass every skip condition above, in-flight
+For anonymous GET requests that pass every skip condition above, in-flight
 deduplication is enabled without an option; the map holds at most 500 keys. There
 is no anonymous opt-out header (it could be stamped on every request to defeat
 the fan-in); tooling that must reach the handler sends any `Cookie`.
@@ -5899,7 +5899,7 @@ the fan-in); tooling that must reach the handler sends any `Cookie`.
 - If your route handler produces different output based on a request header or other input, emit a `Vary` header listing those headers. The adapter checks the `Vary` header after rendering and discards the dedup entry if `Vary` is present, preventing that response from being shared.
 - If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), emit a `Vary` header naming any request header, which is enough to keep the response out of the shared buffer.
 
-An anonymous GET/HEAD route needs no opt-in only when it produces the same
+An anonymous GET route needs no opt-in only when it produces the same
 output for every input the dedup key does not represent. Emit `Vary` whenever
 that prerequisite is not true.
 

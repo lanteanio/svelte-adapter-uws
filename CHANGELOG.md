@@ -143,6 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: relayed responses keep valid framing and HEAD skips body reads.** Returning an upstream chunked Response through SSR, authentication or admin handlers no longer produces conflicting length and transfer headers, while anonymous HEAD requests cancel the response body immediately instead of waiting for its content before sending headers.
+  - **Affects:** Applications relaying Responses or serving expensive or deferred bodies to HEAD requests.
+  - **Action:** No application change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The adapter owns transfer framing; HEAD preserves a declared identity length without reading, compressing or sharing the response body.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: deferred responses send their first bytes promptly.** Streamed SvelteKit pages, endpoints and SSE deliver their ready prefix while later body work is pending, and socket disconnects cancel the active response producer even after receiving a complete POST request body.
   - **Affects:** Applications returning streamed or deferred response bodies.
   - **Action:** No configuration change is needed.
@@ -755,6 +762,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery markers clear stale topic offsets without losing their sequence-space identity. Both truncation forms and denials retain the epoch, relay gaps keep the old generation for a safe mismatch, and rehydrate records its announced generation.
 
 - Replay stores report a standalone truncation marker while their request is outstanding, once per replay, including when the end marker repeats the signal. Request IDs still isolate concurrent replay responses.
+
+- SSR, authentication, admin and testing admin response relays strip upstream Transfer-Encoding because their writers choose the framing. Anonymous HEAD bypasses SSR body deduplication and cancels without pulling content; real HTTP parser and gated-body controls cover both paths.
 
 - Response readers retain ready finite bodies but hand a pending read into streaming after one event-loop check-phase allowance per buffered prefix, keeping deferred first bytes independent of later body work. Active response cancellation belongs to the socket lifetime, including fully received POST requests.
 
