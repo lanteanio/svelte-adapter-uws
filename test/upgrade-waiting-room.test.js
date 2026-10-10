@@ -206,6 +206,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			// Below capacity the same URL is an ordinary upgrade-required hint.
 			const idle = await fetch(server.url + '/ws', { headers: { accept: HTML_ACCEPT } });
 			expect(idle.status).toBe(426);
+			expect(idle.headers.get('upgrade')).toBe('websocket');
 		});
 
 		it('serves the minimal accessible 503 on navigation when only perTickBudget gates admission, waiting room opted out', async () => {
