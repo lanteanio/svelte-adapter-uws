@@ -28,3 +28,22 @@ export function coalescedNameProbe(ws, platform, msg) {
 	} catch { threw = true; }
 	platform.sendCoalesced(ws, { key: 'report', topic: 'probe', event: 'coalesced-name-report', data: { threw, buffered: ws.getBufferedAmount() } });
 }
+
+export function coalescedReentrantProbe(ws, platform, msg) {
+	if (msg.stall) {
+		const chunk = new Uint8Array(1024 * 1024);
+		for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
+		platform.sendCoalesced(ws, { key: 'barrier', topic: 'probe', event: 'coalesced-barrier', data: 0 });
+	}
+	let calls = 0;
+	const value = {
+		toJSON() {
+			calls++;
+			platform.sendCoalesced(ws, { key: msg.repeat === 'new' ? 'chain:' + calls : msg.sameKey || msg.repeat ? 'value' : 'other', topic: 'probe', event: 'coalesced-latest', data: msg.repeat ? value : 2 });
+			if (msg.fail) throw new Error('superseded serialization');
+			return 1;
+		}
+	};
+	platform.sendCoalesced(ws, { key: 'value', topic: 'probe', event: 'coalesced-older', data: value });
+	platform.sendCoalesced(ws, { key: 'report', topic: 'probe', event: 'coalesced-reentrant-report', data: { toJSON() { return { calls }; } } });
+}

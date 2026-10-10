@@ -1647,6 +1647,76 @@ describe('writeChunkWithBackpressure', () => {
 // - drainCoalesced ---------------------------------------------------------
 
 describe('drainCoalesced', () => {
+	it('drains NaN values without mistaking them for replacements', () => {
+		const pending = new Map([['a', NaN]]);
+		const values = [];
+		drainCoalesced(pending, (value) => { values.push(value); return 1; });
+		expect(values).toEqual([NaN]);
+		expect(pending.size).toBe(0);
+	});
+
+	it('keeps a replacement queued when a send returns backpressure or drop', () => {
+		for (const status of [0, 2]) {
+			const pending = new Map([['a', 1], ['b', 2]]);
+			drainCoalesced(pending, () => { pending.set('a', 3); return status; });
+			expect([...pending]).toEqual([['a', 3], ['b', 2]]);
+			const values = [];
+			drainCoalesced(pending, (value) => { values.push(value); return 1; });
+			expect(values).toEqual([3, 2]);
+		}
+	});
+
+	it('contains nested drains of one map and still drains independent maps', () => {
+		const pending = new Map([['a', 1]]);
+		const independent = new Map([['b', 2]]);
+		const values = [];
+		let nested = 0;
+		drainCoalesced(pending, (value) => {
+			drainCoalesced(pending, () => { nested++; return 1; });
+			drainCoalesced(independent, (other) => {
+				drainCoalesced(pending, () => { nested++; return 1; });
+				values.push(other);
+				return 1;
+			});
+			values.push(value);
+			return 1;
+		});
+		expect(values).toEqual([2, 1]);
+		expect(nested).toBe(0);
+		expect(pending.size).toBe(0);
+	});
+
+	it('yields repeated replacement while still visiting unrelated keys', () => {
+		const pending = new Map([['a', 1], ['b', 2]]);
+		const visited = [];
+		expect(drainCoalesced(pending, (value, key) => {
+			visited.push(key);
+			if (key === 'a') pending.set(key, value + 1);
+			return 1;
+		})).toBe(true);
+		expect(visited).toEqual(['a', 'a', 'b']);
+		expect([...pending]).toEqual([['a', 3]]);
+	});
+
+	it('bounds a callback that keeps appending new keys', () => {
+		const pending = new Map([['a', 0]]);
+		let calls = 0;
+		expect(drainCoalesced(pending, (value) => {
+			pending.set('next:' + ++calls, value + 1);
+			return 1;
+		})).toBe(true);
+		expect(calls).toBe(2);
+		expect([...pending.values()]).toEqual([2]);
+	});
+	it('releases the active drain after a callback throws', () => {
+		const pending = new Map([['a', 1]]);
+		expect(() => drainCoalesced(pending, () => { throw new Error('send failed'); })).toThrow('send failed');
+		const values = [];
+		drainCoalesced(pending, (value) => { values.push(value); return 1; });
+		expect(values).toEqual([1]);
+		expect(pending.size).toBe(0);
+	});
+
 	// uWS send-status contract (see platform.js): 1 = sent clean, 0 = enqueued
 	// behind backpressure (accepted, delivered in order, socket now under
 	// pressure), 2 = dropped past maxBackpressure. drainCoalesced continues on a

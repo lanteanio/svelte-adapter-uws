@@ -3353,6 +3353,9 @@ export interface Platform {
 	 * overwrites the same `key` 1000 times before a single drain pays one
 	 * `JSON.stringify`, not 1000.
 	 *
+	 * A send made from inside `toJSON` queues without recursively flushing.
+	 * A newer value for the current key replaces it before its frame is sent.
+	 *
 	 * Topic and event names containing quotes, backslashes or control
 	 * characters throw before queueing, leaving any pending value unchanged.
 	 *

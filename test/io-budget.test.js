@@ -1077,7 +1077,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph handler/config.js's get_origin also calls originFromHeaders and warns
 	// once about a refused proxy header. Header strings are read and compared
 	// only; no bytes are copied or written differently.
-	ingress: 'cd312f042fde77b2bd2a94f36a896b2303f0bf2e234c00c16266290130eddfa8',
+	// Coalesced drains bound reentrant queue work and retain newer values.
+	// The synchronous guard and timer continuation add no binary byte copies.
+	ingress: 'e3cb6a0ecc5cb17823f45078bd7e6e2cde5db1afbfca9d3dc79246127c421713',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -2032,7 +2034,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Coalesced sends build their existing string prefix before queueing and
 	// retain it on the entry. Flush joins the same strings inside its catch.
 	// No byte-copy producer or binary payload boundary changes.
-	platform: 'e3ae56334fbae7d0276df5d579f58dd9659ab86ff93f6ace27433118070da4c7',
+	// Coalesced drains bound reentrant queue work and retain newer values.
+	// The synchronous guard and timer continuation add no binary byte copies.
+	platform: '5901ecd1ae350c0ef6695b5360f13c830c20972fd708aae4d1b6728360664f95',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2426,7 +2430,9 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned for the native Uint8Array brand import and guards after
 	// stateless, stateful batch and per-entry encode results. References only:
 	// valid payloads reach the same builder and sends with no additional copy.
-	'wire-fanout': '19440696b4b39783fcf91f0dd5aa13a3e86cb20d196740899d8457cf0311cd7d',
+	// The shared backpressure module bounds reentrant coalesced drains.
+	// Queue identity checks and continuation state add no binary byte copies.
+	'wire-fanout': '15e09da4da45a4a8e975505f7eb5bec7f53f4e52257aa07dc6d3430ea1154b48',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
-import { coalescedBadValue, coalescedNameProbe } from './fixture/src/coalesced-probe.js';
+import { coalescedBadValue, coalescedNameProbe, coalescedReentrantProbe } from './fixture/src/coalesced-probe.js';
 
 let teardown = [];
 
@@ -30,6 +30,7 @@ function probeHandler(seen) {
 	return {
 		message(ws, { data, platform }) {
 			const msg = JSON.parse(Buffer.from(data).toString());
+			if (msg.type === 'coalesce-reentrant-probe') { coalescedReentrantProbe(ws, platform, msg); return; }
 			if (msg.type === 'coalesce-name-probe') { coalescedNameProbe(ws, platform, msg); return; }
 			if (msg.type === 'coalesce-probe') {
 				const chunk = new Uint8Array(1024 * 1024);
@@ -102,6 +103,20 @@ const SURFACES = [
 ];
 
 describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
+	it.each([false, true].flatMap((stall) => [{ stall, sameKey: true, fail: false }, { stall, sameKey: false, fail: false }, { stall, sameKey: true, fail: true }]))('delivers reentrant serialization in order, stalled=$stall sameKey=$sameKey throws=$fail', async ({ stall, sameKey, fail }) => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const { url } = await boot();
+		const c = await client(url, { stall });
+		c.ws.send(JSON.stringify({ type: 'coalesce-reentrant-probe', stall, sameKey, fail }));
+		if (stall) { await new Promise((r) => setTimeout(r, 300)); c.resume(); }
+		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesced-reentrant-report"')))).toBe(true);
+		const frames = c.state.frames.map((f) => JSON.parse(f));
+		expect(frames.filter((f) => f.event === 'coalesced-older' || f.event === 'coalesced-latest').map((f) => f.data)).toEqual(sameKey ? [2] : [1, 2]);
+		expect(frames.find((f) => f.event === 'coalesced-reentrant-report').data.calls).toBe(1);
+		if (stall) expect(c.state.binaryBytes).toBeGreaterThan(1024 * 1024);
+		expect(error.mock.calls.some((call) => String(call[0]).includes('COALESCED-UNSERIALIZABLE'))).toBe(false);
+	}, 30000);
+
 	it.each(['topic', 'event'].flatMap((field) => ['quote"', 'slash\\', 'control\n'].flatMap((name) => [false, true].map((stall) => ({ field, name, stall })))))('rejects $field with $name before queueing, stalled=$stall', async ({ field, name, stall }) => {
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const { url } = await boot();

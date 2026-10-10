@@ -1,7 +1,8 @@
+import { setTimer } from '../runtime.js';
 import { isNativeError } from 'node:util/types';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, topicEpochValue } from '../utils.js';
-import { counters } from './state.js';
+import { counters, wsConnections } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { sendControl } from './control-egress.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
@@ -227,6 +228,8 @@ export function sendSubscribeDenied(ws, topic, ref, reason) {
 	sendControl(ws, JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }));
 }
 
+const coalescedContinuations = new WeakSet();
+
 /**
  * Drain any pending coalesce-by-key messages on a single connection.
  * Serializes lazily: only the surviving (latest) value per key pays
@@ -252,7 +255,7 @@ export function flushCoalescedFor(ws, callerEntry) {
 	assert(pending instanceof Map, 'coalesce.pending-type', null);
 	let aborted = false;
 	let callerError = null;
-	drainCoalesced(pending, (msg) => {
+	const yielded = drainCoalesced(pending, (msg, key) => {
 		if (aborted) return 2;
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
@@ -263,6 +266,8 @@ export function flushCoalescedFor(ws, callerEntry) {
 			if (typeof body === 'string') payload = msg.prefix + body + '}';
 		}
 		catch (err) { failure = err; }
+		// A serializer may have queued a newer value for this key.
+		if (pending.get(key) !== msg) return 1;
 		if (payload === undefined) {
 			const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 			if (msg === callerEntry) callerError = err;
@@ -290,5 +295,13 @@ export function flushCoalescedFor(ws, callerEntry) {
 		return result;
 	});
 	if (aborted) pending.clear();
+	else if (yielded && !coalescedContinuations.has(pending)) {
+		coalescedContinuations.add(pending);
+		setTimer(() => {
+			coalescedContinuations.delete(pending);
+			if (!wsConnections.has(ws)) { pending.clear(); return; }
+			flushCoalescedFor(ws);
+		}, 0);
+	}
 	if (callerError !== null) throw callerError;
 }

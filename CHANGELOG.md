@@ -611,6 +611,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Static files with future or pre-1900 modification times omit Last-Modified and use ETags for revalidation, so a skewed build cannot supply an invalid date validator.
 
+- `sendCoalesced` contains reentrant sends from `toJSON`, discards superseded frames before sending, and retains newer queued values when a send encounters backpressure.
+
 - `sendCoalesced` rejects invalid topic and event names before queueing, even on a backpressured socket, and preserves an existing value for the same key. Envelope construction failures are contained when the queue drains.
 
 - `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.

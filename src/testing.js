@@ -727,6 +727,7 @@ export async function createTestServer(options = {}) {
 	 * @param {any} ws
 	 * @param {object} [callerEntry]
 	 */
+	const coalescedContinuationsT = new WeakSet();
 	function flushCoalescedForT(ws, callerEntry) {
 		let userData;
 		try { userData = ws.getUserData(); }
@@ -734,7 +735,7 @@ export async function createTestServer(options = {}) {
 		const pending = userData[WS_COALESCED];
 		if (!pending || pending.size === 0) return;
 		let callerError = null;
-		drainCoalesced(pending, (msg) => {
+		const yielded = drainCoalesced(pending, (msg, key) => {
 			let payload;
 			let failure;
 			try {
@@ -742,6 +743,8 @@ export async function createTestServer(options = {}) {
 				if (typeof body === 'string') payload = msg.prefix + body + '}';
 			}
 			catch (err) { failure = err; }
+			// A serializer may have queued a newer value for this key.
+			if (pending.get(key) !== msg) return 1;
 			if (payload === undefined) {
 				const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 				if (msg === callerEntry) callerError = err;
@@ -750,6 +753,14 @@ export async function createTestServer(options = {}) {
 			}
 			return sendOutboundT(ws, payload);
 		});
+		if (yielded && !coalescedContinuationsT.has(pending)) {
+			coalescedContinuationsT.add(pending);
+			setTimer(() => {
+				coalescedContinuationsT.delete(pending);
+				if (!wsConnections.has(ws)) { pending.clear(); return; }
+				flushCoalescedForT(ws);
+			}, 0);
+		}
 		if (callerError !== null) throw callerError;
 	}
 
