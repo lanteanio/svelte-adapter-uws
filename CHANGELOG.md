@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: release failed admissions without cancelling pending authorization.** The subscriptions entry now exposes `releaseSubscription`, which removes a socket's current topic membership and derived access immediately while preserving independent pending attempts, allowing a refused loader to clean up its admission without cancelling another loader that is still authorizing.
+  - **Affects:** Frameworks and applications that roll back a granted topic membership after a later loader or policy step refuses it.
+  - **Action:** Import `releaseSubscription` from `svelte-adapter-uws/subscriptions` and call `releaseSubscription(ws, topic)` for the failed admission, coordinating other completed admissions before releasing their shared physical membership.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive physical membership operation, with no reference count per loader or application unsubscribe hook. Independently pending attempts can still succeed; explicit unsubscribe continues to cancel them.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Added: opt-in canonical site hosts.** `CANONICAL_HOST_ALIASES` redirects explicitly listed aliases to `ORIGIN` before cached assets, prerendered pages and SSR requests, so a www alias can no longer bypass an application hook's canonical-host policy while configured liveness and readiness probes remain reachable.
   - **Affects:** Deployments serving the same site through multiple hostnames.
   - **Action:** Set `ORIGIN` and a comma-separated `CANONICAL_HOST_ALIASES` list when canonical redirects are desired.
@@ -94,13 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
-- **Fixed: deferred coalesced send failures reach application telemetry.** A value that cannot be serialized after backpressure now emits a structured operational event, allowing the application sink to react while the connection and remaining queue keep serving without turning a delayed application mistake into an uncaught transport callback failure.
-  - **Affects:** Applications using server sendCoalesced with values that fail delayed serialization.
-  - **Action:** Optionally register setOperationalEventSink and handle ws.send-coalesced.unserializable.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Immediate serialization failures still throw to the caller; the default sink prints the event, and identifier fields use private references and bounded error text remains application-provided.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
 - **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
   - **Affects:** Endpoints that return custom ReadableStream response bodies.
   - **Action:** None for valid string or binary chunks.
@@ -113,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** No application change is required.
   - **Requires:** No new dependency.
   - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: deferred coalesced send failures reach application telemetry.** A value that cannot be serialized after backpressure now emits a structured operational event, allowing the application sink to react while the connection and remaining queue keep serving without turning a delayed application mistake into an uncaught transport callback failure.
+  - **Affects:** Applications using server sendCoalesced with values that fail delayed serialization.
+  - **Action:** Optionally register setOperationalEventSink and handle ws.send-coalesced.unserializable.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Immediate serialization failures still throw to the caller; the default sink prints the event, and identifier fields use private references and bounded error text remains application-provided.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: local smooth respawns snap to authority.** Ordinary-cadence corrections that imply movement far beyond recent commanded speed now snap the local sprite to its reconciled state, clearing the old render sweep while preserving unacknowledged input replay, with ordinary corrections still easing and the existing speed-snap setting controlling both local and remote placement handling.
@@ -444,9 +451,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Confirmed grants remain idempotent, and a legitimate re-grant still permits recovery. Strict gates, and armed gates without a deciding hook, reject unconfirmed ordinary membership; a revoked recover attempt is denied before its history hook runs unless authority has been restored.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: close-hook traffic counters track accepted directed sends.** Native sends dropped by backpressure no longer increase `messagesOut` or `bytesOut`, while accepted queued frames remain counted and testing topic broadcasts stay excluded even under fault injection, keeping close-hook diagnostics consistent with the directed traffic each transport accepts.
+  - **Affects:** Applications and tests that use close-hook `messagesOut` or `bytesOut` to diagnose traffic and slow consumers.
+  - **Action:** Expect lower totals when native backpressure drops directed frames or testing fault injection delivers topic broadcasts.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Native send result 0 still counts as accepted queued traffic; result 2 does not. Counters do not prove peer receipt. Send return values, egress admission, and broadcast delivery behavior are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- `releaseSubscription` in the subscriptions subpath removes failed framework admissions, including derived and publish access, while independently pending authorizations can still complete. Explicit unsubscribe continues to cancel pending attempts.
 
 - Opt-in `CANONICAL_HOST_ALIASES` redirects listed site hosts to `ORIGIN` with 308 before static, prerendered and SSR deduplication, preserving methods and raw targets while keeping mounted health probes available.
 
@@ -834,6 +850,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test-server wire broadcasts no longer inflate close-hook traffic counters; directed sends and wire-id announcements remain counted, including with outbound fault injection.
 - Test-server topic broadcasts and packed batches also remain outside close-hook traffic counters when outbound fault injection walks individual subscribers; delivery, filtering, drops, and delays retain their existing behavior.
 
+- Consumer release guidance now distinguishes accepted directed sends, dropped native frames, and uncounted topic broadcasts, including testing fault injection.
+
 - Clarify that trusted server subscription APIs accept system topics through the app hook without a namespace escape option; client wire subscriptions keep their existing guard.
 
 - Close hooks receive an empty subscription Set when a connection's subscription registry is corrupt, preserving safe teardown on production, testing and Vite.
@@ -844,7 +862,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Vite subscriber iteration passes the adapter socket and its user data to callbacks, so matching subscribers can be inspected and sent messages without throwing.
 
-- `releaseSubscription` in the subscriptions subpath removes failed framework admissions, including derived and publish access, while independently pending authorizations can still complete. Explicit unsubscribe continues to cancel pending attempts.
 
 - Pending hook-installed subscriptions no longer count as completed server grants. Server re-grants authorize the membership before acknowledging it, and wire, observer and resume gates reject unconfirmed membership.
 - Subscription API documentation distinguishes confirmed idempotent grants from held membership installed by an awaiting hook, which requires another authorization decision.
