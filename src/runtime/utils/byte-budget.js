@@ -1,11 +1,11 @@
 /**
  * Bytes of control frames one connection may be sent per window.
  *
- * Derived from the worst legitimate burst rather than picked. A subscribe
+ * Sized against representative legitimate bursts. A subscribe
  * batch carries at most 256 topics (the bundled client chunks at 200), and 256
- * acks at the ack's own size is roughly 15 KB; a client restoring 5,000 topics sends twenty
- * such batches for roughly 300 KB. This sits about 270 times above the first and
- * about 13 times above the second for the bundled client's short numeric refs.
+ * acks at the ack's own size is roughly 15 KB. A client restoring 5,000 topics
+ * sends twenty-five 200-topic batches for roughly 300 KB. This sits about 270
+ * times above the first and about 13 times above the second for the bundled client's short numeric refs.
  * One measured numeric-ref amplifier reaches it from about 20 KB/s of sustained
  * inbound; larger echoed refs need less. Healthy control traffic is bursty at
  * reconnect and quiet afterward.
@@ -48,7 +48,7 @@ export function controlFrameBytes(payload) {
 }
 
 /**
- * A byte allowance over a rolling window, as one closure.
+ * A byte allowance over a fixed window, as one closure.
  *
  * Deliberately not the keyed accountant in `utils/egress-account.js`: that one
  * exists to bound publish egress across many keys at once, with eviction and a

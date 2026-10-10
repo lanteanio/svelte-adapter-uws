@@ -8,7 +8,8 @@
 // connection that blows the bound is cut rather than served.
 //
 // MEASURED, on this runtime: one 8,121-byte `subscribe-batch` carrying 1,344
-// shortest-legal topics is answered with 1,344 frames and 97,484 bytes, twelve
+// two-to-four-character topic names from the test loop is answered with 1,344
+// frames and 97,484 bytes, twelve
 // times what it cost to ask. Another measured shape fills the 256-topic cap
 // and pads the rest with empty strings, each answered with an overflow denial:
 // with ref 1, 8,191 bytes in yields 2,496 frames and 177,042 payload bytes out
