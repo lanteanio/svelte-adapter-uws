@@ -103,6 +103,7 @@ beforeEach(async () => {
 	MockWorker.instances.length = 0;
 	MockWebSocket._last = null;
 	await flush(2);
+	clientModule.connect();
 });
 
 const initsOf = (w) => w.posted.filter((p) => p.msg.type === 'init');
@@ -174,6 +175,85 @@ describe('self identity', () => {
 });
 
 describe('worker mount', () => {
+
+	it('unwinds a synchronous transfer failure before another topic mounts', async () => {
+		clientModule.connect();
+		await flush();
+		const canvas = makeCanvas();
+		const transfer = canvas.transferControlToOffscreen;
+		let attempts = 0;
+		canvas.transferControlToOffscreen = function () {
+			if (attempts++ === 0) throw new Error('surface temporarily unavailable');
+			return transfer.call(this);
+		};
+		const listeners = new Set();
+		const previous = window.matchMedia;
+		window.matchMedia = () => ({ matches: false,
+			addEventListener: (_type, fn) => listeners.add(fn),
+			removeEventListener: (_type, fn) => listeners.delete(fn) });
+		const handle = cursorClient.cursor(freshTopic(), { canvas, smooth: true });
+		try {
+			expect(() => handle.mount()).toThrow(/surface temporarily unavailable/);
+			expect(listeners.size).toBe(0);
+			clientModule.connect().close();
+			clientModule.connect();
+			await flush();
+			expect(attempts).toBe(1);
+			const next = cursorClient.cursor(freshTopic(), { canvas });
+			const teardown = next.mount();
+			expect(initsOf(MockWorker.instances.at(-1))).toHaveLength(1);
+			teardown();
+			next.destroy();
+		} finally {
+			handle.destroy();
+			if (previous === undefined) delete window.matchMedia;
+			else window.matchMedia = previous;
+		}
+	});
+
+	it('unwinds a falsy worker constructor failure and releases its mount reference', async () => {
+		clientModule.connect();
+		await flush();
+		const previous = globalThis.Worker;
+		const handle = cursorClient.cursor(freshTopic(), { canvas: makeCanvas() });
+		globalThis.Worker = class { constructor() { throw null; } };
+		let threw = false;
+		try { handle.mount(); } catch (error) { threw = true; expect(error).toBe(null); }
+		finally { globalThis.Worker = previous; }
+		try {
+			expect(threw).toBe(true);
+			// The first attempt transferred the real surface; retry must reach
+			// that constraint, not silently share a nonexistent mounted worker.
+			expect(() => handle.mount()).toThrow(/transferred/);
+		} finally { handle.destroy(); }
+	});
+
+	it('keeps a new mount alive when old cleanup follows delayed init failure', async () => {
+		clientModule.connect().close();
+		clientModule.connect();
+		const canvas = makeCanvas();
+		let attempts = 0;
+		canvas.transferControlToOffscreen = () => {
+			if (attempts++ === 0) throw new Error('surface temporarily unavailable');
+			return new MockOffscreen();
+		};
+		const handle = cursorClient.cursor(freshTopic(), { canvas });
+		const oldTeardown = handle.mount();
+		const queue = globalThis.queueMicrotask;
+		const deferred = [];
+		globalThis.queueMicrotask = (fn) => deferred.push(fn);
+		try { await flush(); } finally { globalThis.queueMicrotask = queue; }
+		try {
+			expect(deferred).toHaveLength(1);
+			expect(deferred[0]).toThrow(/surface temporarily unavailable/);
+			const newTeardown = handle.mount();
+			const worker = MockWorker.instances.at(-1);
+			oldTeardown();
+			expect(ofType(worker, 'pause')).toHaveLength(0);
+			newTeardown();
+			expect(ofType(worker, 'pause')).toHaveLength(1);
+		} finally { handle.destroy(); }
+	});
 	it('tracks the live reduced-motion media query and forwards it to the worker', async () => {
 		const listeners = new Set();
 		const query = {

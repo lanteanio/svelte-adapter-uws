@@ -959,6 +959,19 @@ function cursorOnCanvas(topic, options) {
 		pumpSig = '';
 	}
 
+	function stopWorkerMount() {
+		stopPump();
+		unwatchMotionPreference();
+		unwatchSelf();
+		if (statusUnsub) { statusUnsub(); statusUnsub = null; }
+		if (host.worker && initSent) {
+			try { host.worker.postMessage({ type: 'pause' }); } catch { /* worker already failed */ }
+		}
+		initSent = false;
+		host.activeTopic = null;
+		host.activeSink = null;
+	}
+
 	function mountWorker() {
 		host.activeTopic = topic;
 		host.activeSink = workerSink;
@@ -966,19 +979,31 @@ function cursorOnCanvas(topic, options) {
 		// Init waits for the main connection's first 'open': by then the auth
 		// preflight has run (cookies are minted) and the endpoint is proven
 		// reachable, so the worker socket can dial the same URL cold.
+		let subscribing = true;
+		let initialError;
+		let initialFailed = false;
 		statusUnsub = status.subscribe((s) => {
-			if (s === 'open') sendInit();
+			if (s !== 'open') return;
+			try { sendInit(); }
+			catch (error) {
+				if (subscribing) { initialFailed = true; initialError = error; }
+				else {
+					stopWorkerMount();
+					refCount = 0;
+					activeTeardown = null;
+					microtask(() => { throw error; });
+				}
+			}
 		});
+		subscribing = false;
+		if (initialFailed) {
+			statusUnsub();
+			statusUnsub = null;
+			throw initialError;
+		}
 		return function teardown() {
 			if (--refCount > 0) return;
-			stopPump();
-			unwatchMotionPreference();
-			unwatchSelf();
-			if (statusUnsub) { statusUnsub(); statusUnsub = null; }
-			if (host.worker && initSent) host.worker.postMessage({ type: 'pause' });
-			initSent = false;
-			host.activeTopic = null;
-			host.activeSink = null;
+			stopWorkerMount();
 		};
 	}
 
@@ -1159,11 +1184,12 @@ function cursorOnCanvas(topic, options) {
 	 * caller, an effect framework bug) must decrement the refCount exactly
 	 * once or a sibling mount's pipeline would be torn down under it. */
 	function teardownOnce() {
+		const teardown = activeTeardown;
 		let torn = false;
 		return () => {
 			if (torn) return;
 			torn = true;
-			if (activeTeardown) activeTeardown();
+			if (activeTeardown === teardown) teardown?.();
 		};
 	}
 
@@ -1195,7 +1221,15 @@ function cursorOnCanvas(topic, options) {
 				throw new Error('cursor: canvas is already rendering topic ' + JSON.stringify(host.activeTopic) + '; one canvas renders one topic at a time');
 			}
 			const useWorker = workerViable && rendering !== 'main';
-			activeTeardown = useWorker ? mountWorker() : mountFallback();
+			if (useWorker) {
+				try { activeTeardown = mountWorker(); }
+				catch (error) {
+					refCount = 0;
+					activeTeardown = null;
+					stopWorkerMount();
+					throw error;
+				}
+			} else activeTeardown = mountFallback();
 			watchSelf();
 			return teardownOnce();
 		},
