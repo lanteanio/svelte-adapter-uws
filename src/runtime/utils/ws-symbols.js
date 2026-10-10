@@ -85,6 +85,45 @@ export function pendingSubscribeTotal(ud) {
 }
 
 /**
+ * A hook may install membership before its authorization settles. Until a
+ * successful attempt confirms it, that membership is not a server grant.
+ * @param {any} ud
+ * @param {string} topic
+ * @returns {boolean}
+ */
+export function membershipUnconfirmed(ud, topic) {
+	if (ud[WS_PENDING_SUBSCRIBES_TOTAL] === 0) return false;
+	const entry = ud[WS_PENDING_SUBSCRIBES]?.get(topic);
+	return entry !== undefined && !entry.granted;
+}
+
+/**
+ * Read the held landing's verdict without settling the attempt. Recovery must
+ * establish this authority before handing message history to the resume hook.
+ * @param {any} ud
+ * @param {string} topic
+ * @param {number} token
+ * @returns {boolean}
+ */
+export function heldLandingWouldAck(ud, topic, token) {
+	const entry = ud[WS_PENDING_SUBSCRIBES]?.get(topic);
+	return !entry || entry.epoch === token || entry.granted === true;
+}
+
+/**
+ * The wire grant gate accepts a completed grant, or the current attempt's
+ * plugin-owned join. An ordinary hook install cannot mint a server grant.
+ * @param {any} ud
+ * @param {string} topic
+ * @param {number} token
+ * @returns {boolean}
+ */
+export function heldSubscribeIsAuthorized(ud, topic, token) {
+	return !membershipUnconfirmed(ud, topic)
+		|| (isPluginOwnedTopic(topic) && heldLandingWouldAck(ud, topic, token));
+}
+
+/**
  * Open an in-flight subscribe for `topic`, returning the token the landing
  * must present to {@link settlePendingSubscribe}. The token is the topic's
  * current revocation epoch.

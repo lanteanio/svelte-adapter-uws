@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, CARRY_TRACE_CONTEXT, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, membershipUnconfirmed, heldLandingWouldAck, heldSubscribeIsAuthorized, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, CARRY_TRACE_CONTEXT, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, leaseReportedSaturation, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -2472,7 +2472,7 @@ if (WS_ENABLED) {
 					// granted is hard-denied here UNLESS the app ships its own subscribe
 					// hook, which then decides via `runUserSubscribeGate` below. `isNew`
 					// is exactly "not already server-authorized on this connection".
-					if (deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: !isNew, topic: msg.topic })) {
+					if (deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: !isNew && !membershipUnconfirmed(ws.getUserData(), msg.topic), topic: msg.topic })) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
 					}
@@ -2524,6 +2524,14 @@ if (WS_ENABLED) {
 					// the recover lane instead; it acks through its own
 					// already-subscribed branch once the gap is filled.
 					const _wantsRecover = wantsRecover({ hasResumeHook: wsModule.resume, recover: msg.recover });
+					if (subs.has(msg.topic) && deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: subs.has(msg.topic) && heldSubscribeIsAuthorized(pendingUd, msg.topic, pendingToken), topic: msg.topic })) {
+						if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
+							unwindRevokedMembership(ws, msg.topic);
+							runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+						}
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+						return;
+					}
 					if (subs.has(msg.topic) && !_wantsRecover) {
 						// Held is not enough: the membership may have been installed
 						// mid-await by THIS attempt's own hook after a revocation
@@ -2579,11 +2587,19 @@ if (WS_ENABLED) {
 					// revoke followed by a re-grant inside one await window is served
 					// rather than acked-and-silently-dropped.
 					const _recoverRevoked = recoverIsRevoked({
-						held: subs instanceof Set && subs.has(msg.topic),
+						held: subs instanceof Set && subs.has(msg.topic) && heldLandingWouldAck(pendingUd, msg.topic, pendingToken),
 						wireAuthz: subscribeAuth.enabled && (subscribeAuth.strict || !hasUserSubscribeHook()),
 						cancelled: isPendingSubscribeCancelled(pendingUd, msg.topic, pendingToken),
 						topic: msg.topic
 					});
+					if (_recoverRevoked && _wantsRecover) {
+						if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
+							unwindRevokedMembership(ws, msg.topic);
+							runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+						}
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+						return;
+					}
 					if (!_recoverRevoked && _wantsRecover) {
 						const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
 						_cap = beginResumeCapture([msg.topic], ws);
@@ -2593,6 +2609,15 @@ if (WS_ENABLED) {
 						// Re-check after the await: a concurrent subscribe may have added
 						// it, so the client is already live and the buffered frames would
 						// be duplicates - discard them.
+						if (subs.has(msg.topic) && deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: subs.has(msg.topic) && heldSubscribeIsAuthorized(pendingUd, msg.topic, pendingToken), topic: msg.topic })) {
+							if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
+								unwindRevokedMembership(ws, msg.topic);
+								runUnsubscribeHook(wsModule.unsubscribe, ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+							}
+							discardResumeCapture(_cap);
+							sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+							return;
+						}
 						if (subs.has(msg.topic)) {
 							const heldVerdictR = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
 							if (heldVerdictR === 'ack') { discardResumeCapture(_cap); sendSubscribed(ws, msg.topic, ref); return; }
@@ -2753,7 +2778,7 @@ if (WS_ENABLED) {
 					const _hasUserHook = hasUserSubscribeHook();
 					const _wireAuthz = subscribeAuth.enabled && (subscribeAuth.strict || !_hasUserHook);
 					const authzDenied = _wireAuthz
-						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held: userData[WS_SUBSCRIPTIONS].has(t), topic: t }))
+						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held: userData[WS_SUBSCRIPTIONS].has(t) && !membershipUnconfirmed(ws.getUserData(), t), topic: t }))
 						: null;
 
 					// In-flight authorization capacity: topics beyond the connection's
@@ -2871,7 +2896,7 @@ if (WS_ENABLED) {
 							// grant-set test it replaces.
 							const _batchSubs = userData[WS_SUBSCRIPTIONS];
 							const _revoked = recoverIsRevoked({
-								held: _batchSubs instanceof Set && _batchSubs.has(_t),
+								held: _batchSubs instanceof Set && _batchSubs.has(_t) && heldLandingWouldAck(batchUd, _t, batchTokens[i]) && (!subscribeAuth.enabled || (_hasUserHook && !subscribeAuth.strict) || heldSubscribeIsAuthorized(batchUd, _t, batchTokens[i])),
 								// Read FRESH, not from the pre-await `_wireAuthz` snapshot.
 								// `subscribeAuth.enabled` is runtime-mutable via
 								// platform.authorizeWireSubscribe() and latches false->true, so a
@@ -2932,7 +2957,8 @@ if (WS_ENABLED) {
 						// here and the subscribe mutates `subs` for this topic, and the
 						// inline spelling this replaces asked the same Set twice.
 						const held = subs.has(topic);
-						const denial = (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held, topic }) ? 'FORBIDDEN' : null)
+						const denial = (authzDenied?.[i] ? 'FORBIDDEN' : null)
+							?? (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held: held && heldSubscribeIsAuthorized(batchUd, topic, batchTokens[i]), topic }) ? 'FORBIDDEN' : null)
 							?? (batchDenials !== null
 								? (batchDenials[topic] ?? null)
 								: (perTopicDenials !== null ? perTopicDenials[i] : null));
@@ -3121,7 +3147,7 @@ if (WS_ENABLED) {
 							const _allowed = Object.create(null);
 							let _dropped = 0;
 							for (const _t of Object.keys(map)) {
-								if (deniesUngrantedObserve(true, false, _grants, _t)) { _dropped++; continue; }
+								if (deniesUngrantedObserve(true, false, membershipUnconfirmed(ws.getUserData(), _t) ? null : _grants, _t)) { _dropped++; continue; }
 								_allowed[_t] = map[_t];
 							}
 							return _dropped > 0 ? _allowed : map;
