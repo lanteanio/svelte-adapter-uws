@@ -219,6 +219,7 @@ function postBody(port, size, sent = size, headers = { 'x-requested-with': 'XMLH
 			});
 		});
 		req.once('error', (err) => { if (sent === size) reject(err); });
+		req.setTimeout(2000, () => { req.destroy(); reject(new Error('Auth response timed out')); });
 		if (sent === size) req.end('x'.repeat(size));
 		else req.write('x'.repeat(sent));
 	});
@@ -226,19 +227,20 @@ function postBody(port, size, sent = size, headers = { 'x-requested-with': 'XMLH
 
 /**
  * An auth POST over HTTP/1.1 whose body of `size` bytes goes out chunked, with
- * no declared length, asking the fixture's hook to read it.
+ * no declared length, optionally asking the fixture's hook to read it.
  *
  * @param {number} port
  * @param {number} size
+ * @param {boolean} [read]
  */
-function postChunked(port, size) {
+function postChunked(port, size, read = true) {
 	return new Promise((resolve, reject) => {
 		const req = httpRequest({
 			host: '127.0.0.1',
 			port,
 			path: '/__ws/auth',
 			method: 'POST',
-			headers: { 'x-requested-with': 'XMLHttpRequest', 'x-auth-read-body': '1' }
+			headers: { 'x-requested-with': 'XMLHttpRequest', ...(read ? { 'x-auth-read-body': '1' } : {}) }
 		}, (res) => {
 			let body = '';
 			res.setEncoding('utf8');
@@ -379,6 +381,25 @@ for (const surface of SURFACES) {
 			expect(within.status).toBe(204);
 			// The hook reads the body it was sent.
 			expect(within.headers['x-body-length']).toBe('1024');
+		});
+
+		it('answers without reading an undeclared body past 64 KiB', async () => {
+			const res = await postChunked(server.port, 70 * 1024, false);
+			expect(res.status).toBe(204);
+			expect(res.headers['x-body-length']).toBeUndefined();
+		});
+
+		it('answers an ignored body before the client finishes sending a permitted declared length', async () => {
+			const res = await postBody(server.port, 64 * 1024, 10);
+			expect(res.status).toBe(204);
+		});
+
+		it('reads all 64 KiB of a body at the cap', async () => {
+			const res = await postBody(server.port, 64 * 1024, undefined, {
+				'x-requested-with': 'XMLHttpRequest', 'x-auth-read-body': '1'
+			});
+			expect(res.status).toBe(204);
+			expect(res.headers['x-body-length']).toBe(String(64 * 1024));
 		});
 
 		it('answers a declared length past 64 KiB before the body arrives, after the Host check', async () => {
@@ -648,7 +669,8 @@ describe('the dev plugin over HTTP/2', () => {
 				':method': 'POST',
 				':path': '/__ws/auth',
 				':authority': `127.0.0.1:${server.h2Port}`,
-				'x-requested-with': 'XMLHttpRequest'
+				'x-requested-with': 'XMLHttpRequest',
+				'x-auth-read-body': '1'
 			});
 			stream.once('error', () => {});
 			stream.once('response', (headers) => {
@@ -680,7 +702,8 @@ describe('the dev plugin over HTTP/2', () => {
 			':method': 'POST',
 			':path': '/__ws/auth',
 			':authority': `127.0.0.1:${server.h2Port}`,
-			'x-requested-with': 'XMLHttpRequest'
+			'x-requested-with': 'XMLHttpRequest',
+			'x-auth-read-body': '1'
 		}, undefined, 'x'.repeat(4 * 1024 * 1024));
 		expect(res.status).toBe(413);
 	});
@@ -809,16 +832,16 @@ describe('the dev auth lane\'s body read', () => {
 		expect(calls).toBe(1);
 	});
 
-	it('runs no hook for a body past 64 KiB over HTTP/1.1, declared or not', async () => {
+	it('refuses a declared body past 64 KiB before the hook and permits an ignored chunked body', async () => {
 		release();
 		const before = calls;
 		expect((await postBody(server.port, 64 * 1024 + 1)).status).toBe(413);
-		expect((await postChunked(server.port, 70 * 1024)).status).toBe(413);
-		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(calls).toBe(before);
+		expect((await postChunked(server.port, 70 * 1024, false)).status).toBe(204);
+		expect(calls).toBe(before + 1);
 	});
 
-	it('runs no hook for a body past 64 KiB over HTTP/2', async () => {
+	it('drains an ignored body past 64 KiB over HTTP/2 after answering', async () => {
 		release();
 		const before = calls;
 		const res = await h2Exchange(server.h2Port, {
@@ -827,9 +850,98 @@ describe('the dev auth lane\'s body read', () => {
 			':authority': `127.0.0.1:${server.h2Port}`,
 			'x-requested-with': 'XMLHttpRequest'
 		}, undefined, 'x'.repeat(4 * 1024 * 1024));
-		expect(res.status).toBe(413);
+		expect(res.status).toBe(204);
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(calls).toBe(before);
+		expect(calls).toBe(before + 1);
+	});
+});
+
+describe('the dev auth request stream', () => {
+	/** @type {Awaited<ReturnType<typeof bootViteDev>>} */
+	let server;
+	/** @type {() => void} */
+	let entered;
+	beforeAll(async () => {
+		server = await bootWithoutOrigin({
+			h2: true,
+			handler: {
+				async authenticate({ request, headers }) {
+					if (headers['x-auth-read-body'] !== '1') return undefined;
+					entered?.();
+					const bytes = await request.arrayBuffer();
+					return new Response(null, { status: 204, headers: { 'x-body-length': String(bytes.byteLength) } });
+				}
+			}
+		});
+	});
+	afterAll(async () => { await server?.close(); });
+
+	it.each(['proxy', 'native error'])('contains a %s rejection whose prototype cannot be inspected', async (kind) => {
+		let fail = true;
+		const hostile = new Proxy({}, { getPrototypeOf() { throw new Error('prototype unavailable'); } });
+		const rejection = kind === 'native error' ? Object.setPrototypeOf(new Error('hook failed'), hostile) : hostile;
+		const isolated = await bootWithoutOrigin({ handler: {
+			authenticate() { if (fail) throw rejection; return undefined; }
+		} });
+		try {
+			expect((await postChunked(isolated.port, 0, false)).status).toBe(500);
+			fail = false;
+			expect((await postChunked(isolated.port, 0, false)).status).toBe(204);
+		} finally { await isolated.close(); }
+	});
+
+	it('contains a disconnect during an HTTP/1.1 body read and keeps serving', async () => {
+		const reading = new Promise((resolve) => { entered = () => resolve(undefined); });
+		const req = httpRequest({
+			host: '127.0.0.1', port: server.port, path: '/__ws/auth', method: 'POST',
+			headers: { 'content-length': '1024', 'x-requested-with': 'XMLHttpRequest', 'x-auth-read-body': '1' }
+		});
+		req.on('error', () => {});
+		req.write('partial');
+		await reading;
+		req.destroy();
+		const next = await postChunked(server.port, 1024);
+		expect(next.status).toBe(204);
+		expect(next.headers['x-body-length']).toBe('1024');
+	});
+
+	it('contains an HTTP/2 reset during a body read and keeps serving', async () => {
+		const reading = new Promise((resolve) => { entered = () => resolve(undefined); });
+		const session = http2Connect(`http://127.0.0.1:${server.h2Port}`);
+		session.on('error', () => {});
+		const stream = session.request({
+			':method': 'POST', ':path': '/__ws/auth',
+			'x-requested-with': 'XMLHttpRequest', 'x-auth-read-body': '1'
+		});
+		stream.on('error', () => {});
+		try {
+			stream.write('partial');
+			await reading;
+			const closed = new Promise((resolve) => stream.once('close', resolve));
+			stream.close(http2Constants.NGHTTP2_CANCEL);
+			await closed;
+		} finally { session.destroy(); }
+		const next = await h2Exchange(server.h2Port, {
+			':method': 'POST', ':path': '/__ws/auth',
+			'x-requested-with': 'XMLHttpRequest', 'x-auth-read-body': '1'
+		}, undefined, 'next-body');
+		expect(next.status).toBe(204);
+		expect(next.headers['x-body-length']).toBe('9');
+	});
+
+	it('answers an ignored HTTP/2 body before its declared length has arrived', async () => {
+		const session = http2Connect(`http://127.0.0.1:${server.h2Port}`);
+		session.on('error', () => {});
+		const stream = session.request({
+			':method': 'POST', ':path': '/__ws/auth',
+			'x-requested-with': 'XMLHttpRequest', 'content-length': String(64 * 1024)
+		});
+		stream.on('error', () => {});
+		try {
+			const response = new Promise((resolve) => stream.once('response', resolve));
+			stream.write('partial');
+			expect((await response)[':status']).toBe(204);
+		} finally { session.destroy(); }
 	});
 });
 

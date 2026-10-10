@@ -2253,7 +2253,7 @@ With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', 
 **Configuration**
 
 - The default auth path is `/__ws/auth`. Override with `adapter({ websocket: { authPath: '/api/ws-auth' } })`.
-- The hook is only mounted when `authenticate` is exported from `hooks.ws` - no runtime cost when unused.
+- The hook is only mounted when `authenticate` is exported from `hooks.ws` - no runtime cost when unused. In production and Vite it runs without waiting for the request body; read `event.request` if authentication depends on it. A declared length over 64 KiB is rejected before the hook, and reading past 64 KiB rejects the read and answers 413. An ignored body does not delay the answer or trigger that read-time cap.
 - Dev mode (Vite plugin) mirrors the production route on the same path: only that exact path, as written, reaches the hook (another spelling, such as `/__WS/AUTH` or `/__ws/auth/x`, goes on to the app), with the target as the client sent it in `event.url`, an empty `?` dropped as production drops it. Under `server.https`, where Vite terminates TLS and speaks HTTP/2 (before Vite 7.2, HTTP/1.1 when `server.proxy` is set), a same-origin `Origin` is the `https://` one, as under `SSL_CERT` in production, and over HTTP/2 the hook's `headers` carry no pseudo-headers, with `host` taken from `:authority`.
 - The endpoint requires `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` matching `allowedOrigins` (CSRF defense). The adapter client always stamps `x-requested-with: XMLHttpRequest`. Native (non-browser) clients that need to reach this endpoint without those headers can opt out via `websocket.authPathRequireOrigin: false`. See [Security configuration](#security-configuration).
 

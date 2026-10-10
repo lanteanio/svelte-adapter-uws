@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { validateHeaderValue } from 'node:http';
+import { authRequestBody } from './vite-request-body.js';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, topicEpochValue, mintTopicEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, CARRY_REQUEST_ID, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, WS_CONTROL_BUDGET, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
@@ -156,6 +157,8 @@ function targetPath(target) {
 	const queryAt = target.indexOf('?');
 	return queryAt === -1 ? target : target.slice(0, queryAt);
 }
+
+function ignoreRequestError() {}
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { renderAppShell, createDashboardSnapshots, checkDashboardAccess } from './dev-dashboard.js';
 import { registerGameIngress } from './runtime/handler/game-ingress.js';
@@ -2398,7 +2401,9 @@ export default function uws(options = {}) {
 				// and strips it from `req.url`. Production routes the exact path only
 				// and hands every other spelling to the application.
 				if (targetPath(authTarget) !== wsAuthPath) { next(); return; }
+				req.on('error', ignoreRequestError);
 				await handlerReady;
+				if (req.aborted || res.destroyed) return;
 				if (!userHandlers.authenticate) { next(); return; }
 				if (req.method !== 'POST') {
 					res.statusCode = 405;
@@ -2443,48 +2448,19 @@ export default function uws(options = {}) {
 				}
 
 				const overHttp2 = req.httpVersionMajor >= 2;
-				// Read body (capped at 64 KB; the hook rarely needs it).
 				const AUTH_BODY_LIMIT = 64 * 1024;
-				/** @type {Buffer[]} */
-				const chunks = [];
-				let total = 0;
-				let oversized = false;
-				// Answered at once, and the rest of the body is still read and
-				// dropped: an HTTP/2 stream left unread never completes.
 				const answerOversized = () => {
-					oversized = true;
-					chunks.length = 0;
 					res.statusCode = 413;
-					// Production's reason phrase; HTTP/2 carries none.
 					if (!overHttp2) res.statusMessage = 'Content Too Large';
 					res.setHeader('content-type', 'text/plain');
 					res.end('Content Too Large');
 				};
-				// A declared length past the cap is answered before the body
-				// arrives, as production answers it.
-				if (parseInt(headers['content-length'], 10) > AUTH_BODY_LIMIT) answerOversized();
-				// A client that goes away mid-body ends the read with an error. It
-				// is caught here: the middleware's promise has no one to hand a
-				// rejection to, and an unhandled one ends the dev server. Nothing
-				// answers a request whose client left, so the hook does not run
-				// for it.
-				try {
-					for await (const chunk of req) {
-						if (oversized) continue;
-						total += chunk.length;
-						if (total > AUTH_BODY_LIMIT) {
-							answerOversized();
-							continue;
-						}
-						chunks.push(chunk);
-					}
-				} catch {
+				if (parseInt(headers['content-length'], 10) > AUTH_BODY_LIMIT) {
+					answerOversized();
+					req.resume();
 					return;
 				}
-				if (oversized) return;
-				// Over HTTP/2 a stream reset before the read began ends it empty.
-				if (req.aborted) return;
-				const bodyBuf = Buffer.concat(chunks);
+				const input = authRequestBody(req, AUTH_BODY_LIMIT);
 
 				// A host that passed the check above can still be one the URL
 				// parser refuses, as production answers it.
@@ -2497,11 +2473,12 @@ export default function uws(options = {}) {
 					request = new Request(origin + url, {
 						method: 'POST',
 						headers,
-						body: bodyBuf.length > 0 ? bodyBuf : undefined,
+						body: input.body,
 						// @ts-expect-error
 						duplex: 'half'
 					});
 				} catch {
+					input.discard();
 					res.statusCode = 400;
 					res.setHeader('content-type', 'text/plain');
 					res.end('Bad Request');
@@ -2596,6 +2573,8 @@ export default function uws(options = {}) {
 					if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
 					res.end();
 				} catch (err) {
+					if (req.aborted || res.destroyed) return;
+					if (input.isTooLargeError(err) && !writing) { answerOversized(); return; }
 					// Same event and echo as the production endpoint: a
 					// developer verifying correlation under `vite dev` must
 					// see the id and the structured record, not dev-only
@@ -2617,6 +2596,8 @@ export default function uws(options = {}) {
 					res.setHeader('content-type', 'text/plain');
 					if (authRequestId) res.setHeader('x-request-id', authRequestId);
 					res.end('Internal Server Error');
+				} finally {
+					input.discard();
 				}
 			});
 

@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: Vite authentication hooks can answer before reading a request body.** Like production, dev runs `authenticate` immediately with a bounded request stream, so an ignored chunked body or an unfinished permitted Content-Length no longer delays or replaces the hook's answer, while hooks that consume the stream retain production's body limit and rejection behavior.
+  - **Affects:** Vite applications whose `authenticate` hook does not consume every request body.
+  - **Action:** Read `event.request` when authentication depends on the body.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Declared lengths over 64 KiB still receive 413 before the hook; a hook read past that cap still rejects and receives 413.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
   - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
   - **Action:** None. Update the adapter client with the server package.
@@ -692,6 +698,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stop admission after either await; the event callback contains other failures
   to that socket. Raw TCP and TLS tests verify refusals followed by successful
   upgrades, and TCP resets during both asynchronous waits leave the server serving.
+- **Vite authentication request bodies.** The hook receives a bounded request
+  stream without waiting for body completion. Declared lengths over 64 KiB are
+  rejected before invocation; consumed bytes past the cap raise the same
+  `PayloadTooLargeError` as production. Ignored remainders are drained after the
+  answer so HTTP/2 streams can complete. Real built-runtime and Vite tests pin
+  ignored chunked and stalled bodies, exact-cap reads, over-cap reads, HTTP/2
+  completion, and disconnects before and during a body read.
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup
