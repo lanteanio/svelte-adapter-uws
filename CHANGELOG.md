@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
+  - **Affects:** Applications that react to disconnects or send application messages through the client connection.
+  - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Existing callers can ignore the return value; serialization and transport exceptions still propagate, and `true` confirms local admission only.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
   - **Affects:** Browser and embedded clients using the bundled auth preflight with origin checking enabled.
   - **Action:** None. Update the adapter client with the server package.
@@ -647,6 +653,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The export type gate rejects JavaScript subpaths without declarations and
   follows runtime and declaration star re-exports, including cycles and
   ambiguous names, instead of silently skipping those public surfaces.
+
+- Self-initiated client socket closes report `disconnected` immediately, even
+  while the browser's close event is pending. `send()` returns true for local
+  admission and false for a disconnected socket; serialization and
+  transport exceptions propagate. Late callbacks cannot overwrite a replacement
+  connection's state or subscription retries.
 
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks

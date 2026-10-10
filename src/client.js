@@ -1542,11 +1542,32 @@ function createConnection(options) {
 		return authInFlight;
 	}
 
+	function clearSubscriptionRetries() {
+		if (rateLimitedTimer !== null) clearTimer(rateLimitedTimer);
+		rateLimitedTimer = null;
+		rateLimitedTopics.clear();
+	}
+
+	// The close event can arrive after the browser starts closing the socket.
+	function disconnectSocket() {
+		const sock = ws;
+		if (!sock) return;
+		sock.close();
+		if (ws === sock && !intentionallyClosed && !terminalClosed) statusStore.set('disconnected');
+	}
+
 	function doConnect() {
+		if (intentionallyClosed || terminalClosed) return;
 		if (!url && typeof window === 'undefined') return;
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
-
+		if (ws) {
+			ws = null;
+			clearSubscriptionRetries();
+			statusStore.set('disconnected');
+			if (intentionallyClosed || terminalClosed) return;
+		}
 		statusStore.set('connecting');
+		if (intentionallyClosed || terminalClosed) return;
 
 		if (authPath) {
 			runAuth().then((result) => {
@@ -1622,7 +1643,7 @@ function createConnection(options) {
 		// takes the ordinary reconnect path.
 		const attemptTimer = setTimer(() => {
 			if (ws === sock && sock.readyState === WebSocket.CONNECTING) {
-				try { sock.close(); } catch { /* already failing */ }
+				try { disconnectSocket(); } catch { /* already failing */ }
 			}
 		}, ATTEMPT_TIMEOUT_MS);
 		// Read inbound binary frames as ArrayBuffer (default is Blob, which is
@@ -2047,21 +2068,10 @@ function createConnection(options) {
 
 		ws.onclose = (event) => {
 			clearTimer(attemptTimer);
-			// Dropped BEFORE the identity guard below: a forced close can race a
-			// reconnect, and a superseded socket's late onclose returns early. If
-			// the retry outlived that return it would fire against the NEW socket
-			// and re-send topics the reopen had already resubscribed - with their
-			// recovery - burning the very budget this retry exists to wait out.
-			// Every close leads to a resubscribe of everything wanted, so a
-			// pending retry is never the thing that restores a subscription.
-			if (rateLimitedTimer) {
-				clearTimer(rateLimitedTimer);
-				rateLimitedTimer = null;
-			}
-			rateLimitedTopics.clear();
-			// A replaced socket's close must not null out (or reconnect over)
-			// the socket that superseded it.
+			// Replacement already cleared the old socket's retries. Its late close
+			// must not clear retries belonging to the new socket.
 			if (ws !== sock) return;
+			clearSubscriptionRetries();
 			ws = null;
 			if (debug) console.log('[ws] disconnected');
 			lastCloseCode = event?.code || 0;
@@ -2428,14 +2438,21 @@ function createConnection(options) {
 	 * DataView, etc) are sent as binary frames unchanged.
 	 *
 	 * @param {unknown} data
+	 * @returns {boolean} Whether the current open socket accepted the frame.
 	 */
 	function send(data) {
-		if (ws?.readyState === WebSocket.OPEN) {
+		const sock = ws;
+		if (sock && sock.readyState === WebSocket.OPEN) {
 			if (debug) console.log('[ws] send ->', data);
-			ws.send(serializeForSend(data));
+			const serialized = serializeForSend(data);
+			// A caller's toJSON can close or replace the connection while serializing.
+			if (ws !== sock || sock.readyState !== WebSocket.OPEN) return false;
+			sock.send(serialized);
+			return true;
 		} else if (debug) {
 			console.warn('[ws] send dropped (not connected) - use sendQueued() to queue messages for reconnect:', data, '\n  See: https://svti.me/send-dropped');
 		}
+		return false;
 	}
 
 	/**
@@ -2544,7 +2561,7 @@ function createConnection(options) {
 					if (gapAtHide > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
 						if (debug) console.log('[ws] suspend gap detected at hide, reconnecting');
 						attempt = 0;
-						ws.close();
+						disconnectSocket();
 						return;
 					}
 					// Tab moved to the background. Downgrade to 'suspended' as a
@@ -2568,7 +2585,7 @@ function createConnection(options) {
 					if (debug) console.log('[ws] suspend gap detected on resume, reconnecting');
 					hiddenDisconnect = false;
 					attempt = 0;
-					ws.close();
+					disconnectSocket();
 					return;
 				}
 				// Connection survived the hide - clear the 'suspended' overlay.
@@ -2602,7 +2619,7 @@ function createConnection(options) {
 				// Close now so onclose classifies RETRY, flips status to 'disconnected',
 				// and schedules the reconnect - which is also what arms the realtime
 				// offline queue. The `online` handler skips the backoff on recovery.
-				ws.close();
+				disconnectSocket();
 			} else {
 				// No live socket to close - surface the drop directly.
 				statusStore.set('disconnected');
@@ -2652,7 +2669,7 @@ function createConnection(options) {
 			if (ws?.readyState === WebSocket.OPEN
 				&& ((silence > SERVER_TIMEOUT_MS && !timerThrottled) || (suspendGap > SUSPEND_GAP_MS && silence > 5000))) {
 				if (debug) console.log('[ws] server silent for', silence, 'ms (suspend gap', suspendGap, 'ms), reconnecting');
-				ws.close();
+				disconnectSocket();
 			}
 		}, ACTIVITY_INTERVAL_MS);
 	}

@@ -619,13 +619,16 @@ export interface WSConnection {
 	unsubscribe(topic: string): void;
 
 	/**
-	 * Send a custom message to the server. Dropped silently if not connected.
+	 * Send a custom message to the server. Returns true when the frame was
+	 * handed to the current OPEN socket, or false when disconnected.
+	 * This is local admission, not acknowledgement or delivery confirmation.
+	 * Serialization and transport exceptions propagate.
 	 *
 	 * Strings and JSON-serializable objects are sent as text frames after
 	 * `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array,
 	 * DataView, etc) are sent as binary frames unchanged.
 	 */
-	send(data: unknown): void;
+	send(data: unknown): boolean;
 
 	/**
 	 * Send a complete JSON message already encoded as text, unchanged.
