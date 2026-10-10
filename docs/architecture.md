@@ -258,6 +258,27 @@ fold, the gauge and send-gate window sizing. Arena fullness
 (`heapUsed/heapTotal`) is not part of the contract on any engine. This adapter
 implements measurement in `src/runtime/utils/memory-wall.js`.
 
+### OS memory notifications
+
+For adapters that expose native memory notifications, OS warning and critical
+notifications are sampling hints, not measurements of memory capacity. Both levels set the same pending hint. Multiple notifications
+coalesce until the next normally scheduled pressure tick, which refreshes
+cgroup membership discovery before reading the memory walls. The tick still
+owns the counter window, measured PSI readings, pressure fold and posture
+transition; notifications do not run an extra sample or create another timer.
+
+The hint is consumed by that tick and carries no pressure level to decay or
+clear. `memoryHeapUsedRatio: false` continues to disable only the `MEMORY`
+threshold; independent PSI thresholds keep their configured behavior. Without
+a discoverable wall or measured PSI, an OS notification alone cannot assert
+memory saturation. This preserves the meaning of the reported measurements.
+A runtime with no notifications keeps its ordinary sampling behavior.
+
+Native listeners belong to sampler lifecycle and are detached when sampling
+stops. Simulations supply notifications and source readings through their
+controlled runtime environment; they never install a host notification
+listener or derive a fingerprint from host pressure events.
+
 ## Failure ownership
 
 | Failure | First owner | Required response |
