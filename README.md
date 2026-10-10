@@ -5887,7 +5887,7 @@ Dedup is skipped for:
 - Any request with a `Cookie` or `Authorization` header (personalized responses must not be shared)
 - POST, PUT, PATCH, DELETE (mutations are excluded from dedup so each call reaches the handler)
 - Responses with a `Set-Cookie` header (personalized)
-- Response bodies larger than 512 KB, decided before the body is held: a declared length past the cap streams at once, an undeclared body streams once it passes the cap
+- Response bodies larger than 512 KB, decided before the body is held: a declared length past the cap streams at once, an undeclared body streams once it passes the cap. Both shared and direct responses encode string chunks as UTF-8 and preserve the exact bytes of ArrayBuffers and views; unsupported chunks cancel the source and fail the response. String bytes count toward the cap and qualify for the same compression as byte chunks.
 
 For anonymous GET/HEAD requests that pass every skip condition above, in-flight
 deduplication is enabled without an option; the map holds at most 500 keys. There

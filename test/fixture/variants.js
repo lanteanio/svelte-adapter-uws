@@ -42,6 +42,11 @@ export const FIXTURE_VARIANTS = {
 		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
 	},
 
+	ssrbody: {
+		out: 'build-ssr-body',
+		handler: null,
+		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
+	},
 	canonicalhost: {
 		out: 'build-canonical-host',
 		handler: null,

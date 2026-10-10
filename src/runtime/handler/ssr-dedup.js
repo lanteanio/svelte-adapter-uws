@@ -1,3 +1,5 @@
+import { responseChunkBytes } from './response-body.js';
+
 /**
  * Whether an SSR response may be buffered whole for cross-waiter dedup.
  *
@@ -13,7 +15,7 @@
  * content-type is the only reliable signal, and `writeResponse` already
  * chunk-streams the excluded case without buffering it.
  *
- * Kept in its own dependency-free module so it is unit-testable without pulling
+ * Kept separate so it is unit-testable without pulling
  * in the build-time runtime init chain that `ssr.js` depends on.
  *
  * @param {Response} response
@@ -53,7 +55,7 @@ export function declaresBodyPastCap(response, cap) {
  * chunks and then continues from the reader, so the leader streams the body
  * it decided not to share without re-rendering or losing a byte.
  *
- * @param {ReadableStream<Uint8Array>} body
+ * @param {ReadableStream<unknown>} body
  * @param {number} cap
  * @returns {Promise<{ complete: true, bytes: Uint8Array } | { complete: false, stream: ReadableStream<Uint8Array> }>}
  */
@@ -62,18 +64,25 @@ export async function readBodyUpTo(body, cap) {
 	/** @type {Uint8Array[]} */
 	const chunks = [];
 	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) {
-			reader.releaseLock();
-			const bytes = new Uint8Array(total);
-			let offset = 0;
-			for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-			return { complete: true, bytes };
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) {
+				reader.releaseLock();
+				const bytes = new Uint8Array(total);
+				let offset = 0;
+				for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+				return { complete: true, bytes };
+			}
+			const bytes = responseChunkBytes(value);
+			chunks.push(bytes);
+			total += bytes.byteLength;
+			if (total > cap) break;
 		}
-		chunks.push(value);
-		total += value.byteLength;
-		if (total > cap) break;
+	} catch (error) {
+		reader.cancel(error).catch(() => {});
+		reader.releaseLock();
+		throw error;
 	}
 	// Past the cap: replay what is held, then continue from the source. The
 	// held chunks are released as they are replayed, so the prefix is not
@@ -88,12 +97,21 @@ export async function readBodyUpTo(body, cap) {
 				controller.enqueue(chunk);
 				return;
 			}
-			const { done, value } = await reader.read();
-			if (done) controller.close();
-			else controller.enqueue(value);
+			try {
+				const { done, value } = await reader.read();
+				if (done) { reader.releaseLock(); controller.close(); }
+				else controller.enqueue(responseChunkBytes(value));
+			} catch (error) {
+				reader.cancel(error).catch(() => {});
+				reader.releaseLock();
+				throw error;
+			}
 		},
 		cancel(reason) {
-			return reader.cancel(reason);
+			chunks.length = 0;
+			const cancelled = reader.cancel(reason);
+			reader.releaseLock();
+			return cancelled;
 		}
 	});
 	return { complete: false, stream };

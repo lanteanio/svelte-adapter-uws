@@ -2,6 +2,7 @@
 /* global WS_OPTIONS */
 /* global ENV_PREFIX */
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
+import { responseChunkBytes } from './response-body.js';
 import { negotiateEncoding } from '../utils/content-coding.js';
 import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
@@ -586,11 +587,12 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 			return;
 		}
 
+		const firstBytes = responseChunkBytes(first.value);
 		const second = await reader.read();
 		if (second.done || state.aborted) {
 			// Single-chunk response (common for SSR) - one cork, one syscall
 			if (!state.aborted) {
-				let body = first.value;
+				let body = firstBytes;
 				let encoding = '';
 				if (acceptEncoding && body.byteLength >= COMPRESS_MIN_SIZE &&
 					!response.headers.has('content-encoding')) {
@@ -631,12 +633,13 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 		// also captures the drain signal from res.write() without tripping the
 		// uWS "writes must be made from within a corked callback" warning.
 		if (state.aborted) return;
+		const secondBytes = responseChunkBytes(second.value);
 		streaming = true;
 		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
-			res.write(first.value);
-			res.write(second.value);
+			res.write(firstBytes);
+			res.write(secondBytes);
 		});
 
 		for (;;) {
@@ -644,7 +647,7 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 			if (done) { streamDone = true; break; }
 			if (state.aborted) break;
 
-			const result = writeChunkWithBackpressure(res, value);
+			const result = writeChunkWithBackpressure(res, responseChunkBytes(value));
 			if (result !== true) {
 				const drained = await result;
 				if (!drained) break;
@@ -669,5 +672,6 @@ async function writeResponse(res, response, state, acceptEncoding, headOnly = fa
 			}
 		}
 		reader.cancel().catch(() => {});
+		reader.releaseLock();
 	}
 }

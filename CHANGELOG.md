@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
+  - **Affects:** Endpoints that return custom ReadableStream response bodies.
+  - **Action:** None for valid string or binary chunks.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Added: opt-in canonical site hosts.** `CANONICAL_HOST_ALIASES` redirects explicitly listed aliases to `ORIGIN` before cached assets, prerendered pages and SSR requests, so a www alias can no longer bypass an application hook's canonical-host policy while configured liveness and readiness probes remain reachable.
   - **Affects:** Deployments serving the same site through multiple hostnames.
   - **Action:** Set `ORIGIN` and a comma-separated `CANONICAL_HOST_ALIASES` list when canonical redirects are desired.
@@ -673,6 +680,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery markers clear stale topic offsets without losing their sequence-space identity. Both truncation forms and denials retain the epoch, relay gaps keep the old generation for a safe mismatch, and rehydrate records its announced generation.
 
 - Replay stores report a standalone truncation marker while their request is outstanding, once per replay, including when the end marker repeats the signal. Request IDs still isolate concurrent replay responses.
+
+- SSR response streams preserve string, ArrayBuffer and offset-view bytes on both shared and direct requests. Strings count toward the dedup cap and qualify for normal compression; invalid chunks cancel their source and fail instead of returning corrupt or empty bodies.
 
 - Static filename regression coverage now exercises browser-encoded spaces, hyphens and parentheses over real GET and HEAD requests, including traversal and double-decoding controls.
 
