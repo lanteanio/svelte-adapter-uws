@@ -90,7 +90,7 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	/** Remote sample gap treated as a discontinuity and snapped (default 500). */
 	snapGapMs?: number;
 	/**
-	 * How a remote entity's teleports are told apart from its travel. This is
+	 * How remote and local authoritative teleports are told apart from travel. This is
 	 * the case `snapGapMs` cannot see: a server-side placement (`world.set`, a
 	 * warp, a respawn) is delivered on the ordinary tick, so its two samples sit
 	 * one interval apart like any other pair and a gap threshold never fires.
@@ -106,6 +106,12 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	 *     speed - and the same test stops a teleport's implied velocity from
 	 *     being dead-reckoned onward, and stops a resync ease from smearing a
 	 *     placement that happened while the frames were away.
+	 *     Local corrections use the same eight-times-speed bound over the
+	 *     correction's smoothTimeMs, measured against the peak of the last 32
+	 *     tick-like command intervals. Before two such intervals, only an
+	 *     explicit numeric ceiling applies. Full sync/reset clears that history.
+	 *     A detected local placement clears both correction and motion sweep;
+	 *     unacknowledged commands remain replayed on the authoritative state.
 	 *   - A positive number adds an absolute ceiling in world units per second
 	 *     on top, for a topic that knows its own scale. Set it above anything
 	 *     the simulation can legitimately produce (top speed with headroom): a

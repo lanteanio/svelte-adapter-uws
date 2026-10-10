@@ -94,25 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
-- **Fixed: deferred responses send their first bytes promptly.** Streamed SvelteKit pages, endpoints and SSE deliver their ready prefix while later body work is pending, and socket disconnects cancel the active response producer even after receiving a complete POST request body.
-  - **Affects:** Applications returning streamed or deferred response bodies.
-  - **Action:** No configuration change is needed.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
-  - **Affects:** Endpoints that return custom ReadableStream response bodies.
-  - **Action:** None for valid string or binary chunks.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
-  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
-  - **Action:** No application change is required.
-  - **Requires:** No new dependency.
-  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+- **Fixed: local smooth respawns snap to authority.** Ordinary-cadence corrections that imply movement far beyond recent commanded speed now snap the local sprite to its reconciled state, clearing the old render sweep while preserving unacknowledged input replay, with ordinary corrections still easing and the existing speed-snap setting controlling both local and remote placement handling.
+  - **Affects:** Applications using smooth local prediction for teleports, respawns or server placements.
+  - **Action:** Keep the automatic default, supply a known movement ceiling, or use zero to disable speed checks.
+  - **Requires:** No new dependency or wire change.
+  - **Compatibility:** Automatic local detection needs two tick-like command intervals; an explicit numeric ceiling also works before that baseline exists.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: client disconnects are reported before the closing handshake completes.** Browser offline events, suspend detection and silent-server closes now emit `disconnected` immediately; `send()` returns whether it handed a frame to the current open socket, allowing callers to react without waiting for a missing response.
@@ -120,20 +106,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** Optionally use the boolean return to handle a disconnected send immediately.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Existing callers can ignore the return value; serialization and transport exceptions still propagate, and `true` confirms local admission only.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
-  - **Affects:** Applications using the Vite WebSocket plugin, including `server.https`.
-  - **Action:** None.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: Vite authentication hooks can answer before reading a request body.** Like production, dev runs `authenticate` immediately with a bounded request stream, so an ignored chunked body or an unfinished permitted Content-Length no longer delays or replaces the hook's answer, while hooks that consume the stream retain production's body limit and rejection behavior.
-  - **Affects:** Vite applications whose `authenticate` hook does not consume every request body.
-  - **Action:** Read `event.request` when authentication depends on the body.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Declared lengths over 64 KiB still receive 413 before the hook; a hook read past that cap still rejects and receives 413.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: the client auth preflight sends the origin guard's accepted header value.** `connect({ auth: true })` previously sent a header value that the server's origin guard did not recognize; it now sends `x-requested-with: XMLHttpRequest`, allowing authentication to proceed on that header alone when a browser or embedded client sends neither `Origin` nor `Sec-Fetch-Site`.
@@ -169,6 +141,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** Rebuild the application.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Raw names remain available; a real name wins over a generated alias, and normalization to plain ASCII adds no alias.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: deferred responses send their first bytes promptly.** Streamed SvelteKit pages, endpoints and SSE deliver their ready prefix while later body work is pending, and socket disconnects cancel the active response producer even after receiving a complete POST request body.
+  - **Affects:** Applications returning streamed or deferred response bodies.
+  - **Action:** No configuration change is needed.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: streamed response chunks keep their exact bytes.** Anonymous shared responses now handle UTF-8 strings, ArrayBuffers and offset views like direct responses, avoiding zero-filled or truncated content; strings count toward the sharing limit and use the same compression rules as equivalent bytes, while invalid chunks cancel their producer and fail the response.
+  - **Affects:** Endpoints that return custom ReadableStream response bodies.
+  - **Action:** None for valid string or binary chunks.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
+  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
+  - **Action:** No application change is required.
+  - **Requires:** No new dependency.
+  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
+  - **Affects:** Applications using the Vite WebSocket plugin, including `server.https`.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid upgrades retain their existing origin, authentication and handshake checks.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: Vite authentication hooks can answer before reading a request body.** Like production, dev runs `authenticate` immediately with a bounded request stream, so an ignored chunked body or an unfinished permitted Content-Length no longer delays or replaces the hook's answer, while hooks that consume the stream retain production's body limit and rejection behavior.
+  - **Affects:** Vite applications whose `authenticate` hook does not consume every request body.
+  - **Action:** Read `event.request` when authentication depends on the body.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Declared lengths over 64 KiB still receive 413 before the hook; a hook read past that cap still rejects and receives 413.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: send and publish documentation distinguishes local status from delivery.** The send reference reversed the numeric success and backpressure results, while the publish reference called local fan-out delivery, so the corrected descriptions now explain the existing values and their limits without changing any runtime return.
@@ -738,6 +745,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Request body cancellation stops both preallocated and streaming native upload callbacks before they copy or enqueue later chunks. Payload-limit errors use a private identity brand so hostile application rejection objects cannot throw during auth or SSR failure classification.
 
 - Static `If-None-Match` uses weak comparison against the selected representation, so its quoted tag revalidates with or without `W/`, including lists. `If-Match` retains exact issued-tag matching across codings; real GET and HEAD regressions cover the independent policies and precedence.
+
+- Local smooth reconciliation applies the existing speed-snap policy to authoritative placements. A detected jump clears correction and tick-sweep offsets while retaining the unacknowledged replay tail; full sync resets the recent command-speed baseline.
 
 - Global client stores and binary ingress handles follow an explicitly reopened connection, preserving accumulated helpers across logout/login. Store access and plugin construction after permanent close stay offline until connect() is called.
 

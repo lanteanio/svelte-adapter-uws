@@ -117,6 +117,7 @@ beforeEach(async () => {
 		/* no singleton yet */
 	}
 	MockWebSocket._last = null;
+	clientModule.connect({ url: 'ws://localhost:5173/ws' });
 	await flush(2);
 });
 
@@ -375,6 +376,8 @@ describe('suspend-survived light resume', () => {
 				visHandlers = visHandlers.filter((h) => h !== fn);
 			}
 		});
+		clientModule.connect().close();
+		clientModule.connect({ url: 'ws://localhost:5173/ws' });
 	});
 	afterEach(() => {
 		if (realDoc === undefined) delete globalThis.document;

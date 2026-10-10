@@ -4870,7 +4870,7 @@ channel.command({ dx: 4, dy: 0 }); // applied locally this frame, reconciled on 
 
 **Mechanics:** On every acknowledgement, the client rebases on the server state and replays its unacknowledged command tail. The simulation adopts corrections immediately; rendering hides small corrections and eases larger ones over `smoothTimeMs`.
 
-**Limits:** A correction received more than `snapGapMs` after the previous acknowledgement snaps instead of easing. If acknowledgements exceed the prediction-window bounds, prediction stops, renders the last authoritative state, and recovers through a full-state sync.
+**Limits:** A correction received more than `snapGapMs` after the previous acknowledgement snaps instead of easing. The shared `snapSpeedPerSec` policy also snaps ordinary-cadence local placements: automatic detection compares correction speed over `smoothTimeMs` with eight times the peak of the last 32 tick-like command intervals; before two measured intervals exist, only an explicit numeric ceiling applies. Full sync/reset clears this history, and `0` disables speed checks. Snapping clears old render offsets while preserving unacknowledged command replay. If acknowledgements exceed the prediction-window bounds, prediction stops, renders the last authoritative state, and recovers through a full-state sync.
 
 **Required action:** Guard one-shot side effects in `apply` with `ctx.firstTime`, and draw randomness from `ctx.rng`. Use `ctx.key` to attribute authoritative effects to the entity whose command is being applied.
 
