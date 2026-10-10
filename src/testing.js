@@ -1,4 +1,5 @@
 import { isSet, isUint8Array, isNativeError } from 'node:util/types';
+import { completeSerializedEnvelope, envelopeData } from './runtime/utils/epoch.js';
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders, framingRefusal, isFramingHeader } from './runtime/utils/request-headers.js';
@@ -116,8 +117,12 @@ export {
  * @returns {string}
  */
 function envelope(topic, event, data, seq) {
-	const prefix = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":';
-	return completeEnvelope(prefix, data, seq);
+	return completeSerializedEnvelope(envelopeBody(topic, event, data), seq);
+}
+
+/** @param {string} topic @param {string} event @param {unknown} data */
+function envelopeBody(topic, event, data) {
+	return '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + envelopeData(data);
 }
 
 /** Default shutdown budget in seconds, the same value the server entry defaults to. */
@@ -1189,8 +1194,9 @@ export async function createTestServer(options = {}) {
 				if (!admittedByBatch(options) &&
 					!egressAccountT.admit(topic, egressTenant, 1, recipients)) return false;
 			}
+			const body = envelopeBody(topic, event, data);
 			const seq = stampSeq(options, topicSeqs, topic, seqBoundT);
-			const msg = envelope(topic, event, data, seq);
+			const msg = completeSerializedEnvelope(body, seq);
 			chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(msg, recipients));
 			// Relay the already-built envelope to other workers (sim), mirroring
 			// handler.js's `relayed = parentPort && options.relay !== false` gate.
@@ -2252,16 +2258,21 @@ export async function createTestServer(options = {}) {
 			const events = new Array(messages.length);
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				const seq = stampSeq(m.options, topicSeqs, m.topic);
-				const env = envelope(m.topic, m.event, m.data, seq);
-				events[i] = { topic: m.topic, env };
+				const topic = m.topic;
+				events[i] = { topic, env: envelopeBody(topic, m.event, m.data) };
+			}
+			for (let i = 0; i < events.length; i++) {
+				const entry = events[i];
+				const seq = stampSeq(messages[i].options, topicSeqs, entry.topic);
+				const env = completeSerializedEnvelope(entry.env, seq);
+				entry.env = env;
 				// One charge per logical publish, envelope-priced with the batch
 				// wrapper uncharged - as production.
-				chargeEgressT(m.topic,
-					gateArmed ? (allSameTopic ? egressTenant : egressTenantForT(m.topic)) : null,
+				chargeEgressT(entry.topic,
+					gateArmed ? (allSameTopic ? egressTenant : egressTenantForT(entry.topic)) : null,
 					1, recipients, chargeableBytes(env, recipients));
 				// A caps-less resuming connection receives these as per-event JSON.
-				if (resumeBuffersT.size > 0) captureResumeFrameT(m.topic, seq, env);
+				if (resumeBuffersT.size > 0) captureResumeFrameT(entry.topic, seq, env);
 			}
 			// Fast-path batch relay (sim): forward the stamped events as one IPC frame,
 			// mirroring handler.js's `publish-batched`. Per-message `relay: false` is

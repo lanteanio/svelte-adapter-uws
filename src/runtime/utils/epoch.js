@@ -529,7 +529,19 @@ export function createHlc() {
  * @returns {string}
  */
 export function completeEnvelope(prefix, data, seq, jitterMs) {
-	const body = prefix + envelopeData(data);
+	return completeSerializedEnvelope(prefix + envelopeData(data), seq, jitterMs);
+}
+
+/**
+ * Finish an envelope whose prefix and data have already been serialized.
+ * Publishers prepare the body before advancing any sequence bookkeeping.
+ *
+ * @param {string} body JSON envelope through the data value, without the closing brace
+ * @param {number | null | undefined} seq
+ * @param {number | null | undefined} [jitterMs]
+ * @returns {string}
+ */
+export function completeSerializedEnvelope(body, seq, jitterMs) {
 	const tail = jitterMs == null ? '}' : ',"j":' + jitterMs + '}';
 	return seq == null ? body + tail : body + ',"seq":' + seq + tail;
 }

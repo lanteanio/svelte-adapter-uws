@@ -13,6 +13,7 @@ import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress,
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, recordStampedSeen, resumeBuffers, sharedTopics, subscribeAuth, topicSeqs, topicSubscriberCounts, wsConnections } from './state.js';
+import { completeSerializedEnvelope } from '../utils/epoch.js';
 import { app, wsDebug, WS_COMPRESSION_ON, ALLOW_NON_ASCII_TOPICS } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
@@ -182,6 +183,9 @@ export const platform = {
 			if (!admittedByBatch(options) &&
 				!admitPublishEgress(topic, egressTenant, 1, recipients)) return false;
 		}
+		// Serialize before stamping: a refused value must not consume a sequence
+		// number or raise the recovery watermark for a frame that never existed.
+		const body = envelopePrefix(topic, event) + envelopeData(data);
 		counters.publishCountWindow++;
 		const seq = stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Record the highest seq this worker has observed for the topic. An
@@ -202,7 +206,7 @@ export const platform = {
 		// the window). The window is carried verbatim - NOT a server-rolled offset,
 		// which would defer every subscriber of this one frame identically.
 		const jitterMs = (typeof jitterOption === 'number' && jitterOption > 0) ? jitterOption : null;
-		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq, jitterMs);
+		const envelope = completeSerializedEnvelope(body, seq, jitterMs);
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
@@ -2458,26 +2462,34 @@ export const platform = {
 		// topic, so dispatching on any one of them reaches them all.
 		/** @type {Array<{ topic: string, env: string, seq: number | null }>} */
 		const events = new Array(messages.length);
+		// A later serialization failure refuses the whole shared frame. Prepare
+		// every body before any entry advances its topic's sequence or seen mark.
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
+			const topic = m.topic;
+			events[i] = { topic, env: envelopePrefix(topic, m.event) + envelopeData(m.data), seq: null };
+		}
+		for (let i = 0; i < events.length; i++) {
+			const entry = events[i];
 			counters.publishCountWindow++;
-			const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic, seqBound);
+			const seq = stampSeqValue(msgSeqs[i], topicSeqs, entry.topic, seqBound);
 			// Track the highest observed seq per topic (see platform.publish): the
 			// compare-free record for the monotonic in-memory counter, the
 			// monotone-max guard for an explicit numeric seq.
 			if (seq !== null) {
-				if (typeof msgSeqs[i] === 'number' || typeof msgSeqs[i] === 'bigint') recordSeen(maxSeenSeq, m.topic, seq, seqBound);
-				else recordStampedSeen(maxSeenSeq, m.topic, seq, seqBound);
+				if (typeof msgSeqs[i] === 'number' || typeof msgSeqs[i] === 'bigint') recordSeen(maxSeenSeq, entry.topic, seq, seqBound);
+				else recordStampedSeen(maxSeenSeq, entry.topic, seq, seqBound);
 			}
-			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
-			events[i] = { topic: m.topic, env, seq };
+			const env = completeSerializedEnvelope(entry.env, seq);
+			entry.env = env;
+			entry.seq = seq;
 			// One egress charge per logical publish: each batched event is one,
 			// priced at its own envelope's UTF-8 bytes times the shared
 			// recipient set. The batch frame's wrapper bytes are uncharged
 			// overhead, so a tenant pays the same for N events whether the
 			// runtime batches them or not.
-			chargePublishEgress(m.topic,
-				gateArmed ? (allSameTopic ? egressTenant : resolvePublishTenant(m.topic)) : null,
+			chargePublishEgress(entry.topic,
+				gateArmed ? (allSameTopic ? egressTenant : resolvePublishTenant(entry.topic)) : null,
 				1, recipients, env.length, chargeableBytes(env, recipients));
 		}
 
