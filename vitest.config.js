@@ -45,6 +45,8 @@ export default defineConfig({
 		// before the file it serves, so it snapshots pristine values; without it a
 		// client suite's mock leaks into every later file in serial mode, where one
 		// context is shared. See the helper for the failure this closes.
-		setupFiles: ['./test/helpers/restore-globals.js', './test/helpers/stop-leaked-runtimes.js']
+		// Reset application modules before helpers capture their per-file state.
+		sequence: { setupFiles: 'list' },
+		setupFiles: ['./test/helpers/reset-modules.js', './test/helpers/restore-globals.js', './test/helpers/stop-leaked-runtimes.js']
 	}
 });
