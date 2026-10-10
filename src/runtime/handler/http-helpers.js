@@ -1,7 +1,18 @@
 import { WEBSOCKET_VERSION } from '../utils/ws-handshake.js';
 
+const payloadTooLargeErrors = new WeakSet();
+
 export class PayloadTooLargeError extends Error {
-	constructor() { super('Payload too large'); }
+	constructor() {
+		super('Payload too large');
+		payloadTooLargeErrors.add(this);
+	}
+}
+
+/** @param {unknown} error */
+export function isPayloadTooLargeError(error) {
+	// Application throws may be revoked proxies or have hostile prototypes.
+	return typeof error === 'object' && error !== null && payloadTooLargeErrors.has(error);
 }
 
 // Uppercase method lookup - avoids a string allocation from toUpperCase() per SSR request.

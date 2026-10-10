@@ -8,7 +8,7 @@ import { server } from '../_init.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
-import { PayloadTooLargeError, send400, send413, send500, endText, endBodyless, assertResponseStatus } from './http-helpers.js';
+import { PayloadTooLargeError, isPayloadTooLargeError, send400, send413, send500, endText, endBodyless, assertResponseStatus } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { declaresBodyPastCap, isDedupBufferable, readBodyUpTo } from './ssr-dedup.js';
@@ -72,9 +72,11 @@ export function readBody(res, limit, state, contentLength) {
 		(limit === Infinity || contentLength <= limit);
 
 	let initialized = false;
+	let done = false;
 	return new ReadableStream({
 		start(controller) {
 			if (state.aborted) {
+				done = true;
 				controller.error(new Error('Request aborted'));
 				return;
 			}
@@ -82,10 +84,12 @@ export function readBody(res, limit, state, contentLength) {
 			// progress would wait forever - and the request with it. The abort
 			// ends the read instead.
 			state.failBody = () => {
+				done = true;
 				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
 			};
 		},
 		pull(controller) {
+			if (done) return;
 			if (state.aborted) {
 				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
 				return;
@@ -104,7 +108,6 @@ export function readBody(res, limit, state, contentLength) {
 				// leaking via the trailing bytes when offset < contentLength.
 				const buf = Buffer.alloc(contentLength);
 				let offset = 0;
-				let done = false;
 				res.onData((chunk, isLast) => {
 					if (done || state.aborted) return;
 					const view = new Uint8Array(chunk);
@@ -128,7 +131,6 @@ export function readBody(res, limit, state, contentLength) {
 			}
 
 			let size = 0;
-			let done = false;
 			res.onData((chunk, isLast) => {
 				if (done || state.aborted) return;
 				// MUST copy - uWS reuses the ArrayBuffer after callback returns
@@ -146,6 +148,11 @@ export function readBody(res, limit, state, contentLength) {
 					controller.close();
 				}
 			});
+		},
+		cancel() {
+			// Native chunks can arrive after the consumer closes its stream.
+			// Drain them without copying or touching its closed controller.
+			done = true;
 		}
 	});
 }
@@ -447,7 +454,7 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
 		if (state.aborted && !state.closedByServer) return;
-		if (err instanceof PayloadTooLargeError) {
+		if (isPayloadTooLargeError(err)) {
 			// The limit can also trip mid-stream, through a route that pipes the
 			// request body into its response: the reader rejection aborts the
 			// exchange in the stream teardown, and a 413 written there would be

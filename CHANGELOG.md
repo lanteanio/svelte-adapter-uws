@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Unsupported chunk values now fail; credentialed compression protection remains enabled by default.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: cancelling request bodies no longer terminates the server.** Native upload callbacks stop touching a cancelled stream, while auth hooks that throw uninspectable objects receive an ordinary 500 response, keeping the server available for later requests and preserving normal body size limits across known-length and chunked uploads.
+  - **Affects:** Applications that cancel SSR or authentication request bodies, or throw arbitrary values from authentication hooks.
+  - **Action:** No application change is required.
+  - **Requires:** No new dependency.
+  - **Compatibility:** Body limits still return 413 and normal body reads retain their existing buffering behavior.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Added: opt-in canonical site hosts.** `CANONICAL_HOST_ALIASES` redirects explicitly listed aliases to `ORIGIN` before cached assets, prerendered pages and SSR requests, so a www alias can no longer bypass an application hook's canonical-host policy while configured liveness and readiness probes remain reachable.
   - **Affects:** Deployments serving the same site through multiple hostnames.
   - **Action:** Set `ORIGIN` and a comma-separated `CANONICAL_HOST_ALIASES` list when canonical redirects are desired.
@@ -679,6 +686,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/architecture-docs.test.js`.
 
 ### Fixed
+
+- Request body cancellation stops both preallocated and streaming native upload callbacks before they copy or enqueue later chunks. Payload-limit errors use a private identity brand so hostile application rejection objects cannot throw during auth or SSR failure classification.
 
 - Static `If-None-Match` uses weak comparison against the selected representation, so its quoted tag revalidates with or without `W/`, including lists. `If-Match` retains exact issued-tag matching across codings; real GET and HEAD regressions cover the independent policies and precedence.
 

@@ -36,6 +36,11 @@ export const FIXTURE_VARIANTS = {
 		handler: './src/hooks.ws.close-subscriptions.js',
 		websocket: { allowedOrigins: '*', upgradeRateLimit: 100 }
 	},
+	bodysafety: {
+		out: 'build-body-safety',
+		handler: './src/hooks.ws.body-safety.js',
+		websocket: { allowedOrigins: '*', authPathRateLimit: 0, upgradeRateLimit: 100 }
+	},
 	subscriptionrelease: {
 		out: 'build-subscription-release',
 		handler: './src/hooks.ws.subscription-release.js',
