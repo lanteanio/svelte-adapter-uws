@@ -48,6 +48,7 @@ export const UPGRADE_HEADER_VALUE_RE = /[^\t\x20-\x7e\x80-\xff]/;
  * conforming client refuses, so the app has broken its own connection with
  * no line in any log saying why. The byte checks above say which characters
  * a header may carry; this says which names are not the app's to write.
+ * Date is reserved too: uWS appends its native Date after custom headers.
  * Compared case-insensitively, since header names are.
  */
 export const HANDSHAKE_OWNED_HEADER_NAMES = Object.freeze([
@@ -55,7 +56,8 @@ export const HANDSHAKE_OWNED_HEADER_NAMES = Object.freeze([
 	'upgrade',
 	'sec-websocket-accept',
 	'sec-websocket-extensions',
-	'sec-websocket-protocol'
+	'sec-websocket-protocol',
+	'date'
 ]);
 const HANDSHAKE_OWNED = new Set(HANDSHAKE_OWNED_HEADER_NAMES);
 

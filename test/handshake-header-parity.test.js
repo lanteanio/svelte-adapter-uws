@@ -232,6 +232,7 @@ describeUWS('in-process test server matches production on every handshake header
 			const s = await boot();
 			const { status, raw } = await rawUpgrade(portOf(s), { 'x-fixture-vector': name });
 			expect(status).toBe('101');
+			expect(raw.match(/^date:/gim)).toHaveLength(1);
 			expect(raw.toLowerCase()).toContain('set-cookie:');
 			// rawUpgrade decodes bytes as Latin-1; uWS encodes JS strings as UTF-8.
 			const wireValue = Buffer.from(value, 'utf8').toString('latin1');
@@ -303,6 +304,10 @@ describeUWS('in-process test server matches production on every handshake header
 		it(`refuses the handshake-owned ${name} name before writing a 101`, async () => {
 			const s = await boot();
 			const { status, raw } = await rawUpgrade(portOf(s), { 'x-fixture-vector': name });
+			if (name === SHAPE_VECTORS.ownedDate || name === SHAPE_VECTORS.ownedDateUppercase) {
+				expect(raw.match(/^date:/gim)).toHaveLength(1);
+				expect(raw).not.toContain('Mon, 01 Jan 2001 00:00:00 GMT');
+			}
 			expect(status, 'a handshake-owned header name must not yield a 101').not.toBe('101');
 			expect(raw.toLowerCase()).not.toContain('switching protocols');
 			expect(raw, 'the application value must not go out beside the handshake\'s own line').not.toContain(OWNED_NAME_MARKER);

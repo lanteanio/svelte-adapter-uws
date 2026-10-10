@@ -123,7 +123,7 @@ describe('upgradeResponse header validation', () => {
 		const { upgradeResponse } = await import('../src/upgrade-response.js');
 		const { HANDSHAKE_OWNED_HEADER_NAMES } = await import('../src/runtime/utils/upgrade-headers.js');
 		expect(HANDSHAKE_OWNED_HEADER_NAMES).toEqual([
-			'connection', 'upgrade', 'sec-websocket-accept', 'sec-websocket-extensions', 'sec-websocket-protocol'
+			'connection', 'upgrade', 'sec-websocket-accept', 'sec-websocket-extensions', 'sec-websocket-protocol', 'date'
 		]);
 		for (const owned of HANDSHAKE_OWNED_HEADER_NAMES) {
 			expect(() => upgradeResponse({}, { [owned]: 'clean' })).toThrow(/belongs to the WebSocket handshake/);

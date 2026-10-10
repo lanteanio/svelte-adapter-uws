@@ -2096,7 +2096,7 @@ export async function upgrade({ cookies }) {
   // return upgradeResponse({ userId: user.id }, { 'x-session-version': '2' });
   // It throws a TypeError for a header that cannot be written safely - a name
   // outside the RFC 7230 token set or one the handshake writes itself
-  // (Connection, Upgrade, Sec-WebSocket-*), a non-string value, or a string
+  // (Connection, Upgrade, Sec-WebSocket-*, Date), a non-string value, or a string
   // outside Node's accepted header class (TAB, printable ASCII, 0x80-0xFF).
   // CR, LF and NUL split or truncate the 101; the other refused controls fail
   // at strict Node-based proxies. The throw takes the hook-error path: 500, no
@@ -2178,6 +2178,8 @@ Use this server-only helper when the WebSocket handshake needs a safe custom
 header. Return the wrapper from `upgrade`; malformed header names or values
 throw before uWS starts the 101 response. Prefer the normal `authenticate` HTTP
 response for `Set-Cookie` behind strict proxies such as Cloudflare.
+`Date` is reserved for the server and is rejected case-insensitively in custom
+handshake headers.
 
 ```js
 import { upgradeResponse } from "svelte-adapter-uws/upgrade-response";

@@ -91,7 +91,10 @@ export const SHAPE_VECTORS = {
 	/** `Sec-WebSocket-Extensions`, which the server negotiates from the offer. */
 	ownedExtensions: 'owned-extensions',
 	/** `Sec-WebSocket-Protocol`, which the server negotiates from the offer. */
-	ownedProtocol: 'owned-protocol'
+	ownedProtocol: 'owned-protocol',
+	/** Native HTTP Date is reserved across upgrade surfaces. */
+	ownedDate: 'owned-date',
+	ownedDateUppercase: 'owned-date-uppercase'
 };
 
 /**
@@ -105,7 +108,9 @@ export const OWNED_NAME_VECTORS = [
 	SHAPE_VECTORS.ownedAccept,
 	SHAPE_VECTORS.ownedAcceptLowercase,
 	SHAPE_VECTORS.ownedExtensions,
-	SHAPE_VECTORS.ownedProtocol
+	SHAPE_VECTORS.ownedProtocol,
+	SHAPE_VECTORS.ownedDate,
+	SHAPE_VECTORS.ownedDateUppercase
 ];
 
 /** The value every owned-name vector carries, so a raw response can be searched for it. */
@@ -212,6 +217,8 @@ export function buildShapeHeaders(name) {
 	if (name === SHAPE_VECTORS.ownedAcceptLowercase) return { 'sec-websocket-accept': OWNED_NAME_MARKER };
 	if (name === SHAPE_VECTORS.ownedExtensions) return { 'Sec-WebSocket-Extensions': OWNED_NAME_MARKER };
 	if (name === SHAPE_VECTORS.ownedProtocol) return { 'Sec-WebSocket-Protocol': OWNED_NAME_MARKER };
+	if (name === SHAPE_VECTORS.ownedDate) return { date: 'Mon, 01 Jan 2001 00:00:00 GMT' };
+	if (name === SHAPE_VECTORS.ownedDateUppercase) return { DATE: 'Mon, 01 Jan 2001 00:00:00 GMT' };
 	if (name === SHAPE_VECTORS.coercionValue) {
 		return {
 			'set-cookie': {

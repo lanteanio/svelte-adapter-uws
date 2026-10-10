@@ -39,7 +39,8 @@
  * @throws {TypeError} when a header name is not a valid RFC 7230 token, a name
  * is one the handshake itself writes (`Connection`, `Upgrade`,
  * `Sec-WebSocket-Accept`, and the negotiated `Sec-WebSocket-Extensions` and
- * `Sec-WebSocket-Protocol`, compared case-insensitively - an application value
+ * `Sec-WebSocket-Protocol`, or `Date`, compared case-insensitively - an
+ * application value
  * would go out beside the server's own line and a conforming client refuses a
  * doubled handshake header), a value contains a control character (CR, LF and
  * NUL split or truncate the 101 response on the wire; the accepted class is
