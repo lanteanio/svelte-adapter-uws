@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
+import { coalescedBadValue } from './fixture/src/coalesced-probe.js';
 
 let teardown = [];
 
@@ -33,12 +34,12 @@ function probeHandler(seen) {
 				const chunk = new Uint8Array(1024 * 1024);
 				for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
 				platform.sendCoalesced(ws, { key: 'good', topic: 'probe', event: 'coalesced-good', data: { ok: true } });
-				platform.sendCoalesced(ws, { key: 'bad', topic: 'probe', event: 'coalesced-bad', data: { n: 1n } });
+				platform.sendCoalesced(ws, { key: 'bad', topic: 'probe', event: 'coalesced-bad', data: coalescedBadValue(msg.kind) });
 				return;
 			}
 			if (msg.type === 'coalesce-now-probe') {
 				try {
-					platform.sendCoalesced(ws, { key: 'now', topic: 'probe', event: 'coalesced-now', data: { n: 1n } });
+					platform.sendCoalesced(ws, { key: 'now', topic: 'probe', event: 'coalesced-now', data: coalescedBadValue(msg.kind) });
 				} catch (err) {
 					platform.send(ws, 'probe', 'coalesce-threw', { name: err?.name });
 				}
@@ -100,11 +101,25 @@ const SURFACES = [
 ];
 
 describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
-	it('drops a queued value JSON cannot carry, sends the rest, and keeps serving', async () => {
+	it('continues draining when the error reporter throws', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('reporter failed'); });
+		const { url } = await boot();
+		const c = await client(url, { stall: true });
+		c.ws.send(JSON.stringify({ type: 'coalesce-probe', kind: 'string' }));
+		await new Promise((r) => setTimeout(r, 300));
+		c.resume();
+		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesced-good"')))).toBe(true);
+		c.ws.send(JSON.stringify({ type: 'echo', payload: { after: true } }));
+		expect(await until(() => c.state.frames.some((f) => f.includes('"after":true')))).toBe(true);
+		expect(c.state.frames.some((f) => f.includes('"coalesced-bad"'))).toBe(false);
+		expect(c.state.frames.map((f) => JSON.parse(f))).toBeDefined();
+	}, 30000);
+
+	it.each(['bigint', 'string', 'null', 'undefined', 'false', 'number', 'error', 'function', 'symbol', 'revoked', 'prototype'])('drops a queued %s failure, sends the rest, and keeps serving', async (kind) => {
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const { url, seen } = await boot();
 		const c = await client(url, { stall: true });
-		c.ws.send(JSON.stringify({ type: 'coalesce-probe' }));
+		c.ws.send(JSON.stringify({ type: 'coalesce-probe', kind }));
 		await new Promise((r) => setTimeout(r, 300));
 		c.resume();
 
@@ -122,11 +137,11 @@ describeUWS.each(SURFACES)('sendCoalesced on $label', ({ boot }) => {
 		if (seen) expect(seen.drains, 'the app drain hook ran on the test server').toBeGreaterThan(0);
 	}, 30000);
 
-	it('throws to the caller when the value flushes inside the call', async () => {
+	it.each(['bigint', 'string', 'null', 'undefined', 'false', 'number', 'error', 'function', 'symbol', 'revoked', 'prototype'])('throws a %s failure to the caller when the value flushes inside the call', async (kind) => {
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const { url } = await boot();
 		const c = await client(url);
-		c.ws.send(JSON.stringify({ type: 'coalesce-now-probe' }));
+		c.ws.send(JSON.stringify({ type: 'coalesce-now-probe', kind }));
 		expect(await until(() => c.state.frames.some((f) => f.includes('"coalesce-threw"')))).toBe(true);
 		const report = JSON.parse(c.state.frames.find((f) => f.includes('"coalesce-threw"')));
 		expect(report.data.name).toBe('TypeError');

@@ -2026,7 +2026,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned for native codec-result brand guards in sendWire, sendWireBatch,
 	// publishWire and shared wire-fanout helpers. The native import and TypeError
 	// branches add no byte access, payload allocation, or copy primitive.
-	platform: '567011ec0ca8e5258fb8fbdb5e3c7c15787273247580666a3c7b230ea0442c9c',
+	// Coalesced serialization keeps a caught value in a separate local,
+	// classifies errors without traps, and contains reporter failures.
+	// No serialization, payload allocation, or byte-copy boundary changes.
+	platform: '6f68fff4542690a57396abb63d55739bc1590d4e29d66f09486e3534e1c3af2d',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

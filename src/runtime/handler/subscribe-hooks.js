@@ -1,3 +1,4 @@
+import { isNativeError } from 'node:util/types';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, topicEpochValue } from '../utils.js';
 import { counters } from './state.js';
@@ -257,12 +258,13 @@ export function flushCoalescedFor(ws, callerEntry) {
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
 		let body;
+		let failure;
 		try { body = JSON.stringify(msg.data ?? null); }
-		catch (err) { body = err; }
+		catch (err) { failure = err; }
 		if (typeof body !== 'string') {
-			const err = body instanceof Error ? body : new TypeError('sendCoalesced data has no JSON form');
+			const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 			if (msg === callerEntry) callerError = err;
-			else console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err);
+			else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
 			return 1;
 		}
 		const payload = envelopePrefix(msg.topic, msg.event) + body + '}';

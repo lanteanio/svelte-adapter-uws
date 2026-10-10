@@ -1,4 +1,4 @@
-import { isUint8Array } from 'node:util/types';
+import { isUint8Array, isNativeError } from 'node:util/types';
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders, framingRefusal, isFramingHeader } from './runtime/utils/request-headers.js';
@@ -736,12 +736,13 @@ export async function createTestServer(options = {}) {
 		let callerError = null;
 		drainCoalesced(pending, (msg) => {
 			let body;
+			let failure;
 			try { body = JSON.stringify(msg.data ?? null); }
-			catch (err) { body = err; }
+			catch (err) { failure = err; }
 			if (typeof body !== 'string') {
-				const err = body instanceof Error ? body : new TypeError('sendCoalesced data has no JSON form');
+				const err = isNativeError(failure) ? failure : new TypeError('sendCoalesced data has no JSON form');
 				if (msg === callerEntry) callerError = err;
-				else console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err);
+				else { try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.COALESCED_UNSERIALIZABLE), err); } catch { /* reporting must not escape drain */ } }
 				return 1;
 			}
 			return sendOutboundT(ws, '{"topic":' + esc(msg.topic) + ',"event":' + esc(msg.event) + ',"data":' + body + '}');

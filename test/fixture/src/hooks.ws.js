@@ -1,6 +1,7 @@
 import { threadId, workerData as threadWorkerData } from 'node:worker_threads';
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 import { trackedSubscribe, trackedUnsubscribe } from 'svelte-adapter-uws/subscriptions';
+import { coalescedBadValue } from './coalesced-probe.js';
 
 const cursors = createCursor({
 	throttle: 0,
@@ -206,14 +207,14 @@ export function message(ws, ctx) {
 		const chunk = new Uint8Array(1024 * 1024);
 		for (let i = 0; i < 64 && ws.getBufferedAmount() <= 1024 * 1024; i++) ws.send(chunk, true);
 		platform.sendCoalesced(ws, { key: 'good', topic: 'probe', event: 'coalesced-good', data: { ok: true } });
-		platform.sendCoalesced(ws, { key: 'bad', topic: 'probe', event: 'coalesced-bad', data: { n: 1n } });
+		platform.sendCoalesced(ws, { key: 'bad', topic: 'probe', event: 'coalesced-bad', data: coalescedBadValue(msg.kind) });
 		return;
 	}
 	if (msg.type === 'coalesce-now-probe') {
 		// On an idle socket the value flushes inside the call, so the caller
 		// gets the serializer's error.
 		try {
-			platform.sendCoalesced(ws, { key: 'now', topic: 'probe', event: 'coalesced-now', data: { n: 1n } });
+			platform.sendCoalesced(ws, { key: 'now', topic: 'probe', event: 'coalesced-now', data: coalescedBadValue(msg.kind) });
 		} catch (err) {
 			platform.send(ws, 'probe', 'coalesce-threw', { name: err?.name });
 		}

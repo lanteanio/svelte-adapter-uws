@@ -611,6 +611,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Static files with future or pre-1900 modification times omit Last-Modified and use ETags for revalidation, so a skewed build cannot supply an invalid date validator.
 
+- `sendCoalesced` drops and reports every thrown serialization value, including strings and null, instead of embedding thrown strings as malformed JSON. Values flushed immediately still throw to their caller.
+
 - Documentation-map checks analyze self-contained appended HTML fixtures
   without repeating the unchanged README ownership walk. Full-document checks
   retain coverage of parser context while root attributes, executable markup
