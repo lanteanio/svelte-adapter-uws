@@ -51,7 +51,7 @@
 // Usage:
 //   node scripts/leak-lane.js                      all scenarios, default window
 //   node scripts/leak-lane.js --scenario http      one scenario
-//   node scripts/leak-lane.js --minutes 2          shorter window (floor 1)
+//   node scripts/leak-lane.js --minutes 2          shorter window (1 through 60 minutes)
 //   node scripts/leak-lane.js --out <dir>          where the record is written
 
 import { spawn } from 'node:child_process';
@@ -631,7 +631,7 @@ async function runScenario(name, { minutes }) {
 		// WINDOW. Sample every 2s while the same workload continues.
 		/** @type {number[]} */
 		const rss = [];
-		const windowMs = Math.max(1, minutes) * 60000;
+		const windowMs = minutes * 60000;
 		const sliceMs = 2000;
 		let requests = 0;
 		let errors = 0;
@@ -693,12 +693,22 @@ async function runScenario(name, { minutes }) {
 	}
 }
 
+/** Read either --name value or --name=value without silently dropping a value. */
+export function readFlag(argv, name, fallback) {
+	const key = `--${name}`;
+	const at = argv.findIndex((arg) => arg === key || arg.startsWith(key + '='));
+	if (at < 0) return fallback;
+	const inline = argv[at].startsWith(key + '=');
+	const value = inline ? argv[at].slice(key.length + 1) : argv[at + 1];
+	if (value === undefined || value === '' || (!inline && value.startsWith('--'))) {
+		throw new Error(`${key} requires a value`);
+	}
+	return value;
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
-	const flag = (name, fallback) => {
-		const at = argv.indexOf(`--${name}`);
-		return at >= 0 && argv[at + 1] ? argv[at + 1] : fallback;
-	};
+	const flag = (name, fallback) => readFlag(argv, name, fallback);
 	const minutesText = flag('minutes', '3');
 	const minutes = Number(minutesText);
 	// Refused before anything is built: a value that is not a number would run
