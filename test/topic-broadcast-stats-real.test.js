@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
+import { createServer } from 'node:http';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
 import * as handler from './fixture/src/hooks.ws.topic-stats.js';
 
@@ -45,21 +46,34 @@ const scenarios = [
 	['delayed', { scenario: 'slow-drain', delayMs: 60 }],
 	['jittered', { scenario: 'ipc-reorder', maxJitterMs: 30 }]
 ];
-for (const surface of ['built', 'testing']) {
-	(hasUWS ? describe : describe.skip)('ordinary broadcast close counters on ' + surface, () => {
+for (const surface of ['built', 'testing', 'vite']) {
+	(surface === 'vite' || hasUWS ? describe : describe.skip)('ordinary broadcast close counters on ' + surface, () => {
 		let server;
 		let observer;
 		beforeAll(async () => {
 			if (surface === 'built') server = await startRealRuntime({ variant: 'topicstats' });
-			else {
+			else if (surface === 'testing') {
 				const { createTestServer } = await import('../src/testing.js');
 				const test = await createTestServer({ handler });
 				server = { wsUrl: test.wsUrl, stop: () => test.close() };
+			} else {
+				const { default: createPlugin } = await import('../src/vite.js');
+				const httpServer = createServer();
+				await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+				await createPlugin({ allowedOrigins: '*', handler: '/topic-stats' }).configureServer({
+					httpServer, middlewares: { use() {} },
+					config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
+					async ssrLoadModule() { return handler; }
+				});
+				server = {
+					wsUrl: 'ws://127.0.0.1:' + httpServer.address().port + '/ws',
+					stop: () => new Promise((resolve) => httpServer.close(resolve))
+				};
 			}
 			observer = await connect(server.wsUrl);
 		}, 400000);
 		afterAll(async () => { if (observer) await close(observer); await server?.stop(); });
-		for (const [label, chaos] of surface === 'built' ? scenarios.slice(0, 1) : scenarios) {
+		for (const [label, chaos] of surface === 'testing' ? scenarios : scenarios.slice(0, 1)) {
 			it.each(cases)(label + ' %s', async (_name, batch, capable, crossTopic, partial) => {
 				const client = await connect(server.wsUrl);
 				const id = surface + ':' + ++nonce;
@@ -90,7 +104,12 @@ for (const surface of ['built', 'testing']) {
 					await close(client);
 					const directed = client.frames.filter((frame) => !isBroadcast(frame));
 					const counters = { messagesOut: directed.length, bytesOut: directed.reduce((sum, frame) => sum + frame.raw.length, 0) };
-					expect((await command(observer, 'report', 'reported', { id })).parsed.data.stats).toEqual(counters);
+					let stats;
+					const deadline = Date.now() + 3000;
+					do {
+						stats = (await command(observer, 'report', 'reported', { id })).parsed.data.stats;
+					} while (!stats && Date.now() < deadline);
+					expect(stats).toEqual(counters);
 				} finally { await close(client); }
 			});
 		}

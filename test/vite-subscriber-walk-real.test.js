@@ -29,6 +29,9 @@ const handler = {
 				});
 			} catch (cause) { error = String(cause); }
 			platform.send(ws, 'walk', 'walked', { nonce: msg.nonce, members, error });
+		} else if (msg.type === 'request-topic') {
+			const results = await platform.requestTopic(msg.topic, 'probe', { nonce: msg.nonce }, { timeoutMs: 100 });
+			platform.send(ws, 'walk', 'requested', { nonce: msg.nonce, results });
 		} else if (msg.type === 'barrier') platform.send(ws, 'walk', 'barrier', { nonce: msg.nonce });
 	}
 };
@@ -42,6 +45,31 @@ beforeAll(async () => {
 		async ssrLoadModule() { return handler; }
 	});
 	wsUrl = 'ws://127.0.0.1:' + server.address().port + '/ws';
+});
+
+it('requests matching live adapter sockets and collects replies and per-member timeouts', async () => {
+	const a = await connectRealClient(wsUrl);
+	const silent = await connectRealClient(wsUrl);
+	const other = await connectRealClient(wsUrl);
+	clients.push(a, silent, other);
+	for (const [client, name, topic] of [[a, 'answer', 'request:target'], [silent, 'silent', 'request:target'], [other, 'other', 'request:other']]) {
+		expect((await command(client, 'join', 'joined', { name, topic })).denial).toBeNull();
+	}
+	a.ws.on('message', (raw) => {
+		const msg = JSON.parse(raw.toString());
+		if (msg.type === 'request') a.send({ type: 'reply', ref: msg.ref, data: { event: msg.event, ...msg.data } });
+	});
+	const reply = await command(other, 'request-topic', 'requested', { topic: 'request:target' });
+	expect(reply.results).toEqual([
+		{ ok: true, reply: { event: 'probe', nonce: reply.nonce } },
+		{ ok: false, error: expect.stringMatching(/timed out/i) }
+	]);
+	await command(other, 'barrier', 'barrier');
+	expect(other.frames.map(raw => JSON.parse(raw)).filter(frame => frame.type === 'request')).toEqual([]);
+	await command(a, 'leave', 'left', { topic: 'request:target' });
+	await new Promise(resolve => { silent.ws.once('close', resolve); silent.close(); });
+	expect((await command(other, 'request-topic', 'requested', { topic: 'request:target' })).results).toEqual([]);
+	expect((await command(other, 'request-topic', 'requested', { topic: 'request:empty' })).results).toEqual([]);
 });
 afterAll(async () => { for (const client of clients) client.close(); await new Promise((resolve) => server.close(resolve)); });
 
