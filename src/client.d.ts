@@ -366,7 +366,8 @@ export const failure: Readable<Failure | null>;
  *
  * Only one handler may be installed at a time. Calling `onRequest`
  * again replaces the previous handler; the returned function clears
- * the handler if it is still the active one. With no handler
+ * the handler if it is still the active one. The module handler follows an
+ * explicit connect() after close(). With no handler
  * installed, incoming request frames are dropped and the server's
  * awaiting Promise times out.
  *
@@ -500,6 +501,7 @@ export function count(topic: string, initial?: number): Readable<number>;
 
 /**
  * Wait for a specific event on a topic. Resolves once and unsubscribes.
+ * Follows an explicit connect() after close() until resolved or timed out.
  *
  * @param topic - Topic to listen on
  * @param event - Optional event name to filter on

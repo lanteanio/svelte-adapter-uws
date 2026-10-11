@@ -137,6 +137,44 @@ describe('module stores across explicit connection replacement', () => {
 		]));
 		expect(workerMessages.find(message => message.type === 'init')?.url).toBe('ws://127.0.0.1:' + server.address().port);
 	});
+	it('follows module request handlers and pending once listeners across explicit replacement', async () => {
+		const staleHandler = vi.fn();
+		const stopStale = client.onRequest(staleHandler);
+		const handler = vi.fn((event, data) => ({ event, data }));
+		stops.push(client.onRequest(handler));
+		stopStale();
+		const pendingEvent = client.once('room', 'put', { timeout: 2000 });
+		const pendingTopic = client.once('room', { timeout: 2000 });
+		await replace();
+		send({ type: 'request', ref: 12, event: 'query', data: 'value' });
+		send({ topic: 'room', event: 'put', data: 'replacement' });
+		await expect(Promise.all([pendingEvent, pendingTopic])).resolves.toEqual([
+			{ data: 'replacement' }, { topic: 'room', event: 'put', data: 'replacement' }
+		]);
+		await waitFor(() => frames.some(entry => entry.value.type === 'reply' && entry.value.ref === 12));
+		expect(staleHandler).not.toHaveBeenCalled();
+		expect(handler).toHaveBeenCalledExactlyOnceWith('query', 'value');
+		const stopCurrent = stops.pop(); stopCurrent();
+		send({ type: 'request', ref: 13, event: 'ignored', data: null });
+		send({ topic: 'barrier', event: 'arrived', data: true });
+		await client.once('barrier', { timeout: 2000 });
+		expect(handler).toHaveBeenCalledTimes(1);
+	});
+	it('does not reinstall a request handler disposed by an earlier connection follower', async () => {
+		let stopHandler;
+		stops.push(client.status.subscribe(value => {
+			if (value === 'connecting') stopHandler?.();
+		}));
+		const handler = vi.fn();
+		stopHandler = client.onRequest(handler);
+		stops.push(stopHandler);
+		await replace();
+		const barrier = client.once('barrier', { timeout: 2000 });
+		send({ type: 'request', ref: 31, event: 'ignored', data: null });
+		send({ topic: 'barrier', event: 'arrived', data: true });
+		await barrier;
+		expect(handler).not.toHaveBeenCalled();
+	});
 	it('preserves replacement ownership when an old failed subscriber reconnects synchronously', async () => {
 		const old = connection;
 		let armed = false, replacement;
