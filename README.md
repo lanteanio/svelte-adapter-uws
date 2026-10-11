@@ -5740,8 +5740,9 @@ assuming `1024`; container, service-manager, login-shell, and host limits can
 differ. One established WebSocket normally consumes one descriptor, but the
 application needs headroom for every other descriptor it owns.
 
-**Verified:** Run `npm exec vitest -- run test/fd-limit.test.js test/metrics-snapshot.test.js`;
-the first pins the warning's content and its `8192` floor, the second how the
+**Verified:** Run `npm exec vitest -- run test/fd-limit.test.js test/fd-limit-real.test.js test/metrics-snapshot.test.js`;
+the suites pin the warning's content and its `8192` floor, boot the built runtime
+to verify the warning and exported descriptor gauges, and check how the
 `open_fds` and `fd_soft_limit` gauges merge across workers.
 
 The server checks this at boot: when the soft limit is below 8192 it logs a warning with the remediation above, so a low-limit deployment is caught before the first connection storm instead of during it. With the [`metrics`](#backpressure-and-connection-limits) option configured, the `open_fds` and `fd_soft_limit` gauges chart the live headroom.
