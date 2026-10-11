@@ -958,7 +958,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Consumer release guidance now distinguishes accepted directed sends, dropped native frames, and uncounted topic broadcasts, including testing fault injection.
 
-- Clarify that trusted server subscription APIs accept system topics through the app hook without a namespace escape option; client wire subscriptions keep their existing guard.
+- Document and verify that trusted server subscription APIs accept system topics through the app hook; client wire subscriptions keep their existing guard. Real-I/O tests cover allowed and denied subscriptions and authorization-only checks on production and testing servers.
 
 - Close hooks receive an empty subscription Set when a connection's subscription registry is corrupt, preserving safe teardown on production, testing and Vite.
 
