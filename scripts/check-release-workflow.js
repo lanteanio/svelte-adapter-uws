@@ -28,7 +28,7 @@ function sameKeys(value, expected) {
 }
 
 function normalized(value) {
-	return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+	return typeof value === 'string' ? value.replace(/\r\n/g, '\n').replace(/\n$/, '') : '';
 }
 
 // The one mutable script between verification and publication, so a single
@@ -50,7 +50,7 @@ const PACK_RUN = [
 	"'tarball=' + $tarball >> $env:GITHUB_OUTPUT",
 	"'filename=' + $filename >> $env:GITHUB_OUTPUT",
 	"'sha256=' + $sha256 >> $env:GITHUB_OUTPUT"
-].join(' ');
+].join('\n');
 
 // The transfer between the two jobs is the one place the verified bytes leave
 // this workflow's control. download-artifact's own digest check reports a
@@ -68,7 +68,7 @@ const DIGEST_RUN = [
 	'$actual = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()',
 	"if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }",
 	"'verified digest ' + $actual"
-].join(' ');
+].join('\n');
 
 // Each entry is the COMPLETE step: its key inventory is closed to exactly the
 // keys named here. A step-level `if:` skips the verifier, `continue-on-error:`
@@ -120,7 +120,7 @@ const PUBLISH_STEPS = [
 // they run BEFORE the verification steps, where their effects are still
 // tested.
 const EXPECTED_SCRIPTS = {
-	'check': 'node scripts/check-compatibility.js && node scripts/check-formatting.js && node scripts/check-source-bytes.js && node scripts/check-tracked-imports.js && node scripts/check-contributor-map.js && node scripts/check-svelte-support.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && node scripts/check-release-notes.js && node scripts/check-release-ledger.js && node scripts/check-release-workflow.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/check-operations-pack.js && node scripts/check-capacity-kit.js && node scripts/generate-observability.js --check && node scripts/generate-privacy-integration.js --check && node scripts/check-types.js && node scripts/check-entry-points.js && node scripts/check-diagnostic-attribution.js && node scripts/check-console-index.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js',
+	'check': 'node scripts/check-compatibility.js && node scripts/check-formatting.js && node scripts/check-source-bytes.js && node scripts/check-tracked-imports.js && node scripts/check-contributor-map.js && node scripts/check-svelte-support.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && node scripts/check-release-notes.js && node scripts/check-release-ledger.js && node scripts/check-release-workflow.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/check-operations-pack.js && node scripts/check-capacity-kit.js && node scripts/generate-observability.js --check && node scripts/generate-privacy-integration.js --check && node scripts/check-types.js && node scripts/generate-platform-contract.js --check && node scripts/check-entry-points.js && node scripts/check-diagnostic-attribution.js && node scripts/check-console-index.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js',
 	'pretest': 'npm run check',
 	'postinstall': 'node scripts/check-native-install.js',
 	'prepublishOnly': 'npm run check',

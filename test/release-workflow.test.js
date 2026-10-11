@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { parse, stringify } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -30,6 +32,36 @@ const git = {
 };
 
 describe('trusted release workflow', () => {
+	it('preserves shell command boundaries, spacing, and leading newlines', () => {
+		for (const replacement of ['\n--tag', '  --tag', '\t--tag']) {
+			const parsed = parse(workflow);
+			const publish = parsed.jobs.publish.steps.at(-1);
+			publish.run = publish.run.replace(' --tag', replacement);
+			expect(validateReleaseWorkflow(stringify(parsed), pkg, policy).join('\n')).toContain('non-exact run');
+		}
+		const parsed = parse(workflow);
+		parsed.jobs.publish.steps.at(-1).run = '\n' + parsed.jobs.publish.steps.at(-1).run;
+		expect(validateReleaseWorkflow(stringify(parsed), pkg, policy).join('\n')).toContain('non-exact run');
+	});
+
+	it('accepts CRLF and one terminal newline without changing a command body', () => {
+		const parsed = parse(workflow);
+		for (const job of Object.values(parsed.jobs)) for (const step of job.steps) {
+			if (step.run) step.run = step.run.replace(/\n$/, '').replace(/\n/g, '\r\n') + '\r\n';
+		}
+		expect(validateReleaseWorkflow(stringify(parsed), pkg, policy)).toEqual([]);
+	});
+
+	it('refuses a pull request with a missing ref before trying unavailable Git', () => {
+		const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/prepare-release.js', import.meta.url))], {
+			encoding: 'utf8', windowsHide: true,
+			env: { ...process.env, PATH: '', Path: '', GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/999999/merge' }
+		});
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain('release event must be push');
+		expect(result.stderr).not.toMatch(/git .* failed|could not verify release lineage/);
+	});
+
 	it('is a closed tag-only OIDC path for one retained tarball', () => {
 		expect(validateReleaseWorkflow(workflow, pkg, policy)).toEqual([]);
 	});

@@ -14,7 +14,7 @@ const packagePath = resolve(root, 'package.json');
 const expectedRepository = 'lanteanio/svelte-adapter-uws';
 const expectedRepositoryUrl = 'git+https://github.com/lanteanio/svelte-adapter-uws.git';
 
-export function validateReleaseContext(env, pkg, git) {
+export function validateReleaseRequest(env, pkg) {
 	const errors = [];
 	const expectedTag = pkg.name + '@' + pkg.version;
 	if (env.GITHUB_EVENT_NAME !== 'push') errors.push('release event must be push');
@@ -26,10 +26,18 @@ export function validateReleaseContext(env, pkg, git) {
 	if (pkg.name !== 'svelte-adapter-uws') errors.push('package name is not publishable by this workflow');
 	if (pkg.private === true) errors.push('private package cannot use the public release workflow');
 	if (pkg.repository?.url !== expectedRepositoryUrl) errors.push('package repository URL does not match GitHub identity');
-	if (semver.valid(pkg.version) !== pkg.version) errors.push('package version is not canonical SemVer');
-	const channel = semver.prerelease(pkg.version) === null ? 'latest' : 'next';
-	const sourceBranch = channel === 'latest' ? 'origin/main' : 'origin/dev';
-	if (pkg.publishConfig?.tag !== channel) errors.push('publishConfig tag disagrees with version channel');
+	if (typeof pkg.version !== 'string' || semver.valid(pkg.version) !== pkg.version) errors.push('package version is not canonical SemVer');
+	if (typeof pkg.version === 'string' && semver.valid(pkg.version) === pkg.version) {
+		const channel = semver.prerelease(pkg.version) === null ? 'latest' : 'next';
+		if (pkg.publishConfig?.tag !== channel) errors.push('publishConfig tag disagrees with version channel');
+	}
+	return errors;
+}
+
+export function validateReleaseContext(env, pkg, git) {
+	const errors = validateReleaseRequest(env, pkg);
+	if (errors.length) return errors;
+	const sourceBranch = semver.prerelease(pkg.version) === null ? 'origin/main' : 'origin/dev';
 	if (git.sourceBranch !== sourceBranch || !git.sourceContainsHead) {
 		errors.push('release commit is not contained in the required ' + sourceBranch + ' lineage');
 	}
@@ -74,6 +82,8 @@ function isAncestor(commit, branch) {
 
 function main() {
 	const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+	const requestErrors = validateReleaseRequest(process.env, pkg);
+	if (requestErrors.length) throw new Error(requestErrors.join('\n- '));
 	const ref = process.env.GITHUB_REF || '';
 	const sourceBranch = semver.prerelease(pkg.version) === null ? 'origin/main' : 'origin/dev';
 	const details = {
