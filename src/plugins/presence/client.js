@@ -22,7 +22,8 @@
 
 const TOPIC_PREFIX = '__presence:';
 
-import { on, connect, status, registerWireCodec } from '../../client.js';
+import { on, status, registerWireCodec } from '../../client.js';
+import { clientConnection } from '../../client-connection.js';
 import { now, setIntervalTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 import { decodePresence, PRESENCE_CAPABILITY } from './codec.js';
@@ -71,7 +72,7 @@ const presenceStores = new Map();
  */
 export function presenceUpdate(topic, fields) {
 	if (typeof window === 'undefined') return;
-	connect().send({ type: 'presence-update', topic, fields });
+	clientConnection.get().send({ type: 'presence-update', topic, fields });
 }
 
 /**
@@ -273,7 +274,7 @@ export function presence(topic, options) {
 		// Symmetric to the cursor plugin's `cursor-snapshot` send.
 		statusUnsub = status.subscribe((s) => {
 			if (s === 'open' && !cancelled) {
-				connect().send({ type: 'presence-snapshot', topic });
+				clientConnection.get().send({ type: 'presence-snapshot', topic });
 			}
 		});
 	}

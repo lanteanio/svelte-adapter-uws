@@ -3,6 +3,7 @@ import { parseBinaryFrame, buildBinaryFrame, requestNFrame } from './runtime/wir
 import { decodeValue } from './runtime/wire-value.js';
 import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay, dispersedReconnectDelay } from './client-runtime.js';
 import { formatDiagnostic } from './runtime/diagnostic-format.js';
+import { clientConnection } from './client-connection.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -215,6 +216,8 @@ function ensureConnection(options, explicit = false) {
 	}
 	return singleton;
 }
+
+clientConnection.get = ensureConnection;
 
 /**
  * Follow explicit replacement without adding another writable store to dispatch.
@@ -895,8 +898,6 @@ const TERMINAL_CLOSE_CODES = new Set([
 	4403, // Forbidden (custom)
 ]);
 
-// Close codes indicating server-side throttling. Reconnect is still attempted
-// but we jump ahead in the backoff curve to avoid hammering a rate-limited server.
 /**
  * A `Retry-After` value as milliseconds: delta-seconds or an HTTP date, capped
  * at five minutes so one bad header cannot park a client; 0 when absent or
@@ -921,6 +922,8 @@ function retryAfterMs(value) {
  */
 const ATTEMPT_TIMEOUT_MS = 15_000;
 
+// Close codes indicating server-side throttling. Reconnect is still attempted
+// but we jump ahead in the backoff curve to avoid hammering a rate-limited server.
 const THROTTLE_CLOSE_CODES = new Set([
 	4429, // Rate limited (custom)
 ]);

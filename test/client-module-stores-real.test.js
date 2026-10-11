@@ -99,6 +99,44 @@ describe('module stores across explicit connection replacement', () => {
 		await waitFor(() => peers.length === 2);
 		expect(statuses.at(-1)).toBe('open');
 	});
+	it('keeps presence and cursor sends and worker mounts offline until explicit replacement', async () => {
+		const presence = await import('../src/plugins/presence/client.js');
+		const cursors = await import('../src/plugins/cursor/client.js');
+		let viewport = { x: 0, y: 0, w: 100, h: 100, zoom: 1 };
+		stops.push(cursors.cursor('room', { viewport: () => viewport }).subscribe(() => {}));
+		await waitFor(() => frames.some(entry => entry.value.type === 'cursor-viewport'));
+		connection.close();
+		viewport = { ...viewport, x: 1 };
+		presence.presenceUpdate('room', { typing: true });
+		cursors.move('room', { x: 4, y: 5 });
+		cursors.reportViewport('room', viewport);
+		const workerMessages = [];
+		vi.stubGlobal('Worker', class {
+			postMessage(message) { workerMessages.push(message); }
+			terminate() {}
+		});
+		vi.stubGlobal('OffscreenCanvas', class {});
+		const handle = cursors.cursor('worker-room', {
+			canvas: { transferControlToOffscreen: () => ({}), getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+			rendering: 'worker'
+		});
+		stops.push(handle.mount(), () => handle.destroy());
+		await pause(80);
+		expect(peers).toHaveLength(1);
+		expect(workerMessages).toEqual([]);
+		connection = client.connect({ url: 'ws://127.0.0.1:' + server.address().port });
+		await client.ready();
+		presence.presenceUpdate('room', { typing: false });
+		cursors.move('room', { x: 8, y: 9 });
+		cursors.reportViewport('room', { ...viewport, x: 2 });
+		await waitFor(() => frames.some(entry => entry.socket === peers.at(-1) && entry.value.type === 'cursor-viewport' && entry.value.rect.x === 2));
+		expect(peers).toHaveLength(2);
+		expect(frames.filter(entry => entry.socket === peers.at(-1)).map(entry => entry.value)).toEqual(expect.arrayContaining([
+			{ type: 'presence-update', topic: 'room', fields: { typing: false } },
+			{ type: 'cursor', topic: 'room', data: { x: 8, y: 9 } }
+		]));
+		expect(workerMessages.find(message => message.type === 'init')?.url).toBe('ws://127.0.0.1:' + server.address().port);
+	});
 	it('preserves replacement ownership when an old failed subscriber reconnects synchronously', async () => {
 		const old = connection;
 		let armed = false, replacement;
@@ -151,6 +189,7 @@ describe('module stores across explicit connection replacement', () => {
 		send({ topic: 'managed', event: 'put', data: 'managed value' });
 		send({ topic: 'late', event: 'put', data: 'late value' });
 		await waitFor(() => managed.at(-1)?.data === 'managed value' && lateValues.at(-1)?.data === 'late value');
+		await waitFor(() => frames.some(value => value.socket === peers.at(-1) && (value.value.topic === 'late' || value.value.topics?.includes('late'))));
 		const subscriptions = frames.filter(value => value.socket === peers.at(-1) && ['subscribe', 'subscribe-batch'].includes(value.value.type));
 		const topics = subscriptions.flatMap(value => value.value.topics ?? [value.value.topic]);
 		expect(topics).not.toContain('managed');

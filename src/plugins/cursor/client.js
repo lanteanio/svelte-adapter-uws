@@ -36,7 +36,8 @@
 
 const TOPIC_PREFIX = '__cursor:';
 
-import { on, connect, status, registerWireCodec } from '../../client.js';
+import { on, status, registerWireCodec } from '../../client.js';
+import { clientConnection } from '../../client-connection.js';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorDecodeDict } from './codec.js';
@@ -314,7 +315,7 @@ export function cursor(topic, options) {
 					viewportLastSig = sig;
 					// The poll IS the rAF cadence, so send the frame directly rather
 					// than routing through reportViewport's own rAF-coalesce hop.
-					try { connect().send({ type: 'cursor-viewport', topic, rect }); } catch { /* not connected yet */ }
+					try { clientConnection.get().send({ type: 'cursor-viewport', topic, rect }); } catch { /* not connected yet */ }
 				}
 			}
 			// Keep polling even when unresolved (a getter whose element is not yet
@@ -360,7 +361,7 @@ export function cursor(topic, options) {
 		// miss cursors that appeared while the client was offline.
 		statusUnsub = status.subscribe((s) => {
 			if (s === 'open' && !cancelled) {
-				connect().send({ type: 'cursor-snapshot', topic });
+				clientConnection.get().send({ type: 'cursor-snapshot', topic });
 				// Re-establish the viewport after a (re)connect so a reconnecting
 				// tab is not culled to an empty slice before its next report.
 				viewportLastSig = '';
@@ -504,7 +505,7 @@ export function move(topic, data) {
 	moveScheduled = true;
 	scheduleFrame(() => {
 		moveScheduled = false;
-		const conn = connect();
+		const conn = clientConnection.get();
 		for (const [t, d] of movePending) {
 			conn.send({ type: 'cursor', topic: t, data: d });
 		}
@@ -590,7 +591,7 @@ export function reportViewport(topic, source) {
 	viewportScheduled = true;
 	scheduleFrame(() => {
 		viewportScheduled = false;
-		const conn = connect();
+		const conn = clientConnection.get();
 		for (const [t, r] of viewportPending) {
 			conn.send({ type: 'cursor-viewport', topic: t, rect: r });
 		}
@@ -912,7 +913,7 @@ function cursorOnCanvas(topic, options) {
 		const init = {
 			type: 'init',
 			topic,
-			url: connect()._url(),
+			url: clientConnection.get()._url(),
 			gpu,
 			gpuThreshold,
 			devicePixelRatio: window.devicePixelRatio || 1,
@@ -975,7 +976,7 @@ function cursorOnCanvas(topic, options) {
 	function mountWorker() {
 		host.activeTopic = topic;
 		host.activeSink = workerSink;
-		connect();
+		clientConnection.get();
 		// Init waits for the main connection's first 'open': by then the auth
 		// preflight has run (cookies are minted) and the endpoint is proven
 		// reachable, so the worker socket can dial the same URL cold.
