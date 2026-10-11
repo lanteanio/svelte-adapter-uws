@@ -22,5 +22,7 @@ export function renderWaitingRoom({ queueDepth, request }) {
 		'</main>\n' +
 		'</body>\n' +
 		'</html>\n';
-	return { body, lang, dir: 'ltr' };
+	const dateName = new URL(request.url, 'http://localhost').searchParams.get('date');
+	const headers = dateName ? { [dateName]: 'Thu, 01 Jan 1970 00:00:00 GMT' } : {};
+	return { body, lang, dir: 'ltr', headers };
 }

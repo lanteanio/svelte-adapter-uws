@@ -480,6 +480,7 @@ function waitingRoomHref(value) {
 }
 
 const WAITING_ROOM_OWNED_HEADERS = new Set([
+	'date',
 	'cache-control',
 	'connection',
 	'content-language',
