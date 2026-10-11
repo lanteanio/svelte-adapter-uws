@@ -1265,7 +1265,8 @@ describe('every socket surface routes its subscribe decisions through the shared
 	// does; the dev lane keeps that refusal in its shared landing branch.
 	const ENROLMENT = [
 		{ fn: 'beginPendingSubscribe', production: 3, testing: 3, dev: 3, shared: 1 },
-		{ fn: 'settlePendingSubscribe', production: 7, testing: 7, dev: 6, shared: 1 },
+		// Each surface also settles a denial when strict policy arms during awaited resume.
+		{ fn: 'settlePendingSubscribe', production: 7, testing: 7, dev: 7, shared: 1 },
 		{ fn: 'settleHeldSubscribe', production: 4, testing: 4, dev: 4, shared: 1 },
 		{ fn: 'settleDeniedSubscribe', production: 6, testing: 6, dev: 6, shared: 1 },
 		{ fn: 'tombstonePendingSubscribe', production: 2, testing: 2, dev: 2, shared: 1 }
