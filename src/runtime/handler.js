@@ -1844,13 +1844,13 @@ if (WS_ENABLED) {
 							warnedRateLimitProxyCollapse = true;
 							console.warn(
 								`[ws] Rejected a WebSocket upgrade (429) keyed on a ${scope} client address ` +
-								`(${clientIp}) while ADDRESS_HEADER is unset. If this server runs behind a ` +
+								`(${clientIp}) while ${ENV_PREFIX}ADDRESS_HEADER is unset. If this server runs behind a ` +
 								'reverse proxy, load balancer, or docker userland-proxy that rewrites the ' +
 								'source address, every client shares one address and the per-IP ' +
 								'`upgradeRateLimit` becomes a single GLOBAL cap (also true for the ' +
 								'plugins/ratelimit per-message limiter, which keys on the same address). ' +
 								'Restore real client IPs with one of:\n' +
-								'  ADDRESS_HEADER=x-forwarded-for (+ XFF_DEPTH for the trusted-proxy hop count)\n' +
+								`  ${ENV_PREFIX}ADDRESS_HEADER=x-forwarded-for (+ ${ENV_PREFIX}XFF_DEPTH for the trusted-proxy hop count)\n` +
 								'  docker `userland-proxy: false` so iptables DNAT preserves the source IP\n' +
 								'  websocket.upgradeRateLimit: 0 to disable the per-IP limit if you throttle upstream\n' +
 								'  See: https://svti.me/upgrade-ratelimit-proxy'

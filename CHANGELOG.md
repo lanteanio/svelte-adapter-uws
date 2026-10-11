@@ -870,6 +870,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Runtime proxy warnings name the configured environment prefix in their explanations and suggested address, hop-depth, and trusted-proxy settings.
+
 - **Documentation and contract checks match the shipped runtime.** Client reconnect defaults and authentication retry outcomes match the implementation; cache descriptions identify insertion-order eviction; sequence tests explain the current arity contract; strict TypeScript consumers pin readonly numeric assertion maps; metric-label checks drive actual instrumented terminal paths; release instructions separate the frozen source from subsequent ledger bookkeeping and merge stable hotfixes before tagging.
 
 - **Memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy. Transient read failures retain the last successful limit; removing a limit clears it after a successful unlimited reading. The additional file reads run on the sampling tick, outside the frame path.
