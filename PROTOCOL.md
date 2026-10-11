@@ -1914,7 +1914,8 @@ rules of section 15, and every optional inner capability it advertises or emits.
 Binary conformance continues to require JSON fallback. The unanswered-recovery
 offset rule in section 7 applies to every lane ending, including network loss
 and slow-consumer resets. A client that recovers topics over this carriage MUST
-also act on the truncation that section 15.1 answers such a recovery with - a `truncated` event on `__replay:{topic}`, or an
+also act on the truncation that section 15.1 answers such a recovery with - a
+`truncated` event on `__replay:{topic}`, or an
 `end` there that carries `truncated:true`, with or without a `reqId` - even if
 it implements no section 8 plugin: it drops the topic's resume offset and
 surfaces the truncation to the application, which re-snapshots the topic as
