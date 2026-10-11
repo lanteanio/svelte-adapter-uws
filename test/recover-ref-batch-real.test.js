@@ -18,7 +18,7 @@ async function bootDev() {
 	await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
 	await createPlugin({ allowedOrigins: '*', handler: '/recover-ref-handler' }).configureServer({
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return handler; }
 	});

@@ -875,6 +875,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Vite development rejects authentication endpoint preflights before app-wide CORS can approve them. Exact custom auth paths retain the production `405` response without changing CORS on other routes.
+
 - Non-string `envPrefix` values fail adapter configuration instead of producing different environment lookups in development and production. The development config-file fallback is covered through handler, metrics and origin behavior.
 
 - Subscription-pressure documentation defines the per-connection mean, concentrated membership costs, and the separate controls for pressure signals and subscription admission.

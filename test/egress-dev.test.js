@@ -41,7 +41,7 @@ async function bootDev(pluginOptions, handler) {
 	let currentHandler = handler;
 	const viteServer = {
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: {
 			root: process.cwd(),
 			logger: { warn() {}, info() {}, error() {} },

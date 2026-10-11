@@ -26,7 +26,7 @@ function recordFromCalls(spy, event) {
 function viteServer(ssrLoadModule) {
 	return {
 		httpServer: { on: vi.fn(), once: vi.fn() },
-		middlewares: { use: vi.fn() },
+		middlewares: { stack: [], use: vi.fn() },
 		ssrLoadModule,
 		config: {
 			root: process.cwd(),

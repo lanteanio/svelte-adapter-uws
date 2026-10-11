@@ -40,7 +40,7 @@ beforeAll(async () => {
 	server = createServer();
 	await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 	await createPlugin({ allowedOrigins: '*', handler: '/subscriber-walk' }).configureServer({
-		httpServer: server, middlewares: { use() {} },
+		httpServer: server, middlewares: { stack: [], use() {} },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return handler; }
 	});

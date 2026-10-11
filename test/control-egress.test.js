@@ -330,7 +330,7 @@ describe('the control-egress budget on the dev plugin', () => {
 		const plugin = uws({ allowedOrigins: '*', handler: '/virtual-egress-handler' });
 		await plugin.configureServer({
 			httpServer,
-			middlewares: { use() {} },
+			middlewares: { stack: [], use() {} },
 			config: { root: process.cwd(), server: {}, logger: { warn() {}, info() {}, error() {} } },
 			async ssrLoadModule() { return { default: handler, ...handler }; }
 		});

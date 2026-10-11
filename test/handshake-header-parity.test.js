@@ -126,7 +126,7 @@ describe('the Vite dev server validates and writes the same handshake headers pr
 		const plugin = uws({ allowedOrigins: '*', handler: '/virtual-handshake-handler' });
 		await plugin.configureServer({
 			httpServer,
-			middlewares: { use() {} },
+			middlewares: { stack: [], use() {} },
 			config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 			async ssrLoadModule() { return { default: handler, ...handler }; }
 		});

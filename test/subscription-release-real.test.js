@@ -38,7 +38,7 @@ async function bootNonProduction(surface) {
 	const httpServer = createServer();
 	await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
 	await createPlugin({ allowedOrigins: '*', handler: '/subscription-release' }).configureServer({
-		httpServer, middlewares: { use() {} },
+		httpServer, middlewares: { stack: [], use() {} },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return handler; }
 	});

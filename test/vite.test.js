@@ -48,7 +48,7 @@ describe('vite plugin', () => {
 			const ssrLoadModule = vi.fn().mockResolvedValue({});
 			const server = {
 				httpServer: { on: vi.fn(), once: vi.fn() },
-				middlewares: { use: vi.fn() },
+				middlewares: { stack: [], use: vi.fn() },
 				ssrLoadModule,
 				config: {
 					root: path.join(process.cwd(), 'test'),
@@ -130,7 +130,7 @@ describe('vite plugin', () => {
 					},
 					once: vi.fn()
 				},
-				middlewares: { use: vi.fn() },
+				middlewares: { stack: [], use: vi.fn() },
 				config: {
 					root: process.cwd(),
 					server: {},
@@ -153,7 +153,7 @@ describe('vite plugin', () => {
 			const warnings = [];
 			const server = {
 				httpServer: { on: vi.fn(), once: vi.fn() },
-				middlewares: { use: vi.fn() },
+				middlewares: { stack: [], use: vi.fn() },
 				config: {
 					root: process.cwd(),
 					server: { hmr: { path: '/__hmr' } },
@@ -174,6 +174,7 @@ describe('vite plugin', () => {
 			const server = {
 				httpServer: { on: vi.fn(), once: vi.fn() },
 				middlewares: {
+					stack: [],
 					use: (pathOrFn, maybeFn) => {
 						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
 					}
@@ -197,6 +198,7 @@ describe('vite plugin', () => {
 			const server = {
 				httpServer: { on: vi.fn(), once: vi.fn() },
 				middlewares: {
+					stack: [],
 					use: (pathOrFn) => {
 						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
 					}

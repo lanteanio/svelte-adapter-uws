@@ -41,7 +41,7 @@ async function bootDev() {
 	const plugin = createPlugin({ allowedOrigins: '*', handler: '/subscription-handler' });
 	await plugin.configureServer({
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return handler; }
 	});

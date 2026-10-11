@@ -61,7 +61,7 @@ describe('adapter configuration fallback', () => {
 		const loaded = [];
 		await uws({ allowedOrigins: 'same-origin' }).configureServer({
 			httpServer,
-			middlewares: { use() {} },
+			middlewares: { stack: [], use() {} },
 			config: { root: configRoot, server: {}, plugins: [], logger: { warn() {}, info() {}, error() {} } },
 			async ssrLoadModule(id) {
 				loaded.push(id);

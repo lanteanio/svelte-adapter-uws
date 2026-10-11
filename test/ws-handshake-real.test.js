@@ -191,7 +191,7 @@ async function bootDev() {
 	teardown.push(() => new Promise((r) => { httpServer.closeAllConnections?.(); httpServer.close(() => r(undefined)); }));
 	await plugin.configureServer({
 		httpServer,
-		middlewares: { use(path, fn) { chain.push(typeof path === 'function' ? { path: '', fn: path } : { path, fn }); } },
+		middlewares: { stack: [], use(path, fn) { chain.push(typeof path === 'function' ? { path: '', fn: path } : { path, fn }); } },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return {}; }
 	});

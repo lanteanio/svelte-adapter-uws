@@ -364,6 +364,20 @@ for (const surface of SURFACES) {
 			if (surface.label === 'vite dev') expect(otherGet.status).toBe(APP_STATUS);
 		});
 
+		it.each(['http://localhost:3000', 'http://127.0.0.1:3000', 'https://other.example'])('refuses auth preflight from %s', async (origin) => {
+			for (const [target] of ROUTED) {
+				const response = await send(server.port, target, {
+					method: 'OPTIONS',
+					headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'x-requested-with' }
+				});
+				expect(response.status, target).toBe(405);
+				expect(response.headers.allow, target).toBe('POST');
+				expect(response.headers['access-control-allow-origin'], target).toBeUndefined();
+				expect(response.headers['access-control-allow-credentials'], target).toBeUndefined();
+				expect(response.echoed, target).toBe(false);
+			}
+		});
+
 		it('answers a declared body past 64 KiB with 413, and takes one of 64 KiB', async () => {
 			const over = await postBody(server.port, 64 * 1024 + 1);
 			expect(over.status).toBe(413);

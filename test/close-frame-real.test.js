@@ -64,7 +64,7 @@ async function bootDev() {
 	teardown.push(() => new Promise((r) => httpServer.close(() => r(undefined))));
 	await plugin.configureServer({
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
 		async ssrLoadModule() { return { default: probeHandler, ...probeHandler }; }
 	});

@@ -32,7 +32,7 @@ async function bootDev(handler) {
 
 	const server = {
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: {
 			root: process.cwd(),
 			logger: { warn() {}, info() {}, error() {} },

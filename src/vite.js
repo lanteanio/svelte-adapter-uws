@@ -2228,6 +2228,23 @@ export default function uws(options = {}) {
 				return;
 			}
 
+			// Vite installs CORS before configureServer. Insert a refusal-only
+			// guard ahead of it through Connect's stack so auth preflights cannot
+			// be approved by the application's broader CORS policy. Other paths
+			// and methods keep the existing middleware order.
+			const refuseAuthPreflight = (req, res, next) => {
+				if (req.method !== 'OPTIONS') return next();
+				const target = req.originalUrl || req.url || '';
+				if (target.split('?')[0] !== wsAuthPath) return next();
+				const invalid = invalidRequestTarget(target, undefined);
+				res.statusCode = invalid ? 400 : 405;
+				if (!invalid) res.setHeader('allow', 'POST');
+				res.setHeader('content-type', 'text/plain');
+				req.resume();
+				res.end(invalid ? 'Bad Request' : 'Method Not Allowed');
+			};
+			server.middlewares.stack.unshift({ route: '', handle: refuseAuthPreflight });
+
 			// Warn if our WS path collides with the Vite HMR WebSocket path.
 			const hmrConfig = server.config.server?.hmr;
 			if (hmrConfig && typeof hmrConfig === 'object' && hmrConfig.path === wsPath) {

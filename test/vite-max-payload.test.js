@@ -39,7 +39,7 @@ async function bootDev(maxPayloadLength, onMessage) {
 	});
 	await plugin.configureServer({
 		httpServer,
-		middlewares: { use() {} },
+		middlewares: { stack: [], use() {} },
 		config: {
 			root: process.cwd(),
 			server: {},

@@ -154,7 +154,7 @@ describe('the dev plugin exposes the same metrics members', () => {
 		const handlerModule = { init({ platform }) { captured.platform = platform; }, message() {} };
 		const viteServer = {
 			httpServer,
-			middlewares: { use() {} },
+			middlewares: { stack: [], use() {} },
 			config: {
 				root: process.cwd(),
 				logger: { warn() {}, info() {}, error() {} },
@@ -236,7 +236,7 @@ describe('the dev plugin exposes the same metrics members', () => {
 		const captured = { platform: /** @type {any} */ (null) };
 		await plugin.configureServer({
 			httpServer,
-			middlewares: { use() {} },
+			middlewares: { stack: [], use() {} },
 			config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {}, plugins: [] },
 			async ssrLoadModule() { return { init({ platform }) { captured.platform = platform; }, message() {} }; }
 		});
