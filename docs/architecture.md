@@ -226,18 +226,34 @@ Durable enqueue identity, receipt recovery and retention are defined in
 
 ## Subscription-pressure signal
 
-Subscription pressure uses every settled logical subscription divided by the
-number of live connections. Each subscription retains membership state and can
-participate in publication fanout, regardless of how many belong to the same
-connection. The default threshold is 50 subscriptions per connection. A
-connection with many subscriptions therefore contributes its actual count;
-its contribution is not clipped to a fixed per-connection allowance.
+Subscription pressure is the per-connection mean: every settled logical
+subscription on a worker divided by that worker's live connection count, or
+zero with no connections. The default threshold is 50. This is not a total
+membership budget: 10,000 connections with 49 subscriptions each remain below
+this threshold, even though they retain 490,000 memberships. Other memory,
+publication, and admission signals measure different resource constraints.
 
-This signal measures aggregate resource demand. Clipping one connection's
-contribution would hide that demand and could report a healthy worker while
-its membership and fanout costs keep growing. Per-connection admission limits
-bound individual consumers independently; they do not change the pressure
-measurement. Lease grant sizing uses the same uncapped ratio.
+Each connection contributes its actual membership count, up to the independent
+65,536-subscription admission cap. One connection at that cap alone crosses the
+default threshold on a worker with up to 1,310 live connections. That effect is
+intentional: membership state and publication fanout consume worker resources
+even when the memberships belong to one client. Clipping each contribution at
+50 would prevent the mean from reaching 50 unless every connection reached
+that count, masking concentrated membership load.
+
+The same uncapped mean reduces newly issued flow-control lease windows above
+25 subscriptions per connection, including windows granted to other clients
+on the worker. With `protection: 'auto'`, five consecutive active pressure
+samples move a normal worker to elevated posture. The subscription signal can
+therefore affect other clients' grants and admission posture; it is deliberately
+a worker-wide response to shared cost.
+
+Operators can change `websocket.pressure.subscriberRatio`, or set it to `false`
+to disable this pressure signal. That setting does not disable the independent
+lease-window scaling above 25. Use subscribe authorization to enforce
+application-specific topic access and per-client membership limits below the
+hard admission cap. These controls preserve the measured mean rather than
+silently clipping one client's contribution.
 
 ## Memory-pressure signal
 
