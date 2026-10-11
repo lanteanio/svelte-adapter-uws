@@ -66,3 +66,84 @@ it('retains server authority for every holder through denial, partial release an
 	expect(subscriptions(second)).toHaveLength(1);
 	releaseNew();
 });
+
+for (const phase of ['before flush', 'after flush', 'queued']) {
+	it('transfers a plain-first topic to server authority ' + phase, async () => {
+		const topic = 'managed:plain-first';
+		const subscriptions = socket => socket.sent.filter(frame => frame.type === 'subscribe' || frame.type === 'subscribe-batch');
+		connection = client.connect({ reconnectInterval: 5, maxReconnectInterval: 5 });
+		const first = Socket.all[0]; first.open();
+		if (phase === 'queued') {
+			first.receive({ type: 'lease-ok' });
+			first.receive({ type: 'lease', count: 0, ttlMs: 60000 });
+		}
+		const values = [];
+		const releasePlain = client.on(topic).subscribe(value => values.push(value));
+		if (phase !== 'before flush') await vi.advanceTimersByTimeAsync(0);
+		client.setTopicManaged(topic);
+		const releaseOwner = client.on(topic).subscribe(() => {});
+		await vi.advanceTimersByTimeAsync(0);
+		if (phase === 'queued') first.receive({ type: 'lease', count: 1, ttlMs: 60000 });
+		expect(subscriptions(first)).toHaveLength(phase === 'after flush' ? 1 : 0);
+		first.close(1006);
+		await vi.advanceTimersByTimeAsync(5);
+		const second = Socket.all[1]; second.open();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(subscriptions(second)).toEqual([]);
+		releaseOwner();
+		second.receive({ topic, event: 'put', data: 'authorized' });
+		expect(values.at(-1)?.data).toBe('authorized');
+		releasePlain();
+		if (phase === 'queued') second.receive({ type: 'lease', count: 1, ttlMs: 60000 });
+		const releaseNew = client.on(topic).subscribe(() => {});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(subscriptions(second)).toHaveLength(1);
+		releaseNew();
+	});
+}
+
+it('does not retry a plain subscription denied before server authority is assigned', async () => {
+	const topic = 'managed:retry';
+	connection = client.connect();
+	const socket = Socket.all[0]; socket.open();
+	const release = client.on(topic).subscribe(() => {});
+	await vi.advanceTimersByTimeAsync(0);
+	const first = socket.sent.find(frame => frame.type === 'subscribe');
+	socket.receive({ type: 'subscribe-denied', topic, ref: first.ref, reason: 'RATE_LIMITED' });
+	client.setTopicManaged(topic);
+	await vi.advanceTimersByTimeAsync(1000);
+	expect(socket.sent.filter(frame => frame.type === 'subscribe' || frame.type === 'subscribe-batch')).toHaveLength(1);
+	release();
+});
+
+it('keeps ordinary members of a queued batch when one topic becomes server managed', async () => {
+	connection = client.connect();
+	const socket = Socket.all[0]; socket.open();
+	socket.receive({ type: 'lease-ok' });
+	socket.receive({ type: 'lease', count: 0, ttlMs: 60000 });
+	const releaseManaged = client.on('managed:batch').subscribe(() => {});
+	const releasePlain = client.on('plain:batch').subscribe(() => {});
+	await vi.advanceTimersByTimeAsync(0);
+	client.setTopicManaged('managed:batch');
+	socket.receive({ type: 'lease', count: 1, ttlMs: 60000 });
+	expect(socket.sent.filter(frame => frame.type === 'subscribe-batch').map(frame => frame.topics)).toEqual([['plain:batch']]);
+	releaseManaged(); releasePlain();
+});
+
+it('drops an already queued retry when its topic becomes server managed', async () => {
+	const topic = 'managed:queued-retry';
+	connection = client.connect();
+	const socket = Socket.all[0]; socket.open();
+	const release = client.on(topic).subscribe(() => {});
+	await vi.advanceTimersByTimeAsync(0);
+	const first = socket.sent.find(frame => frame.type === 'subscribe');
+	socket.receive({ type: 'lease-ok' });
+	socket.receive({ type: 'lease', count: 0, ttlMs: 60000 });
+	socket.receive({ type: 'subscribe-denied', topic, ref: first.ref, reason: 'RATE_LIMITED' });
+	await vi.advanceTimersByTimeAsync(1000);
+	expect(socket.sent.some(frame => frame.type === 'request-n' && frame.queued === 1)).toBe(true);
+	client.setTopicManaged(topic);
+	socket.receive({ type: 'lease', count: 1, ttlMs: 60000 });
+	expect(socket.sent.filter(frame => frame.type === 'subscribe' || frame.type === 'subscribe-batch')).toHaveLength(1);
+	release();
+});

@@ -1453,6 +1453,7 @@ function createConnection(options) {
 		let recover = null;
 		let chunkBytes = SUBSCRIBE_BATCH_ENVELOPE_BYTES;
 		for (const t of topics) {
+			if (managedTopics.has(t)) continue;
 			let entryBytes = subscribeBatchEncoder.encode(JSON.stringify(t)).length + 1;
 			let entry = null;
 			const offset = lastSeenSeqs.get(t);
@@ -1527,12 +1528,17 @@ function createConnection(options) {
 		if (batch.length === 1) {
 			const topic = batch[0];
 			if (debug) console.log('[ws] subscribe ->', topic);
-			_flowSend(() => ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ })));
+			_flowSend(() => {
+				if (subscribedTopics.has(topic) && !managedTopics.has(topic)) ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ }));
+			});
 			return;
 		}
 		for (const chunk of chunkTopicsForBatch(batch)) {
 			if (debug) console.log('[ws] subscribe-batch ->', chunk);
-			_flowSend(() => ws.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ })));
+			_flowSend(() => {
+				const topics = chunk.filter(topic => subscribedTopics.has(topic) && !managedTopics.has(topic));
+				if (topics.length) ws.send(JSON.stringify({ type: 'subscribe-batch', topics, ref: nextSubscribeRef++ }));
+			});
 		}
 	}
 
@@ -1570,9 +1576,9 @@ function createConnection(options) {
 		rateLimitedTimer = null;
 		// Still-wanted topics only: one released between the refusal and here
 		// must not be resurrected by its own retry.
-		const topics = [...rateLimitedTopics.keys()].filter((t) => subscribedTopics.has(t));
+		const topics = [...rateLimitedTopics.keys()].filter((t) => subscribedTopics.has(t) && !managedTopics.has(t));
 		for (const topic of [...rateLimitedTopics.keys()]) {
-			if (!subscribedTopics.has(topic)) rateLimitedTopics.delete(topic);
+			if (!subscribedTopics.has(topic) || managedTopics.has(topic)) rateLimitedTopics.delete(topic);
 		}
 		if (topics.length === 0) return;
 		if (!ws || ws.readyState !== WebSocket.OPEN) return; // the reopen resubscribes everything
@@ -1590,7 +1596,7 @@ function createConnection(options) {
 			for (const topic of chunk) pendingRetryRefs.set(topic, frame.ref);
 			_flowSend(() => {
 				if (generation !== connectionGeneration) return;
-				const wanted = chunk.filter(topic => subscribedTopics.has(topic) && pendingRetryRefs.get(topic) === frame.ref);
+				const wanted = chunk.filter(topic => subscribedTopics.has(topic) && !managedTopics.has(topic) && pendingRetryRefs.get(topic) === frame.ref);
 				for (const topic of wanted) pendingRetryRefs.delete(topic);
 				if (wanted.length === 0) return;
 				if (wanted.length !== chunk.length) {
@@ -1608,7 +1614,7 @@ function createConnection(options) {
 
 	/** @param {string} topic */
 	function retryRateLimitedSubscribe(topic) {
-		if (!subscribedTopics.has(topic)) return;
+		if (!subscribedTopics.has(topic) || managedTopics.has(topic)) return;
 		const attempts = (rateLimitedTopics.get(topic) ?? 0) + 1;
 		if (attempts > RATE_LIMITED_MAX_ATTEMPTS) {
 			// Out of attempts: this is not the transient bound clearing, so stop
