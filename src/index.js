@@ -602,6 +602,7 @@ export function serializeWsOptions(websocket, adminPath) {
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz', readinessCheckPath = '/readyz' } = opts;
+	if (typeof envPrefix !== 'string') throw new TypeError('envPrefix must be a string.');
 	// Readiness-gated boot warmup: render the configured paths once during the
 	// `starting` window so the SSR render path is warm before the readiness
 	// probe reports ready (a cold first render costs ~20x a warm one, and a

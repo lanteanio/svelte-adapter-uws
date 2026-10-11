@@ -870,6 +870,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Non-string `envPrefix` values fail adapter configuration instead of producing different environment lookups in development and production. The development config-file fallback is covered through handler, metrics and origin behavior.
+
 - Subscription-pressure documentation defines the per-connection mean, concentrated membership costs, and the separate controls for pressure signals and subscription admission.
 
 - Retire wire topic IDs when their announcement is refused, so another codec on the same connection announces a fresh ID before sending binary. The testing server follows the same rule.
