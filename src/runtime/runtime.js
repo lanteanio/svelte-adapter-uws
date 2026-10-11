@@ -53,6 +53,7 @@ const defaultEnv = Object.freeze({
 		setImmediate: (cb, ...a) => setImmediate(cb, ...a),
 		clear: (h) => clearTimeout(h),
 		clearInterval: (h) => clearInterval(h),
+		clearImmediate: (h) => clearImmediate(h),
 		queueMicrotask: (cb) => queueMicrotask(cb)
 	}),
 	tz: undefined // effective timezone for cron evaluation; undefined = real local TZ
@@ -95,6 +96,7 @@ export const setIntervalTimer = (cb, ms, ...a) => current.timers.setInterval(cb,
 export const setImmediateTimer = (cb, ...a) => current.timers.setImmediate(cb, ...a);
 export const clearTimer = (h) => current.timers.clear(h);
 export const clearIntervalTimer = (h) => current.timers.clearInterval(h);
+export const clearImmediateTimer = (h) => current.timers.clearImmediate(h);
 export const microtask = (cb) => current.timers.queueMicrotask(cb);
 export const effectiveTimeZone = () => current.tz;
 
@@ -110,7 +112,13 @@ export function setRuntimeEnv(env, opts) {
 	current = Object.freeze({
 		clock: Object.freeze({ ...defaultEnv.clock, ...(env && env.clock) }),
 		rng: Object.freeze({ ...defaultEnv.rng, ...(env && env.rng) }),
-		timers: Object.freeze({ ...defaultEnv.timers, ...(env && env.timers) }),
+		timers: Object.freeze({
+			...defaultEnv.timers,
+			...(env && env.timers),
+			// A custom immediate handle does not belong to Node's canceller.
+			// Older schedulers may let the harmless released callback run once.
+			clearImmediate: env?.timers?.clearImmediate ?? (env?.timers?.setImmediate ? () => {} : defaultEnv.timers.clearImmediate)
+		}),
 		tz: env && Object.prototype.hasOwnProperty.call(env, 'tz') ? env.tz : defaultEnv.tz
 	});
 	return current;

@@ -340,6 +340,8 @@ export interface RuntimeEnv {
 		setImmediate(cb: Function, ...args: any[]): any;
 		clear(handle: any): void;
 		clearInterval(handle: any): void;
+		/** Cancel a check-phase callback; optional for existing custom schedulers. */
+		clearImmediate?(handle: any): void;
 		queueMicrotask(cb: Function): void;
 	};
 	tz?: string;

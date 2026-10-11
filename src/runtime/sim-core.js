@@ -205,6 +205,7 @@ export function createScheduler(opts = {}) {
 				setImmediate: (cb, ...a) => scheduleImmediate(cb, a),
 				clear,
 				clearInterval: clear,
+				clearImmediate: clear,
 				queueMicrotask: (cb) => queueMicrotask(cb) // determinism-allow: sim routes seam microtasks to the real queue it drains
 			},
 			tz: opts.tz

@@ -1,5 +1,5 @@
 import { responseChunkBytes } from './response-body.js';
-import { readReady } from './response-read.js';
+import { readReady, releaseReadAllowance } from './response-read.js';
 
 /**
  * Whether an SSR response may be buffered whole for cross-waiter dedup.
@@ -60,13 +60,13 @@ export function declaresBodyPastCap(response, cap) {
  */
 export async function readBodyUpTo(body, cap, state) {
 	const reader = body.getReader();
-	const cancel = () => { reader.cancel().catch(() => {}); };
+	const allowance = { spent: false };
+	const cancel = () => { releaseReadAllowance(allowance); reader.cancel().catch(() => {}); };
 	if (state) state.cancelResponse = cancel;
 	/** @type {Uint8Array[]} */
 	const chunks = [];
 	let total = 0;
 	let pending;
-	const allowance = { spent: false };
 	try {
 		for (;;) {
 			const next = chunks.length ? await readReady(reader, allowance) : await reader.read();
@@ -89,6 +89,7 @@ export async function readBodyUpTo(body, cap, state) {
 		reader.releaseLock();
 		throw error;
 	} finally {
+		releaseReadAllowance(allowance);
 		if (state?.cancelResponse === cancel) state.cancelResponse = null;
 	}
 	// Replay the held prefix, then consume the exact read that was pending
