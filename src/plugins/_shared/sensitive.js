@@ -231,12 +231,10 @@ const KEY_SECRET_SUFFIXES = new Set([
 /**
  * Short credential and PII tokens that must also match inside a FLAT name.
  *
- * These are all in {@link SENSITIVE_WORDS}, so every spelling carrying a
- * separator or a hump is already caught. A flat lowercase name is a single word,
- * so `userPwd` dropped while `userpwd` - a SQL column of the same value - was
- * broadcast. Swept across 35 bases and 23 affixes, that left 231 divergent
- * spelling families, which is the same defect the substring pass beside
- * SENSITIVE_WORDS exists to close for the longer tokens.
+ * These are all in {@link SENSITIVE_WORDS}, so spellings with separators or
+ * camelCase boundaries match whole words. Flat lowercase names need this
+ * additional check: `userpwd` must be sensitive just like `userPwd`. The
+ * substring pass beside SENSITIVE_WORDS handles the longer tokens.
  *
  * They are listed here rather than added to SENSITIVE_SUBSTRINGS because a
  * substring scan of the whole name would fire mid-word. Most tokens can still
@@ -380,15 +378,10 @@ function flatHeadHasCredentialQualifier(head) {
  * The `author` family, which is ordinary display identity on any collaborative
  * surface and must keep riding a roster.
  *
- * `auth` is matched per WORD rather than as a substring for exactly this
- * reason. A bare substring silently dropped `author`, `authorId` and
- * `authorName` from every roster, and the obvious repairs do not survive
- * camelCase: a regex lookahead that correctly excluded `authorId` still
- * dropped `authoredAt`, because a case-insensitive character class cannot see
- * the hump that ends the word. Splitting into words first makes the rule say
- * what it means - any word containing `auth` is sensitive UNLESS it is one of
- * these - so `authorization`, `oauth` and `authentic` are caught while the
- * whole author family passes.
+ * Match `auth` within each word, except the author words listed here. Word
+ * boundaries preserve `authorId`, `authorName` and `authoredAt` while still
+ * rejecting `authorization`, `oauth` and `authentic`. Tokenizing camelCase
+ * first distinguishes the author word from a following qualifier.
  */
 const AUTHOR_WORDS = new Set(['author', 'authors', 'authored', 'authoring']);
 
@@ -425,18 +418,6 @@ function joinedFieldName(name) {
 }
 
 /**
- * A word without a trailing ordinal - `phone2` becomes `phone`.
- *
- * Form fields and CRM columns number their repeats (`phone1`, `phone2`,
- * `address1`, `address2`), and the tokenizer counts digits as word characters,
- * so those spellings matched none of the word rules while their unnumbered base
- * did. Stripping is the right shape rather than splitting: several words here
- * legitimately end in digits (`ipv4`, `ipv6`) and must keep matching whole.
- *
- * @param {string} word
- * @returns {string}
- */
-/**
  * Whether a name ends in an ASCII digit - the cheap test that decides whether
  * {@link stripTrailingDigits} is worth calling at all.
  *
@@ -448,6 +429,18 @@ function endsWithDigit(word) {
 	return code >= 48 && code <= 57;
 }
 
+/**
+ * A word without a trailing ordinal - `phone2` becomes `phone`.
+ *
+ * Form fields and CRM columns number their repeats (`phone1`, `phone2`,
+ * `address1`, `address2`), and the tokenizer counts digits as word characters,
+ * so the matcher also checks the base word without its ordinal. It retains
+ * the original word check because names such as `ipv4` and `ipv6` must also
+ * match whole.
+ *
+ * @param {string} word
+ * @returns {string}
+ */
 function stripTrailingDigits(word) {
 	let end = word.length;
 	while (end > 0 && word.charCodeAt(end - 1) >= 48 && word.charCodeAt(end - 1) <= 57) end--;
@@ -721,11 +714,10 @@ const VERDICT_CACHE_MAX = 1024;
  * `VERDICT_CACHE.keys().next()` looks like an O(1) way to find the oldest
  * entry and is not: V8 leaves a tombstone on delete and only compacts on
  * rehash, so a FRESH iterator re-walks every tombstone the previous evictions
- * left. Measured, that made eviction linear in the cap - 106ns at 64 entries,
- * 212ns at the shipped 1024, 2201ns at 16384 - and pushed the flooded path
- * 1.26x past having no cache at all, which is the opposite of what a cache is
- * for. `runtime/utils/rate-limiter.js` documents this exact trap for its own
- * entry map; this table was walking straight into it.
+ * left. Fresh-iterator eviction scales with the tombstone prefix: 106ns at 64
+ * entries, 212ns at the shipped 1024, 2201ns at 16384, and a flooded path
+ * 1.26x slower than no cache. A persistent iterator avoids that repeated
+ * traversal; `runtime/utils/rate-limiter.js` uses the same eviction strategy.
  *
  * @type {Iterator<string> | null}
  */

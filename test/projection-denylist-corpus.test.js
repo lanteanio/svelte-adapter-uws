@@ -92,8 +92,7 @@ describe('personal data never rides a broadcast projection', () => {
 		]) expect(dropped(name), name).toBe(true);
 	});
 
-	// A qualifier used to defeat every compound in the set, because the match was
-	// against the WHOLE name. This is the property that makes the set worth having.
+	// Compound matches remain sensitive when a prefix or suffix qualifies the name.
 	it('a qualifier does not defeat a compound', () => {
 		for (const base of ['cardNumber', 'accountNumber', 'routingNumber', 'securityCode', 'taxId', 'nationalId']) {
 			for (const qualified of [`user${base[0].toUpperCase()}${base.slice(1)}`, `${base}Last4`, `primary${base[0].toUpperCase()}${base.slice(1)}`]) {
@@ -143,10 +142,8 @@ describe('personal data never rides a broadcast projection', () => {
 		}
 	});
 
-	// The memo declined to STORE a long name but still computed it, so presence -
-	// which asks once per key of every update frame - recomputed it at frame rate.
-	// One crafted key inside the ordinary byte cap measured 173.7 us per frame
-	// against 0.4 us for an ordinary one.
+	// Reject overlong names before tokenizing or caching them, so repeated
+	// presence updates cannot force a full scan of a crafted key on every frame.
 	it('drops an absurdly long name outright rather than recomputing it per frame', () => {
 		const long = 'a'.repeat(200);
 		expect(dropped(long)).toBe(true);

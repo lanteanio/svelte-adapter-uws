@@ -166,55 +166,6 @@ import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEP
  */
 
 /**
- * Create a presence tracker.
- *
- * @param {PresenceOptions} [options]
- * @returns {PresenceTracker}
- *
- * @example
- * ```js
- * // src/lib/server/presence.js
- * import { createPresence } from 'svelte-adapter-uws/plugins/presence';
- *
- * export const presence = createPresence({
- *   key: 'id',
- *   select: (userData) => ({ id: userData.id, name: userData.name })
- * });
- * ```
- *
- * @example
- * ```js
- * // src/hooks.ws.js - zero-config (just spread hooks)
- * import { presence } from '$lib/server/presence';
- *
- * export const { subscribe, unsubscribe, close } = presence.hooks;
- * ```
- *
- * @example
- * ```js
- * // src/hooks.ws.js - with custom logic
- * import { presence } from '$lib/server/presence';
- *
- * export function subscribe(ws, topic, ctx) {
- *   if (topic === 'vip' && !ws.getUserData().isVip) return false;
- *   presence.hooks.subscribe(ws, topic, ctx);
- * }
- *
- * export const { unsubscribe, close } = presence.hooks;
- * ```
- *
- * @example
- * ```js
- * // +page.server.js - server-side presence for SSR
- * import { presence } from '$lib/server/presence';
- *
- * export async function load() {
- *   return { users: presence.list('room'), online: presence.count('room') };
- * }
- * ```
- */
-
-/**
  * Recursion budget for deepEqual. A presence field nested thousands of
  * levels deep (a hostile `presence-update` frame - the plugin's own
  * JSON.parse path has no depth limit) would otherwise blow the stack with a
@@ -363,6 +314,54 @@ function makeDefaultPresenceSelect(keyField) {
 	};
 }
 
+/**
+ * Create a presence tracker.
+ *
+ * @param {PresenceOptions} [options]
+ * @returns {PresenceTracker}
+ *
+ * @example
+ * ```js
+ * // src/lib/server/presence.js
+ * import { createPresence } from 'svelte-adapter-uws/plugins/presence';
+ *
+ * export const presence = createPresence({
+ *   key: 'id',
+ *   select: (userData) => ({ id: userData.id, name: userData.name })
+ * });
+ * ```
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js - zero-config (just spread hooks)
+ * import { presence } from '$lib/server/presence';
+ *
+ * export const { subscribe, unsubscribe, close } = presence.hooks;
+ * ```
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js - with custom logic
+ * import { presence } from '$lib/server/presence';
+ *
+ * export function subscribe(ws, topic, ctx) {
+ *   if (topic === 'vip' && !ws.getUserData().isVip) return false;
+ *   presence.hooks.subscribe(ws, topic, ctx);
+ * }
+ *
+ * export const { unsubscribe, close } = presence.hooks;
+ * ```
+ *
+ * @example
+ * ```js
+ * // +page.server.js - server-side presence for SSR
+ * import { presence } from '$lib/server/presence';
+ *
+ * export async function load() {
+ *   return { users: presence.list('room'), online: presence.count('room') };
+ * }
+ * ```
+ */
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
 	const select = options.select || makeDefaultPresenceSelect(keyField);

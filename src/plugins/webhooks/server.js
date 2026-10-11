@@ -34,17 +34,6 @@ export {
  * @module svelte-adapter-uws/plugins/webhooks/server
  */
 
-/**
- * Strip a URL down to its origin before it appears in an error message or log
- * line: userinfo (`user:pass@`), the query string, AND the path can all carry
- * secrets (mainstream webhook endpoints embed their credential in the path,
- * e.g. `https://hooks.example.com/services/T00/B00/SECRET`), and URL-bearing
- * failure messages are persisted in dead-letter queues and logs, so only the
- * origin is safe to keep. Falls back to a fixed placeholder when the value
- * does not parse.
- * @param {string} url
- * @returns {string}
- */
 /** Default freshness window, in seconds, either side of the receiver's clock. */
 const DEFAULT_SIGNATURE_TOLERANCE_S = 300;
 
@@ -244,6 +233,17 @@ function verifyWebhookSignatureUnchecked(headers, rawBody, options) {
 	return ok;
 }
 
+/**
+ * Strip a URL down to its origin before it appears in an error message or log
+ * line: userinfo (`user:pass@`), the query string, AND the path can all carry
+ * secrets (mainstream webhook endpoints embed their credential in the path,
+ * e.g. `https://hooks.example.com/services/T00/B00/SECRET`), and URL-bearing
+ * failure messages are persisted in dead-letter queues and logs, so only the
+ * origin is safe to keep. Falls back to a fixed placeholder when the value
+ * does not parse.
+ * @param {string} url
+ * @returns {string}
+ */
 export function redactUrl(url) {
 	try {
 		return new URL(url).origin;

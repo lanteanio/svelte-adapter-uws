@@ -506,6 +506,9 @@ function classifyIpv6(g, nat64) {
 	return null;
 }
 
+/** The prefix lengths RFC 6052 section 2.2 defines, shortest first. */
+const NAT64_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96];
+
 /**
  * Parse a declared NAT64 prefix (`'64:ff9b::/96'`, `'64:ff9b:1:a::/96'`) into
  * the groups and length the classifier needs, or `null` when the option is
@@ -526,9 +529,6 @@ function classifyIpv6(g, nat64) {
  * @param {string | undefined} spec
  * @returns {{ groups: number[], len: number } | null}
  */
-/** The prefix lengths RFC 6052 section 2.2 defines, shortest first. */
-const NAT64_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96];
-
 function parseNat64Prefix(spec) {
 	if (typeof spec !== 'string') return null;
 	const slash = spec.lastIndexOf('/');

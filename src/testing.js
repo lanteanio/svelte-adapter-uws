@@ -705,14 +705,6 @@ export async function createTestServer(options = {}) {
 		stats.bytesOut += payload.length;
 	}
 
-	/**
-	 * Drain one connection's pending sendCoalesced values, as production's
-	 * flushCoalescedFor does: through the outbound chokepoint, stopping on
-	 * backpressure, and with a value JSON cannot carry thrown to the caller
-	 * that set it or, flushed later from a drain, dropped and reported.
-	 * @param {any} ws
-	 * @param {object} [callerEntry]
-	 */
 	const coalescedContinuationsT = new WeakSet();
 
 	/** Report a dropped entry with private identifier fields and bounded application error text. */
@@ -736,6 +728,14 @@ export async function createTestServer(options = {}) {
 			});
 		} catch { /* reporting must not escape drain */ }
 	}
+	/**
+	 * Drain one connection's pending sendCoalesced values, as production's
+	 * flushCoalescedFor does: through the outbound chokepoint, stopping on
+	 * backpressure, and with a value JSON cannot carry thrown to the caller
+	 * that set it or, flushed later from a drain, dropped and reported.
+	 * @param {any} ws
+	 * @param {object} [callerEntry]
+	 */
 	function flushCoalescedForT(ws, callerEntry) {
 		let userData;
 		try { userData = ws.getUserData(); }
@@ -2386,20 +2386,6 @@ export async function createTestServer(options = {}) {
 			return mintTopicEpoch(topic);
 		},
 		/**
-		 * Activate or clear a chaos / fault-injection scenario. See
-		 * `createChaosState` in `src/runtime/utils.js` for the supported shapes.
-		 * Pass `null` to reset; the harness returns to its zero-overhead
-		 * fast paths.
-		 *
-		 * Continuous scenarios (`drop-outbound`, `slow-drain`, `ipc-reorder`)
-		 * are stored on the chaos state and consulted on every outbound
-		 * frame. The `worker-flap` scenario is a one-shot trigger handled
-		 * here directly: it closes every currently-live WS connection with
-		 * the configured code/reason and returns; it does NOT change the
-		 * continuous chaos state, so an active drop-outbound or
-		 * ipc-reorder survives a flap.
-		 */
-		/**
 		 * Live protection posture: `'normal'`, `'elevated'`, or `'siege'`.
 		 * Mirrors the production platform getter; read-only.
 		 */
@@ -2510,6 +2496,20 @@ export async function createTestServer(options = {}) {
 		__setDraining(value) {
 			lifecycleT = value === true ? 'draining' : 'ready';
 		},
+		/**
+		 * Activate or clear a chaos / fault-injection scenario. See
+		 * `createChaosState` in `src/runtime/utils.js` for the supported shapes.
+		 * Pass `null` to reset; the harness returns to its zero-overhead
+		 * fast paths.
+		 *
+		 * Continuous scenarios (`drop-outbound`, `slow-drain`, `ipc-reorder`)
+		 * are stored on the chaos state and consulted on every outbound
+		 * frame. The `worker-flap` scenario is a one-shot trigger handled
+		 * here directly: it closes every currently-live WS connection with
+		 * the configured code/reason and returns; it does NOT change the
+		 * continuous chaos state, so an active drop-outbound or
+		 * ipc-reorder survives a flap.
+		 */
 		__chaos(cfg) {
 			if (cfg && cfg.scenario === 'worker-flap') {
 				const code = typeof cfg.code === 'number' ? cfg.code : 1012;

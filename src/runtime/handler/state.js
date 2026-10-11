@@ -62,26 +62,6 @@ export const maxSeenSeq = new Map();
 export const divergenceDiagnostics = createDivergenceDiagnosticStore();
 
 /**
- * Record an observed `seq` for `topic` into a max-seen map, keeping the highest.
- * Used on the relay RECEIVE path, where frames can arrive out of order across
- * the worker `postMessage` boundary, so the monotone-max guard is required (a
- * blind overwrite could move the value backward and fabricate a divergence). The
- * local publish path already holds the freshly stamped (monotonic) seq and takes
- * `recordStampedSeen` below instead, which skips the compare while the counter
- * is the only authority in the map and keeps the membership report either way.
- * A non-number `seq` (a frame relayed for a `{ seq: false }` topic) is ignored,
- * so such topics never enter the map on any worker.
- *
- * Pure with respect to inputs other than the supplied map (mirrors
- * `nextTopicSeq`), so a unit test can pass a fresh map per case.
- *
- * @param {Map<string, number>} seenMap
- * @param {string} topic
- * @param {number} seq
- * @param {{ onSeenInsert(topic: string): void } | undefined} [bound]
- * @returns {void}
- */
-/**
  * Has this worker ever recorded a seq it did not itself stamp?
  *
  * Latches on the first such record and never clears (outside the reset below,
@@ -104,6 +84,26 @@ export function resetForeignSeqLatch() { foreignSeqRecorded = false; }
 /** Whether the monotone compare is currently armed. Exposed for assertions. */
 export function foreignSeqLatched() { return foreignSeqRecorded; }
 
+/**
+ * Record an observed `seq` for `topic` into a max-seen map, keeping the highest.
+ * Used on the relay RECEIVE path, where frames can arrive out of order across
+ * the worker `postMessage` boundary, so the monotone-max guard is required (a
+ * blind overwrite could move the value backward and fabricate a divergence). The
+ * local publish path already holds the freshly stamped (monotonic) seq and takes
+ * `recordStampedSeen` below instead, which skips the compare while the counter
+ * is the only authority in the map and keeps the membership report either way.
+ * A non-number `seq` (a frame relayed for a `{ seq: false }` topic) is ignored,
+ * so such topics never enter the map on any worker.
+ *
+ * Pure with respect to inputs other than the supplied map (mirrors
+ * `nextTopicSeq`), so a unit test can pass a fresh map per case.
+ *
+ * @param {Map<string, number>} seenMap
+ * @param {string} topic
+ * @param {number} seq
+ * @param {{ onSeenInsert(topic: string): void } | undefined} [bound]
+ * @returns {void}
+ */
 export function recordSeen(seenMap, topic, seq, bound) {
 	if (typeof seq !== 'number') return;
 	// Every caller of this recorder is handling a number some OTHER authority
