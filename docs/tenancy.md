@@ -34,10 +34,10 @@ inside a namespace (a shared allowance must belong to exactly one tenant).
   `svelte-adapter-uws/connection`. It is never derived from the wire.
 - **realtime's `ctx.tenantId`.** `svelte-realtime`'s `realtime({ tenant })`
   resolver applies the same id rule over the same `ws.getUserData()` identity
-  and carries the result on every live-module `ctx`. Per-tenant configuration
-  declared with `live.tenant(id, config)` lives in realtime's tenant-config
-  registry; budget-owning surfaces consume that registry rather than declaring
-  a second per-tenant config carrier.
+  and carries the result on every live-module `ctx`. `live.tenant(id, config)`
+  carries tenant identity, namespace scoping, and application metadata. It
+  rejects quota configuration and does not configure or enforce a per-tenant
+  budget; configure admission in the adapter or application surface that owns it.
 - **The app.** Both resolvers only derive from what the app's `upgrade` /
   authentication path stored. Identity and authorization policy stay
   application-owned; attribution is accounting identity, not access control.
@@ -50,7 +50,7 @@ inside a namespace (a shared allowance must belong to exactly one tenant).
 | Message admission (`websocket.messageAdmission`) | None - scopes are `connection` and `global` (worker) | Adapter: per-connection and per-worker frame rates, byte rates (`perConnectionBytesRate`, `globalBytesRate`), concurrency, queue | Not consumed. The connection itself is the principal; per-tenant budgets belong to the surfaces below |
 | Ratelimit plugin (`plugins/ratelimit`) | Plugin: tenant-scoped bucket keys and tenant-scoped `reset`/`ban`/`unban`/`clear` | Plugin: `budget: 'principal'` (per resolved key, default) or `budget: 'tenant'` (one shared allowance per tenant) | Adapter hook (`tenantId`, read from the slot) when the plugin's `tenant` option is unset; an explicit `tenant` resolver overrides |
 | Extensions Redis limiters (`svelte-adapter-uws-extensions` `redis/ratelimit`) | Extension: NUL-delimited tenant-scoped Redis keys and tenant-scoped admin ops | Extension: per resolved key within the tenant namespace | The app's `tenant` resolver; an app on this adapter passes one that reads `attribution(ws)` so both limiters attribute identically |
-| realtime per-ctx rate limits and guards | realtime: `@t/<id>/` topic namespace, `\0`-delimited keys, `ctx.tenantId` scoping | realtime: per-ctx allowances; per-tenant budget values declared via `live.tenant(id, config)` | realtime's `realtime({ tenant })` resolver over the same server-trusted userData |
+| realtime per-ctx rate limits and guards | realtime: `@t/<id>/` topic namespace, `\0`-delimited keys, `ctx.tenantId` scoping | realtime: per-ctx allowances; `live.tenant` configures no per-tenant budget | realtime's `realtime({ tenant })` resolver over the same server-trusted userData |
 | Publish egress (`websocket.egress`) | None - the adapter parses no topic namespace; the tenant key comes from attribution | Adapter: the LOCAL egress budget - every publish-family fan-out charged once per logical publish, per-window `topic` and `tenant` ceilings enforced pre-hoc on this instance | The sender's adapter-hook `tenantId` on the client-relay game lane; the handler's `egressTenantOf(topic)` export (a pure `topic -> tenantId \| null` resolver - realtime's `@t/` convention plugs in here) for server-side publishes. The ledger keys tenants only: principal budgets are the inbound limiters' job, egress budgets are tenant fair-share |
 | Pressure and backpressure (`websocket.pressure`, `maxBackpressure`) | None - transport-wide worker signals | Adapter: per-connection outbound bounds and worker pressure posture | None. Backpressure is per-socket transport fairness; a tenant-fair send policy is an application decision on top of the signals |
 
