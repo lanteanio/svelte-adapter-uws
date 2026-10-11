@@ -109,6 +109,27 @@ describe('dev-server grant conjunct (src/vite.js)', () => {
 		httpServer = null;
 	});
 
+	it('activates and clears explicit trace contexts without a provider', async () => {
+		const { ws } = await bootDev({}, {});
+		const platform = ws.getUserData()[WS_PLATFORM];
+		const parent = { traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' };
+		expect(platform.trace.enabled).toBe(false);
+		await platform.trace.withContext(parent, async () => {
+			expect(platform.traceContext).toEqual(parent);
+			await platform.trace.withContext(null, async () => {
+				await Promise.resolve();
+				expect(platform.traceContext).toBeNull();
+				expect(platform.trace.current()).toBeNull();
+				platform.trace.run('publish', {}, (span) => {
+					expect(span).toBeNull();
+					expect(platform.trace.inject({})).toEqual({});
+				});
+			});
+			expect(platform.traceContext).toEqual(parent);
+		});
+		expect(platform.traceContext).toBeNull();
+	});
+
 	it('boots the dev WebSocket surface at all', async () => {
 		// Guard for the harness itself: if the plugin stops reaching its open
 		// hook, every assertion below would pass vacuously.

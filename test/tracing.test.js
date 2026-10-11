@@ -15,7 +15,8 @@ const {
 	normalizeTraceContext,
 	runWithTraceContext,
 	traceOperation,
-	tracingEnabled
+	tracingEnabled,
+	trace
 } = await import('../src/runtime/tracing.js');
 
 const PARENT = {
@@ -183,5 +184,62 @@ describe('vendor-neutral tracing provider', () => {
 		})).rejects.toBe(failure);
 		expect(spans[0].errors).toEqual([failure]);
 		expect(spans[0].ended).toBe(1);
+	});
+});
+
+
+describe('explicit trace context boundaries', () => {
+	it('clears inherited context across concurrent async work and restores after failures', async () => {
+		const failure = new Error('boundary failure');
+		await trace.withContext(PARENT, async () => {
+			let release;
+			const barrier = new Promise((resolve) => { release = resolve; });
+			const cleared = trace.withContext(null, async () => {
+				expect(trace.current()).toBeNull();
+				expect(trace.inject({})).toEqual({});
+				await barrier;
+				expect(trace.current()).toBeNull();
+				throw failure;
+			});
+			const rejected = expect(cleared).rejects.toBe(failure);
+			expect(trace.current()).toEqual(PARENT);
+			await trace.withContext(PARENT, async () => {
+				await Promise.resolve();
+				expect(trace.current()).toEqual(PARENT);
+				release();
+			});
+			await rejected;
+			expect(trace.current()).toEqual(PARENT);
+			expect(() => trace.withContext(null, () => { throw failure; })).toThrow(failure);
+			expect(trace.current()).toEqual(PARENT);
+		});
+		expect(trace.current()).toBeNull();
+	});
+
+	it('starts carrier-less producers at a root and preserves carried parents', async () => {
+		await trace.withContext(PARENT, async () => {
+			await trace.withContext(trace.extract({}), async () => {
+				await Promise.resolve();
+				trace.run('bus.publish', { kind: 'producer' }, () => trace.inject({}));
+				expect(spans.at(-1).options.parent).toBeNull();
+				expect(trace.current()).toBeNull();
+				trace.withContext(PARENT, () => trace.run('bus.publish', {}, () => {}));
+				expect(spans.at(-1).options.parent).toEqual(PARENT);
+			});
+			expect(trace.current()).toEqual(PARENT);
+		});
+	});
+
+	it('keeps a null boundary when the provider throws or returns no span', () => {
+		trace.withContext(PARENT, () => {
+			for (const start of [() => { throw new Error('provider unavailable'); }, () => null]) {
+				mocks.provider.startSpan.mockImplementation(start);
+				trace.withContext(null, () => trace.run('bus.publish', {}, () => {
+					expect(trace.current()).toBeNull();
+					expect(trace.inject({})).toEqual({});
+				}));
+				expect(trace.current()).toEqual(PARENT);
+			}
+		});
 	});
 });

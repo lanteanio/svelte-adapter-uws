@@ -139,6 +139,7 @@ export interface TraceSpan {
 export interface TraceProvider {
 	startSpan(name: string, options: Readonly<{
 		kind: 'server' | 'consumer' | 'producer' | 'internal';
+		/** Null starts a root operation; do not inherit the provider's ambient context. */
 		parent: TraceContext | null;
 		attributes: Readonly<Record<string, string | number | boolean>>;
 	}>): TraceSpan | null;

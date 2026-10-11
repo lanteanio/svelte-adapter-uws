@@ -23,6 +23,24 @@ describe('generated tracing runtime', () => {
 		});
 	});
 
+	it('suppresses the generated connection fallback only inside an explicit boundary', async () => {
+		const { platform } = await import('./fixture/build-grant/handler/platform.js');
+		const parent = { traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' };
+		const connection = Object.create(platform);
+		connection.connectionTraceContext = parent;
+		expect(connection.traceContext).toEqual(parent);
+		await connection.trace.withContext(parent, async () => {
+			await connection.trace.withContext(null, async () => {
+				await Promise.resolve();
+				expect(connection.traceContext).toBeNull();
+				expect(connection.trace.current()).toBeNull();
+				expect(connection.trace.inject({})).toEqual({});
+			});
+			expect(connection.traceContext).toEqual(parent);
+		});
+		expect(connection.traceContext).toEqual(parent);
+	});
+
 	it('fails generated-server startup for a configured provider with no startSpan', async () => {
 		expect(buildFixtureOnce('badtracing'), 'badtracing fixture failed to build').toBe(true);
 		const tracingUrl = pathToFileURL(join(fixtureDir, 'build-bad-tracing', 'tracing.js'));

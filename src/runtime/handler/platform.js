@@ -41,7 +41,7 @@ import { runtimeVersionInfo } from '../version-info.js';
 import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
 import { seqBound } from './seq-bound.js';
 import { privateValueMetadata } from '../utils/observability-privacy.js';
-import { activeTraceContext, trace } from '../tracing.js';
+import { resolveTraceContext, trace } from '../tracing.js';
 
 // Lazily-built LRU cache of scoped topic helpers, bound to platform.publish once
 // on first platform.topic() call (platform.publish exists by then). Reuses one
@@ -116,12 +116,12 @@ export const platform = {
 	 * isolated; the per-connection fallback is inherited by Platform clones.
 	 */
 	get traceContext() {
-		return activeTraceContext() ?? this.connectionTraceContext ?? null;
+		return resolveTraceContext(this);
 	},
 
 	// One frozen vendor-neutral tracing surface shared by every Platform clone.
 	// Providers are configured at build time; without one its run() path is a
-	// direct callback and current() remains null.
+	// direct callback; explicit withContext() boundaries still apply.
 	trace,
 
 	// The observer lane's deny-unwind (authorizeDerivedSubscribe) runs the

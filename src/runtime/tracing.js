@@ -24,7 +24,18 @@ export function activeTraceContext() {
 }
 
 /**
- * Run work with a validated W3C context as the active context.
+ * Resolve the connection fallback only outside an explicit context boundary.
+ * @param {{ connectionTraceContext?: { traceparent: string, tracestate?: string } | null }} connection
+ * @returns {{ traceparent: string, tracestate?: string } | null}
+ */
+export function resolveTraceContext(connection) {
+	const context = active.getStore();
+	return context === undefined ? connection.connectionTraceContext ?? null : context;
+}
+
+/**
+ * Run work with a validated W3C context as the active context. Null or invalid
+ * contexts clear inherited context for this callback and its async descendants.
  * @template T
  * @param {unknown} context
  * @param {() => T} fn
@@ -32,7 +43,7 @@ export function activeTraceContext() {
  */
 export function runWithTraceContext(context, fn) {
 	const normalized = normalizeTraceContext(context);
-	return normalized === null ? fn() : active.run(normalized, fn);
+	return active.run(normalized, fn);
 }
 
 function contextFromSpan(span, parent) {

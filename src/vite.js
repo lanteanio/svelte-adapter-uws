@@ -1177,17 +1177,8 @@ export default function uws(options = {}) {
 		},
 		request,
 		get connections() { return connections.size; },
-		/**
-		 * Dev mirror of the production tracing context. The dev server wires
-		 * no tracing provider and keeps no per-connection context, so this is
-		 * the same `null` production answers when tracing is not configured -
-		 * present so `platform.traceContext` reads identically in both modes
-		 * instead of being `undefined` under `vite dev`.
-		 */
-		get traceContext() { return null; },
-		// The frozen vendor-neutral tracing surface. Without a provider its
-		// run() path is a direct callback and current() stays null - the
-		// exact production behavior when `tracing` is unset.
+		// Explicit contexts remain available even without a tracing provider.
+		get traceContext() { return trace.current(); },
 		trace,
 		/**
 		 * Dev mirror of the production divergence-diagnostic lookup. Dev runs

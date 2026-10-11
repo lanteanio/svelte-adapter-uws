@@ -2968,7 +2968,7 @@ adapter({
 ```js
 // src/lib/server/tracing.js - OpenTelemetry API adapter
 import {
-  context,
+  ROOT_CONTEXT,
   propagation,
   trace,
   SpanKind,
@@ -2985,8 +2985,8 @@ const kinds = {
 export const tracing = {
   startSpan(name, { kind, parent, attributes }) {
     const parentContext = parent
-      ? propagation.extract(context.active(), parent)
-      : context.active();
+      ? propagation.extract(ROOT_CONTEXT, parent)
+      : ROOT_CONTEXT;
     return tracer.startSpan(
       name,
       { kind: kinds[kind], attributes },
@@ -3016,6 +3016,15 @@ const headers = new Headers({ "content-type": "application/json" });
 platform.trace.inject(headers);
 await fetch(workerUrl, { method: "POST", headers, body });
 ```
+
+Use `platform.trace.withContext(null, fn)` for carrier-less background work.
+It clears inherited context, including the connection fallback, for the callback
+and its async descendants. A valid context activates that parent instead.
+The caller's context is restored after return, throw, or rejection. This boundary
+also works without a provider and in development and testing. Inside it,
+`current()` and `platform.traceContext` return null until a new context or span is
+activated, and `run()` starts a root operation. Providers must treat a null parent
+as a root, as the OpenTelemetry example above does.
 
 The universal observability entry also exports pure
 `normalizeTraceContext()`, `extractTraceContext()`, and
