@@ -176,7 +176,7 @@ if (is_primary) {
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
 	const onPrimarySignal = (reason) => {
 		if (primary_booted) { graceful_shutdown(reason); return; }
-		if (boot_signal) return;
+		if (boot_signal) { force_shutdown(); return; }
 		boot_signal = reason;
 		// Whatever happens next, this instance is going down: the workers spawned
 		// after this point must not announce it ready on the way out.
@@ -457,6 +457,7 @@ if (is_primary) {
 	};
 
 	let shutting_down = false;
+	let shutdown_exit_code = 0;
 	let listening = false;
 	let listen_socket = null;
 
@@ -1104,7 +1105,7 @@ if (is_primary) {
 			}
 			// If shutting down and all workers have exited, exit immediately
 			if (shutting_down && workers.size === 0) {
-				process.exit(0);
+				process.exit(shutdown_exit_code);
 			}
 		});
 
@@ -1271,9 +1272,24 @@ if (is_primary) {
 		}
 	}
 
+	function force_shutdown() {
+		shutdown_exit_code = 1;
+		shutting_down = true;
+		restartSupervisor.stopAll();
+		closePostureExport();
+		if (listen_socket) {
+			uWS.us_listen_socket_close(listen_socket);
+			listen_socket = null;
+		}
+		// Workers close their own native handles before exiting. The existing
+		// bounded termination fallback still handles an unresponsive worker.
+		for (const [worker] of workers) requestWorkerExit(worker, 1);
+		if (workers.size === 0) process.exit(1);
+	}
+
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
 	async function graceful_shutdown(reason) {
-		if (shutting_down) return;
+		if (shutting_down) { force_shutdown(); return; }
 		shutting_down = true;
 		// A worker still finishing its own boot can report `ready` after this
 		// point; the announcement is withheld from here on for the same reason a
@@ -1492,7 +1508,10 @@ if (is_primary) {
 
 	/** @param {'SIGINT' | 'SIGTERM' | 'shutdown'} reason */
 	async function graceful_shutdown(reason) {
-		if (shutting_down) return;
+		if (shutting_down) {
+			if (reason === 'SIGINT' || reason === 'SIGTERM') exitWorkerClean(1);
+			return;
+		}
 		shutting_down = true;
 		if (isMainThread) {
 			sdNotify.stopping();
@@ -1642,7 +1661,7 @@ if (is_primary) {
 		/** @param {'SIGINT' | 'SIGTERM'} reason */
 		const onSignal = (reason) => {
 			if (booted) { graceful_shutdown(reason); return; }
-			if (boot_signal) return;
+			if (boot_signal) { exitWorkerClean(1); return; }
 			boot_signal = reason;
 			if (beginDrain()) console.log('[svelte-adapter-uws] Readiness now reports NOT ready (draining); still accepting.');
 		};

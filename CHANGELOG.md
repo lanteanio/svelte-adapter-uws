@@ -588,6 +588,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A second stop signal forces shutdown, aborts open requests, and exits with status 1 instead of waiting for unfinished teardown. Cluster workers close their native handles before exiting.
+  - **Affects:** Operators sending repeated SIGTERM or SIGINT signals, including with SHUTDOWN_TIMEOUT=0.
+  - **Action:** Send one signal to allow graceful cleanup; repeat only to force termination.
+  - **Compatibility:** Repeated signals now end the process rather than being ignored.
+
 - **Source comment accuracy and unused projection cleanup.** Redirect encoding
   now cites Location's URI-reference grammar; request-body comments describe
   eager registration and chunk copying; socket-policy JSDoc attaches to its

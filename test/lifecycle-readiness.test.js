@@ -478,7 +478,7 @@ describeUWS('graceful shutdown of the built server', () => {
 			"	});",
 			"}",
 			"if (process.env.PROBE_CLEANUP === 'hang') {",
-			"	process.on('sveltekit:shutdown', () => new Promise(() => {}));",
+			"	process.on('sveltekit:shutdown', () => { console.log('[probe-cleanup] hanging'); return new Promise(() => {}); });",
 			"}",
 			"if (process.env.PROBE_CLEANUP === 'reject') {",
 			"	process.on('sveltekit:shutdown', async () => { throw new Error('cleanup rejected on purpose'); });",
@@ -494,7 +494,7 @@ describeUWS('graceful shutdown of the built server', () => {
 			"		appendFileSync(marker, 'survived:' + reason);",
 			"	});",
 			"}",
-			"process.stdin.on('data', (d) => { if (String(d).includes('shutdown')) process.emit('SIGTERM'); });",
+			"process.stdin.on('data', (d) => { if (String(d).includes('shutdown')) process.emit('SIGTERM'); else if (String(d).includes('interrupt')) process.emit('SIGINT'); });",
 			"process.stdin.unref();",
 			`await import(${JSON.stringify(pathToFileURL(builtEntry).href)});`,
 			''
@@ -523,7 +523,7 @@ describeUWS('graceful shutdown of the built server', () => {
 		const listening = await new Promise((resolve) => {
 			const scan = (buf) => {
 				output.text += buf.toString();
-				if (output.text.includes('Listening on http://')) resolve(true);
+				if (output.text.toLowerCase().includes('listening on http://')) resolve(true);
 			};
 			proc.stdout.on('data', scan);
 			proc.stderr.on('data', scan);
@@ -535,9 +535,9 @@ describeUWS('graceful shutdown of the built server', () => {
 	}
 
 	/** Ask the server to shut down the way an orchestrator does. */
-	function requestShutdown(proc) {
-		if (process.platform === 'win32') proc.stdin.write('shutdown\n');
-		else proc.kill('SIGTERM');
+	function requestShutdown(proc, signal = 'SIGTERM') {
+		if (process.platform === 'win32') proc.stdin.write(signal === 'SIGTERM' ? 'shutdown\n' : 'interrupt\n');
+		else proc.kill(signal);
 	}
 
 	function whenExited(proc, ms) {
@@ -553,6 +553,45 @@ describeUWS('graceful shutdown of the built server', () => {
 			});
 		});
 	}
+
+
+	it.each(['SIGTERM', 'SIGINT'])('a second %s ends an unbounded cleanup with status 1', async signal => {
+		const entry = writeWrapper('entry-second-' + signal + '.mjs');
+		const { proc, output } = await startServer(entry, { PROBE_CLEANUP: 'hang', SHUTDOWN_TIMEOUT: '0' });
+		requestShutdown(proc, signal === 'SIGTERM' ? 'SIGINT' : 'SIGTERM');
+		await expect.poll(() => output.text, { timeout: 10000 }).toContain('[probe-cleanup] hanging');
+		const exited = whenExited(proc, 5000);
+		requestShutdown(proc, signal);
+		expect(await exited, output.text).toBe(1);
+	}, 30000);
+
+	it.each([false, true])('a second signal aborts open requests during the delay (cluster=%s)', async cluster => {
+		const entry = writeWrapper('entry-second-delay-' + cluster + '.mjs');
+		const env = { SHUTDOWN_TIMEOUT: '0', SHUTDOWN_DELAY_MS: '30000',
+			...(cluster ? { CLUSTER_WORKERS: '2', CLUSTER_MODE: 'acceptor' } : {}) };
+		const { proc, port, output } = await startServer(entry, env);
+		await expect.poll(async () => (await httpGet(port, '/readyz')).status, { timeout: 10000 }).toBe(200);
+		const held = httpGet(port, '/slow-hold?ms=30000').then(() => 'answered', () => 'reset');
+		await expect.poll(() => output.text, { timeout: 10000 }).toContain('[slow-hold] holding');
+		requestShutdown(proc);
+		await expect.poll(() => output.text, { timeout: 10000 }).toContain('Waiting 30000ms');
+		const exited = whenExited(proc, 5000);
+		requestShutdown(proc, 'SIGINT');
+		expect(await exited, output.text).toBe(1);
+		expect(await held).toBe('reset');
+		expect(output.text).toContain('[slow-hold] signal aborted: The server shut down before the request finished');
+	}, 40000);
+
+	it('a second signal ends shutdown latched during a slow init', async () => {
+		const entry = writeWrapper('entry-second-init.mjs');
+		const { proc, output } = await startServer(entry, { SLOW_INIT_MS: '30000', SHUTDOWN_TIMEOUT: '0' });
+		requestShutdown(proc);
+		await expect.poll(() => output.text, { timeout: 10000 }).toContain('NOT ready (draining)');
+		const exited = whenExited(proc, 5000);
+		requestShutdown(proc, 'SIGINT');
+		expect(await exited, output.text).toBe(1);
+		expect(output.text).not.toContain('Ready for traffic');
+	}, 30000);
 
 	it('reports NOT ready for the whole load-balancer drain delay while it keeps serving', async () => {
 		const entry = writeWrapper('entry-delay.mjs');
