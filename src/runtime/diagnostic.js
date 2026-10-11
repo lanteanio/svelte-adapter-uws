@@ -235,6 +235,8 @@ export function emitOperationalEvent(input) {
 }
 
 const LEGACY_PREFIXES = new Map([
+	['svelte-adapter-bunserve', ['svelte-adapter-bunserve', 'runtime.adapter', 'diagnostic.legacy', 'warn']],
+	['adapter-bunserve', ['svelte-adapter-bunserve', 'runtime.adapter', 'diagnostic.legacy', 'warn']],
 	['svelte-adapter-uws', ['svelte-adapter-uws', 'runtime.adapter', 'diagnostic.legacy', 'warn']],
 	['adapter-uws', ['svelte-adapter-uws', 'runtime.adapter', 'diagnostic.legacy', 'warn']],
 	['adapter-uws/assert', ['svelte-adapter-uws', 'runtime.assertion', 'invariant.violated', 'warn']],
@@ -298,6 +300,10 @@ function legacyRecord(line, defaultSeverity) {
 	if (!fields && match[1].startsWith('svelte-adapter-uws/')) {
 		const component = match[1].slice('svelte-adapter-uws/'.length);
 		if (isDiagnosticDotName(component)) fields = ['svelte-adapter-uws', component, 'diagnostic.legacy', defaultSeverity];
+	}
+	if (!fields && match[1].startsWith('svelte-adapter-bunserve/')) {
+		const component = match[1].slice('svelte-adapter-bunserve/'.length);
+		if (isDiagnosticDotName(component)) fields = ['svelte-adapter-bunserve', component, 'diagnostic.legacy', defaultSeverity];
 	}
 	if (!fields && /^worker \d+$/.test(match[1])) {
 		fields = ['svelte-adapter-uws', 'runtime.worker', 'diagnostic.legacy', defaultSeverity];

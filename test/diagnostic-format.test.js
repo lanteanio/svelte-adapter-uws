@@ -140,6 +140,25 @@ describe('cross-package diagnostic contract', () => {
 		expect(parseDiagnostic(line)).toMatchObject({ format: 'legacy', record: { source, component } });
 	});
 
+	it.each([
+		['svelte-adapter-bunserve', 'runtime.adapter', 'warn'],
+		['adapter-bunserve', 'runtime.adapter', 'warn'],
+		['svelte-adapter-bunserve/runtime.worker', 'runtime.worker', 'error']
+	])('attributes the Bun adapter legacy prefix %s', (prefix, component, severity) => {
+		expect(parseDiagnostic(`[${prefix}] listener failed`, { defaultSeverity: 'error' })).toMatchObject({
+			format: 'legacy', record: {
+				source: 'svelte-adapter-bunserve', component, severity,
+				event: 'diagnostic.legacy', message: 'listener failed', attributes: { legacyPrefix: prefix }
+			}
+		});
+	});
+
+	it.each(['', 'runtime..worker', 'runtime/worker', 'runtime worker'])(
+		'rejects an invalid Bun legacy component %s', (component) => {
+			expect(parseDiagnostic(`[svelte-adapter-bunserve/${component}] listener failed`)).toBeNull();
+		}
+	);
+
 	it('rejects unknown and prefix/record disagreement', () => {
 		expect(parseDiagnostic('[other] nope')).toBeNull();
 		const line = formatDiagnostic({
