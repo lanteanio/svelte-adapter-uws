@@ -870,6 +870,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retire wire topic IDs when their announcement is refused, so another codec on the same connection announces a fresh ID before sending binary. The testing server follows the same rule.
+
 - `platform.trace.withContext(null, fn)` clears inherited trace context across async work and suppresses the connection fallback. Development and testing expose the same context boundary.
 
 - File-descriptor verification boots the generated server and checks low-limit warnings, exported gauges, and platform-specific metric availability.

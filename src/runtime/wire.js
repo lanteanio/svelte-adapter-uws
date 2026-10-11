@@ -302,6 +302,18 @@ export function allocWireId(ud, slotKey, topic) {
 }
 
 /**
+ * Retire an unannounced topic mapping without reusing its numeric id.
+ * The table is shared by every codec capability on the connection, so another
+ * capability must allocate and announce a fresh id before sending binary.
+ * @param {any} ud
+ * @param {symbol} slotKey
+ * @param {string} topic
+ */
+export function retireWireId(ud, slotKey, topic) {
+	ud[slotKey]?.byName.delete(topic);
+}
+
+/**
  * Build the `{type:'wire-id'}` control frame announcing which numeric topic-id
  * maps to which topic name, so an inbound `0x03` frame resolves to a topic.
  * @param {string} topic

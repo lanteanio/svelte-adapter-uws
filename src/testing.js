@@ -8,7 +8,7 @@ import { stampSeq, resolveEntrySeq, resolveSendSeq, assertStampableSeq, throwInv
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { createByteBudget, controlFrameBytes, MAX_CONTROL_EGRESS_BYTES, CONTROL_EGRESS_WINDOW_MS, CONTROL_FLOOD_CLOSE_CODE } from './runtime/utils/byte-budget.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { buildBinaryFrame, allocWireId, retireWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { FORBIDDEN_METHODS, send405, endText, endBodyless, sendHandshakeRefusal, assertResponseStatus } from './runtime/handler/http-helpers.js';
 import { webSocketHandshakeRefusal, isWebSocketUpgradeAttempt, readUwsHandshake } from './runtime/utils/ws-handshake.js';
@@ -911,7 +911,10 @@ export async function createTestServer(options = {}) {
 			// budget like every other one - and a connection the budget cut is a
 			// dropped announce too (sendControlT answers 2 for both).
 			const result = sendControlT(ws, wireIdAnnounce(topic, id));
-			if (result === 2) return -1;
+			if (result === 2) {
+				retireWireId(ud, WS_TOPIC_IDS, topic);
+				return -1;
+			}
 		}
 		return id;
 	}

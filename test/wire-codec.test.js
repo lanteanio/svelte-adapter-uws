@@ -9,6 +9,7 @@ import {
 	buildBinaryFrame,
 	parseBinaryFrame,
 	allocWireId,
+	retireWireId,
 	wireIdAnnounce,
 	createCapCounts,
 	WIRE_BINARY_TAG
@@ -97,6 +98,21 @@ describe('wire id + cap-count helpers', () => {
 		expect(allocWireId(ud, SLOT, 'a')).toEqual({ id: 1, isNew: true });
 		expect(allocWireId(ud, SLOT, 'b')).toEqual({ id: 2, isNew: true });
 		expect(allocWireId(ud, SLOT, 'a')).toEqual({ id: 1, isNew: false });
+	});
+
+	it('retired ids are never reused and leave other topics and connections alone', () => {
+		const slot = Symbol('topic-ids');
+		const first = {};
+		const second = {};
+		retireWireId(first, slot, 'a');
+		expect(allocWireId(first, slot, 'a').id).toBe(1);
+		expect(allocWireId(first, slot, 'b').id).toBe(2);
+		expect(allocWireId(second, slot, 'a').id).toBe(1);
+		retireWireId(first, slot, 'a');
+		retireWireId(first, slot, 'a');
+		expect(allocWireId(first, slot, 'a')).toEqual({ id: 3, isNew: true });
+		expect(allocWireId(first, slot, 'b')).toEqual({ id: 2, isNew: false });
+		expect(allocWireId(second, slot, 'a')).toEqual({ id: 1, isNew: false });
 	});
 
 	it('wireIdAnnounce builds a parseable control frame', () => {

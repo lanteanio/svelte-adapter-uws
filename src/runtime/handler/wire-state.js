@@ -1,5 +1,5 @@
 import { WS_TOPIC_IDS, WS_WIRE_STATE } from '../utils.js';
-import { allocWireId, wireIdAnnounce } from '../wire.js';
+import { allocWireId, retireWireId, wireIdAnnounce } from '../wire.js';
 import { wsDebug } from './config.js';
 import { sendControl, CONTROL_DELIVERED } from './control-egress.js';
 
@@ -18,8 +18,8 @@ import { sendControl, CONTROL_DELIVERED } from './control-egress.js';
  *
  * Returns -1 when the announce did not reach the socket - refused past the
  * backpressure limit, or the connection gone or just cut: the client never
- * learns the mapping, and the mapping is never re-announced, so every later
- * binary frame for this topic would be undecodable on this connection. Callers
+ * learns the mapping. Retiring it lets another capability announce a fresh id
+ * before sending binary on the same topic. Callers
  * must send the JSON envelope for the current frame and poison the capability
  * (see poisonWireState). A frame queued behind backpressure still delivers in
  * order and is success here.
@@ -30,7 +30,10 @@ import { sendControl, CONTROL_DELIVERED } from './control-egress.js';
  */
 export function ensureWireId(ws, ud, topic) {
 	const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
-	if (isNew && sendControl(ws, wireIdAnnounce(topic, id)) !== CONTROL_DELIVERED) return -1;
+	if (isNew && sendControl(ws, wireIdAnnounce(topic, id)) !== CONTROL_DELIVERED) {
+		retireWireId(ud, WS_TOPIC_IDS, topic);
+		return -1;
+	}
 	return id;
 }
 

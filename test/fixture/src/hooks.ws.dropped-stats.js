@@ -71,7 +71,8 @@ export async function message(ws, { data, platform }) {
 		} catch (cause) { error = String(cause); }
 		finally { target.send = nativeSend; }
 		reply(msg.type === 'warm' ? 'warmed' : 'exercised', { before, sends, error });
-	} else if (msg.type === 'report') reply('reported', { stats: closed.get(msg.id) });
+	} else if (msg.type === 'buffered') reply('buffered', { bytes: targets.get(msg.id).getBufferedAmount() });
+	else if (msg.type === 'report') reply('reported', { stats: closed.get(msg.id) });
 }
 export function close(ws, ctx) {
 	const id = ws.getUserData().droppedProbe;
