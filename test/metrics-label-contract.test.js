@@ -19,7 +19,7 @@
 // mode itself is exercised.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
@@ -259,6 +259,18 @@ const FILES = [
 const FACTORY_METHODS = new Set(['counter', 'gauge', 'histogram']);
 const EMIT_METHODS = new Set(['inc', 'dec', 'set', 'observe']);
 
+// These modules receive instruments across a module boundary. Their emitted
+// labels are exercised by transport-metric-labels and metrics-registry tests.
+const DRIVEN_FILES = [
+	'src/runtime/transport-metrics.js',
+	'src/runtime/utils/os-pressure.js',
+	'src/runtime/leak-probes.js',
+	'src/runtime/utils/metrics.js'
+];
+const NON_METRIC_CALLS = JSON.parse(readFileSync(
+	path.join(ROOT, 'test/fixtures/non-metric-method-calls.json'), 'utf8'
+));
+
 /** Flatten an acorn tree into an array of nodes (same idiom as the option contract). */
 function nodes(root) {
 	const out = [];
@@ -418,6 +430,43 @@ function scan(file) {
 }
 
 describe('metrics label contract', () => {
+	it('every source module emitting instrument methods has label coverage', () => {
+		const uncovered = [];
+		for (const relative of readdirSync(path.join(ROOT, 'src'), { recursive: true })) {
+			if (!relative.endsWith('.js')) continue;
+			const file = `src/${relative.replaceAll('\\', '/')}`;
+			if (FILES.includes(file) || DRIVEN_FILES.includes(file)) continue;
+			const source = readFileSync(path.join(ROOT, file), 'utf8');
+			for (const node of nodes(parse(source, { ecmaVersion: 'latest', sourceType: 'module' }))) {
+				if (node.type !== 'CallExpression') continue;
+				const callee = node.callee;
+				if (callee.type !== 'MemberExpression') continue;
+				const method = callee.computed ? callee.property.value : callee.property.name;
+				if (!EMIT_METHODS.has(method)) continue;
+				const receiver = source.slice(callee.object.start, callee.object.end);
+				const key = `${receiver}.${method}`;
+				if (!NON_METRIC_CALLS[file]?.includes(key)) uncovered.push(`${file}: ${key}`);
+			}
+		}
+		expect(uncovered, 'Instrument emitters need static or driven label coverage; non-metric methods need an explicit receiver exemption').toEqual([]);
+	});
+
+	it('production resource probe names exactly match the resource label domain', () => {
+		const source = readFileSync(path.join(ROOT, 'src/runtime/handler.js'), 'utf8');
+		const calls = nodes(parse(source, { ecmaVersion: 'latest', sourceType: 'module' }))
+			.filter(node => node.type === 'CallExpression' && node.callee.name === 'structuralResourceProbes');
+		expect(calls).toHaveLength(1);
+		const argument = calls[0].arguments[0];
+		expect(argument.type).toBe('ObjectExpression');
+		const keys = argument.properties.map(property => {
+			expect(property.type).toBe('Property');
+			expect(property.computed).toBe(false);
+			return property.key.name ?? property.key.value;
+		});
+		const signal = SIGNALS.find(signal => signal.name === 'framework_resource_growth_suspected_total');
+		expect(keys.sort()).toEqual([...signal.labelDomains.resource.values].sort());
+	});
+
 	const scanned = FILES.map(scan);
 	const registrations = new Map();
 	const emits = [];

@@ -870,6 +870,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Metric-label checks cover resource-growth probe names and detect instrument emitters in previously untested modules.
+
 - Runtime proxy warnings name the configured environment prefix in their explanations and suggested address, hop-depth, and trusted-proxy settings.
 
 - **Documentation and contract checks match the shipped runtime.** Client reconnect defaults and authentication retry outcomes match the implementation; cache descriptions identify insertion-order eviction; sequence tests explain the current arity contract; strict TypeScript consumers pin readonly numeric assertion maps; metric-label checks drive actual instrumented terminal paths; release instructions separate the frozen source from subsequent ledger bookkeeping and merge stable hotfixes before tagging.

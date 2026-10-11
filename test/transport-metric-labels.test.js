@@ -5,6 +5,7 @@ import { createTransportMetricHooks } from '../src/runtime/transport-metrics.js'
 import { computePressureReason, applyCapacityReason } from '../src/runtime/utils/pressure.js';
 import { emitPressureMetricTelemetry } from '../src/runtime/utils/os-pressure.js';
 import { SIGNALS_BY_NAME } from '../src/runtime/observability-manifest.js';
+import { structuralResourceProbes, createResourceGrowthAuditor } from '../src/runtime/leak-probes.js';
 
 function instrument(name, recorded) {
 	const calls = [];
@@ -37,6 +38,22 @@ function response() {
 		close() {}, upgrade() {}, onAborted(callback) { this.abort = callback; }
 	};
 }
+
+describe('resource growth labels from the auditor', () => {
+	it('emits each declared resource name without changing the label key or value', () => {
+		const recorded = new Map();
+		let size = 0;
+		const names = SIGNALS_BY_NAME.get('framework_resource_growth_suspected_total').labelDomains.resource.values;
+		const sources = Object.fromEntries(names.map(name => [name, () => size]));
+		const auditor = createResourceGrowthAuditor({
+			probes: structuralResourceProbes(sources),
+			metrics: instrument('framework_resource_growth_suspected_total', recorded),
+			window: 20
+		});
+		for (let tick = 0; tick < 20; tick++) { size += 100; auditor.runOnce(); }
+		assertManifestCoverage(recorded);
+	});
+});
 
 const terminal = {
 	body: reply => reply.writeStatus('200 OK').end(),
