@@ -13,7 +13,11 @@ publication that created no tag at publication time is also recorded as
 afterwards is exactly what the rollback procedure forbids. The
 published-releases table carries one row per version the npm registry has ever
 accepted, each with its registry `gitHead`, integrity, shasum and publication
-instant, so no gate needs the network to resolve a published identity.
+instant. `published-releases.v1.json` pins the digest of each complete identity
+row after comparison with public npm metadata. The ledger gate checks those
+pins offline; record a new pin only after exact-version registry verification,
+never regenerate existing pins merely to make an edited row pass. Notes are
+not part of the identity digest.
 
 ## Candidate event log
 
@@ -137,7 +141,7 @@ identity cannot open a second quarantine transaction.
 | svelte-adapter-uws | 0.5.6         | latest         | fb236f84e7f2969e1f5e42591f7c1a7c321734e1 | legacy-none | sha512-xsShvml+n1KPB1WFWW4Z3sdTShkss6r6HKtE7jCwGKiDJPT5ZvlYVbMVwhY8q/ksuDZYDgmecv8ZCWmlN0gv9g== | 4eee4f92711c468c0148063dd1bd15160fb5f0dc | 2026-05-22T22:30:41.664Z | Historical row reconstructed from npm on 2026-08-16.    |
 | svelte-adapter-uws | 0.5.7         | latest         | dc763d863d1ae60b4d741573e42969d36c3ed664 | legacy-none | sha512-JgIUv7YjDTyq6dA3++zONxhTn+kTmgUb7jDsNctZCzqKOIPneNRUlOEz1P7gWIyrI2/K9XT0DghAVCn3LKhwDA== | 3819f05595ef04963a0574e6185c4f8e97960f88 | 2026-05-23T00:17:46.726Z | Historical row reconstructed from npm on 2026-08-16.    |
 | svelte-adapter-uws | 0.5.8         | latest         | d34d72a5fa7e64b4df36eee5db8d31844086533d | legacy-none | sha512-XG1DLduJDO+p6cK49NFd0ItJTuRXRVXhtukBNGS3ikW7NwUV2OIF+qhG0piNBP+vAVyvMfLvWM7sPVttFfBMjg== | d1362cadfee549cf2b031ce907d33ccdb8753e37 | 2026-05-23T00:42:45.631Z | Initial stable rollback row reconstructed from npm.     |
-| svelte-adapter-uws | 0.5.9         | latest         | e4e3d4b7aea7dca62d6e3a88b0e8dc32154183db | legacy-none | sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw== | b65c19239f3617da429382b1f1d83102b89847b5 | 2026-10-02T19:34:04.057Z | Published to latest from the 0.5 line. npm recorded no gitHead; a repack of this head is byte-identical. |
+| svelte-adapter-uws | 0.5.9         | latest         | e4e3d4b7aea7dca62d6e3a88b0e8dc32154183db | legacy-none | sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw== | b65c19239f3617da429382b1f1d83102b89847b5 | 2026-10-02T19:34:04.057Z | Published to latest from the 0.5 line. npm recorded no gitHead; a repack of this head with CRLF checkout bytes is byte-identical; an LF checkout produces a different archive. |
 | svelte-adapter-uws | 0.6.0-next.1  | next           | 6f5e3504f4f62f6aceb7ba0e675149df414cbb47 | legacy-none | sha512-pXyPxUMcaIZCWKb7rLtz01sKUMLA813RooJ4BCAomjNleMFHQstG38gojEo6paauLwLUXO9go5RZnWwn6rm2lg== | 0274a27d10068e342f4ed3cf1423ee35f7d4813d | 2026-05-29T15:33:54.820Z | Historical row reconstructed from npm on 2026-08-16.    |
 | svelte-adapter-uws | 0.6.0-next.2  | next           | 10959b6a0605facbf001591c725875d5ff760243 | legacy-none | sha512-hdimtI+CepnpmsKC7U9HewKLcZu/68yC91ywvJNkQmGoPkdxyWWdSFPY1mY0HDktNE4ea/GwOhNUWEr83X6MWg== | 359f7b9bd31204408d5a5fe8dced21178869fc22 | 2026-05-29T17:32:32.226Z | Historical row reconstructed from npm on 2026-08-16.    |
 | svelte-adapter-uws | 0.6.0-next.4  | next           | bde1065c1671a2137d4918cb910927c12321bba6 | legacy-none | sha512-fyVwVAz2pLmBMcuTvtluQoP4kXK0PYW6zg4OzbsHYc994nqXNIMCihgTnqeuNombIEpWoDqoQzboSgOsYnRXlg== | 89238ca09051ed0fde41f35d3795da542da72d9f | 2026-05-29T20:47:54.136Z | Historical row reconstructed from npm on 2026-08-16.    |
@@ -231,6 +235,7 @@ identity cannot open a second quarantine transaction.
 | svelte-adapter-uws | 0.6.0-next.93 | next           | 56e681ddc50ffe64f7f1717e895f77d370cb8e1c | legacy-none | sha512-1wa5jXLxSWkta80xI4QyNJxLy42dMbzDNecEyuVnlpVSYI3fHQgt5KTCampzvv3uq90RgZpzMoxfpFN4yYQtcQ== | 87ee2d7c58d5498e4175d446ca0d65de63463739 | 2026-08-25T21:04:18.463Z | Row recorded from exact-version npm metadata on 2026-08-25; published directly, no candidate lifecycle ran, and the registry gitHead matches the pushed head. |
 | svelte-adapter-uws | 0.6.0-next.94 | next           | ef70653c13cb7ea1b59a0e55e9ac9c58f86d4801 | legacy-none | sha512-fO53wPNzhF91fq74wcmcXsgZrYJJ9+v4yfm6R7OL4aA5wCztoyOHo5mDOefAAYu3g/Azd8FkHOUfF52zOfR0gA== | b765349886c81694a46e3f298206a30f2d2beed8 | 2026-08-26T00:20:32.109Z | Row recorded from exact-version npm metadata on 2026-08-26; published directly, no candidate lifecycle ran, and the registry gitHead matches the pushed head. |
 | svelte-adapter-uws | 0.6.0-next.95 | next           | 6bbf2b32ac3eebe510ba4981c252b82e7e54234a | legacy-none | sha512-/7p6lNlG3+0sJkMNWSdah6HUUwTN8jzVXJPCkzPHKVK8OPIVwz1JnMaUprz43BZkg3Mn4EhMWXPpL4jxnbSApg== | bb89b304a3380af9b39f509656722dfbaa3d2ea9 | 2026-09-23T19:22:10.954Z | Row recorded from exact-version npm metadata on 2026-09-23; published directly, no candidate lifecycle ran, and the registry gitHead matches the pushed head. |
+| svelte-adapter-uws | 0.5.10 | latest | 7450a8ee19d60168ad7ac28f79bcf15fb47f837c | legacy-none | sha512-v1wR2uwNcGJvrqZv0yl/fSgst8yGLGBfBkWOdIJWpqaHY+97/OGBZsdeGSWjKpY1O1CE3EixWH06zjIjsGVmcw== | b4f711f3f2c33f76abddd4037e6d1254e6575477 | 2026-10-09T19:15:32.275Z | Published directly from the stable source worktree; npm recorded no gitHead and no version tag was created. |
 
 ## Routing, corrections and rollback events
 

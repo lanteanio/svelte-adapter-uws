@@ -19,6 +19,23 @@ const failures = (manifestSource, changelogSource) => {
 };
 
 describe('release ledger reconciliation', () => {
+	it('binds every immutable identity field and rejects a removed historical row', () => {
+		const row = manifestReleases(manifest).find(row => row.Version === '0.5.9');
+		for (const field of ['npm integrity', 'npm shasum', 'Published UTC', 'Git head', 'Git tag', 'Target channel']) {
+			const line = manifest.split('\n').find(line => line.startsWith('| svelte-adapter-uws | 0.5.9 '));
+			const value = row[field];
+			const replacement = field === 'npm integrity' ? 'sha512-' + 'A'.repeat(86) + '=='
+				: field === 'Published UTC' ? '2026-10-02T19:34:04.058Z'
+				: field === 'Git tag' ? 'svelte-adapter-uws@0.5.9'
+				: field === 'Target channel' ? 'next' : 'a'.repeat(40);
+			const mutant = manifest.replace(line, line.replace(value, replacement));
+			expect(mutant).not.toBe(manifest);
+			expect(failures(mutant, changelog).join('\n'), field).toContain('published identity differs from verified pin');
+		}
+		const without = manifest.split('\n').filter(line => !line.startsWith('| svelte-adapter-uws | 0.1.0 ')).join('\n');
+		expect(failures(without, changelog).join('\n')).toContain('verified published identity is missing from manifest: 0.1.0');
+	});
+
 	it('reconciles the shipped manifest and changelog without the network', () => {
 		expect(failures(manifest, changelog)).toEqual([]);
 		const result = validateReleaseLedger(manifest, changelog, currentVersion);

@@ -1,9 +1,16 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { lte as semverLte, valid as validSemver } from 'semver';
 
 const ROOT = new URL('../', import.meta.url);
 const PACKAGE_NAME = 'svelte-adapter-uws';
+const PUBLISHED_PINS = JSON.parse(readFileSync(new URL('docs/published-releases.v1.json', ROOT), 'utf8'));
+const IDENTITY_FIELDS = ['Package', 'Version', 'Target channel', 'Git head', 'Git tag', 'npm integrity', 'npm shasum', 'Published UTC'];
+
+export function publishedIdentityDigest(row) {
+	return createHash('sha256').update(JSON.stringify(IDENTITY_FIELDS.map(field => row[field]))).digest('hex');
+}
 
 // The one accepted spelling of "this heading's version was never accepted by
 // the registry". It sits on the first body line under the heading.
@@ -93,6 +100,7 @@ export function validateReleaseLedger(manifest, changelog, currentVersion) {
 	}
 	const { headings, archiveVersion } = parsed;
 
+	if (PUBLISHED_PINS.schemaVersion !== 1) errors.push('unsupported published identity pin schema');
 	const publishedVersions = new Set();
 	for (const row of rows) {
 		const label = row.Package + '@' + row.Version;
@@ -109,8 +117,11 @@ export function validateReleaseLedger(manifest, changelog, currentVersion) {
 			continue;
 		}
 		publishedVersions.add(row.Version);
+		if (PUBLISHED_PINS.identities[row.Version] !== publishedIdentityDigest(row)) {
+			errors.push('published identity differs from verified pin: ' + label);
+		}
 		const published = row['Published UTC'] ?? '';
-		if (!CANONICAL_UTC.test(published) || new Date(published).toISOString() !== published) {
+		if (!CANONICAL_UTC.test(published) || !Number.isFinite(Date.parse(published)) || new Date(published).toISOString() !== published) {
 			errors.push('manifest row has a non-canonical Published UTC: ' + label);
 		}
 		if (!INTEGRITY.test(row['npm integrity'] ?? '')) {
@@ -119,6 +130,10 @@ export function validateReleaseLedger(manifest, changelog, currentVersion) {
 		if (!SHASUM.test(row['npm shasum'] ?? '')) {
 			errors.push('manifest row has a missing or malformed npm shasum: ' + label);
 		}
+	}
+
+	for (const version of Object.keys(PUBLISHED_PINS.identities)) {
+		if (!publishedVersions.has(version)) errors.push('verified published identity is missing from manifest: ' + version);
 	}
 
 	const headingByVersion = new Map();
