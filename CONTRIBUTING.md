@@ -700,3 +700,10 @@ with a test, a pull request is fine on its own. In the description, say:
 For a security-sensitive report, follow [`SECURITY.md`](SECURITY.md) and use
 the private advisory form it names. Do not open a public issue with the
 vulnerability details, exploit, secrets, or affected deployment data.
+
+README size changes are checked against committed manifest history. Ordinary
+`node scripts/check-documentation-contract.js --write` tightens the limit to
+the generated file size. An intentional increase requires `--write
+--accept-readme-growth`, which appends the old and new limits to the manifest.
+Commit that record with the increased content; an unrecorded increase remains
+an error after later unrelated commits. These checks require full Git history.

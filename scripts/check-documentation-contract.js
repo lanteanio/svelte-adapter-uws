@@ -4,15 +4,13 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
+import { readReadmeBaselines, resizeReadmeManifest, validateGrowthRecords, validateReadmeGrowth } from './readme-ratchet.js';
 import { uwsRefFromSpec } from './check-compatibility.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const manifestPath = join(root, 'docs', 'documentation.v1.json');
-const readmePath = join(root, 'README.md');
-const packagePath = join(root, 'package.json');
 export const PATHS_START = '<!-- documentation-paths:start -->';
 export const PATHS_END = '<!-- documentation-paths:end -->';
-const ROOT_FIELDS = ['schemaVersion', 'owner', 'compatibilitySource', 'entryBudgetLines', 'readmeMaxLines', 'paths'];
+const ROOT_FIELDS = ['schemaVersion', 'owner', 'compatibilitySource', 'entryBudgetLines', 'readmeMaxLines', 'readmeGrowth', 'paths'];
 const PATH_FIELDS = ['key', 'type', 'need', 'label', 'destination', 'owner'];
 const PATH_KEYS = ['identity', 'first-success', 'compatibility', 'tutorial', 'how-to', 'reference', 'explanation', 'operations'];
 const PATH_TYPES = ['Identity', 'First success', 'Compatibility', 'Tutorial', 'How-to', 'Reference', 'Explanation', 'Operations'];
@@ -34,6 +32,7 @@ function printable(value) {
 export function validateManifest(manifest, pkg, compatibilityExists = true) {
 	const errors = exactFields(manifest, ROOT_FIELDS, 'documentation manifest');
 	if (errors.length) return errors;
+	errors.push(...validateGrowthRecords(manifest));
 	if (manifest.schemaVersion !== 1) errors.push('schemaVersion must be 1');
 	if (manifest.owner !== pkg.name) errors.push('owner must match package.json name');
 	if (manifest.compatibilitySource !== 'docs/compatibility.v1.csv') errors.push('compatibilitySource must name docs/compatibility.v1.csv');
@@ -202,24 +201,37 @@ export function validateDocumentationContract({ manifest, readme, pkg, compatibi
 	return [...validateManifest(manifest, pkg, compatibilityExists), ...validateReadme(readme, manifest, governedNativeRefs(pkg, compatibilityCsv)), ...validatePackageScripts(pkg)];
 }
 
-function main() {
-	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-	const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
-	if (process.argv.includes('--write')) writeFileSync(readmePath, replacePaths(readFileSync(readmePath, 'utf8'), renderPaths(manifest)));
-	const compatibilityPath = join(root, String(manifest.compatibilitySource || ''));
+export function main({ directory = root, write = false, acceptReadmeGrowth = false, log = console.log } = {}) {
+	if (acceptReadmeGrowth && !write) throw new Error('--accept-readme-growth requires --write');
+	const manifestFile = join(directory, 'docs/documentation.v1.json');
+	const readmeFile = join(directory, 'README.md');
+	let manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+	const pkg = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+	const { head, history } = readReadmeBaselines(directory);
+	let readme = readFileSync(readmeFile, 'utf8').replace(/\r\n/g, '\n');
+	if (write) {
+		readme = replacePaths(readme, renderPaths(manifest));
+		manifest = resizeReadmeManifest(manifest, head, readme.split('\n').length, acceptReadmeGrowth);
+	}
+	const compatibilityPath = join(directory, String(manifest.compatibilitySource || ''));
 	const compatibilityExists = existsSync(compatibilityPath);
-	const readme = readFileSync(readmePath, 'utf8');
 	const errors = validateDocumentationContract({ manifest, readme, pkg, compatibilityExists, compatibilityCsv: compatibilityExists ? readFileSync(compatibilityPath, 'utf8') : '' });
-	if (errors.length) {
-		console.error('check-documentation-contract FAILED');
-		for (const error of errors) console.error('  - ' + error);
-		process.exitCode = 1;
-		return;
+	errors.push(...validateReadmeGrowth(manifest, head));
+	for (let index = 0; index + 1 < history.length; index++) {
+		if (Object.hasOwn(history[index + 1], 'readmeGrowth')) errors.push(...validateReadmeGrowth(history[index], history[index + 1]));
+	}
+	if (errors.length) throw new Error(errors.join('\n'));
+	if (write) {
+		writeFileSync(readmeFile, readme);
+		writeFileSync(manifestFile, JSON.stringify(manifest, null, '\t') + '\n');
 	}
 	const local = manifest.paths.filter((path) => path.owner === 'README.md').length;
-	const endLine = readme.slice(0, readme.indexOf(PATHS_END) + PATHS_END.length).split(/\r?\n/).length;
-	const readmeLines = readme.split(/\r?\n/).length;
-	console.log('check-documentation-contract: ' + manifest.paths.length + ' reader paths, ' + local + ' package-owned and ' + (manifest.paths.length - local) + ' site-owned; paths block ends on line ' + endLine + ' of its ' + manifest.entryBudgetLines + '-line entry budget; README.md is ' + readmeLines + ' of at most ' + manifest.readmeMaxLines + ' ratcheted lines');
+	const endLine = readme.slice(0, readme.indexOf(PATHS_END) + PATHS_END.length).split('\n').length;
+	const readmeLines = readme.split('\n').length;
+	log('check-documentation-contract: ' + manifest.paths.length + ' reader paths, ' + local + ' package-owned and ' + (manifest.paths.length - local) + ' site-owned; paths block ends on line ' + endLine + ' of its ' + manifest.entryBudgetLines + '-line entry budget; README.md is ' + readmeLines + ' of at most ' + manifest.readmeMaxLines + ' ratcheted lines');
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	try { main({ write: process.argv.includes('--write'), acceptReadmeGrowth: process.argv.includes('--accept-readme-growth') }); }
+	catch (error) { console.error('check-documentation-contract FAILED: ' + error.message); process.exitCode = 1; }
+}

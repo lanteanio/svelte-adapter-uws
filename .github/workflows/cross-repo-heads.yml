@@ -43,6 +43,7 @@ jobs:
       - name: Check out adapter event revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           path: heads/svelte-adapter-uws
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -187,6 +188,7 @@ jobs:
       - name: Check out adapter event revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           path: heads/svelte-adapter-uws
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -281,6 +283,7 @@ jobs:
       - name: Check out adapter event revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           path: heads/svelte-adapter-uws
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -369,6 +372,7 @@ jobs:
       - name: Check out adapter event revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           path: heads/svelte-adapter-uws
           ref: ${{ github.sha }}
           persist-credentials: false
