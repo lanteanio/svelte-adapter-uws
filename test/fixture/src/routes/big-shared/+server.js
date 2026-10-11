@@ -9,7 +9,7 @@
 const CHUNK = new Uint8Array(64 * 1024).fill(0x63);
 let renders = 0;
 
-export function GET({ url }) {
+export async function GET({ url }) {
 	const kb = Math.max(64, Number(url.searchParams.get('kb')) || 1024);
 	const delay = Math.max(0, Number(url.searchParams.get('delay')) || 400);
 	const after = Math.max(1, Number(url.searchParams.get('after')) || 10);
@@ -17,6 +17,9 @@ export function GET({ url }) {
 		return new Response(String(renders), { headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
 	}
 	renders += 1;
+	// Delay response construction to keep concurrent requests together while
+	// leaving every body chunk ready when the response is returned.
+	if (url.searchParams.has('ready')) await new Promise((resolve) => setTimeout(resolve, delay));
 	const chunks = Math.ceil(kb / 64);
 	let sent = 0;
 	const body = new ReadableStream({

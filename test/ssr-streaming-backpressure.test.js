@@ -202,9 +202,7 @@ describeUWS('the request-dedup leader decides sharing before it holds the body',
 		expect(await renders() - before, 'past the cap nothing is shared, so each request rendered').toBe(2);
 	}, 60000);
 
-	it('still shares a body within the cap, so the herd protection is intact', async () => {
-		// The pause after the first chunk keeps the leader in flight while the
-		// second request arrives, which is what makes the two concurrent.
+	it('does not share a deferred body within the cap', async () => {
 		const before = await renders();
 		const [a, b] = await Promise.all([
 			slowGet(`${server.httpUrl}/big-shared?kb=256&after=1&delay=300`),
@@ -213,6 +211,18 @@ describeUWS('the request-dedup leader decides sharing before it holds the body',
 		expect(a.complete && b.complete).toBe(true);
 		expect(a.bytes).toBe(256 * 1024);
 		expect(b.bytes).toBe(256 * 1024);
-		expect(await renders() - before, 'within the cap the second request is served from the leader').toBe(1);
+		expect(await renders() - before, 'a pending body read gives each request its own response').toBe(2);
+	}, 60000);
+
+	it('shares a ready body within the cap while response construction is pending', async () => {
+		const before = await renders();
+		const [a, b] = await Promise.all([
+			slowGet(`${server.httpUrl}/big-shared?kb=256&after=10&delay=300&ready=1`),
+			slowGet(`${server.httpUrl}/big-shared?kb=256&after=10&delay=300&ready=1`)
+		]);
+		expect(a.complete && b.complete).toBe(true);
+		expect(a.bytes).toBe(256 * 1024);
+		expect(b.bytes).toBe(256 * 1024);
+		expect(await renders() - before, 'a ready finite body serves both requests from one render').toBe(1);
 	}, 60000);
 });
