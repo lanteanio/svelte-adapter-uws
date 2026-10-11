@@ -66,7 +66,7 @@ describeMaybe('static preconditions follow the RFC evaluation order', () => {
 		expect(buildFixtureOnce(), 'fixture build must succeed').toBe(true);
 		const mod = await import('./fixture/build/handler/static-assets.js');
 		const { staticCache } = await import('./fixture/build/handler/state.js');
-		const { manifest } = await import('./fixture/build/manifest-bridge.js');
+		const { appPath } = await import('./fixture/build/manifest-bridge.js');
 		staticPreconditions = mod.staticPreconditions;
 
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uws-static-precond-'));
@@ -82,7 +82,7 @@ describeMaybe('static preconditions follow the RFC evaluation order', () => {
 		fs.writeFileSync(fracPath, IDENTITY);
 		fs.utimesSync(fracPath, MTIME, new Date('2026-01-02T03:04:05.789Z'));
 
-		const immutableRel = path.join(manifest.appPath, 'immutable', 'pin.js');
+		const immutableRel = path.join(appPath, 'immutable', 'pin.js');
 		fs.mkdirSync(path.dirname(path.join(tmpDir, immutableRel)), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, immutableRel), IDENTITY);
 
@@ -95,7 +95,7 @@ describeMaybe('static preconditions follow the RFC evaluation order', () => {
 
 		entry = staticCache.get('/precond/doc.txt');
 		fracEntry = staticCache.get('/precond/doc-frac.txt');
-		immutableEntry = staticCache.get(`/precond-immutable/${manifest.appPath}/immutable/pin.js`);
+		immutableEntry = staticCache.get(`/precond-immutable/${appPath}/immutable/pin.js`);
 		overrideEntry = staticCache.get('/precond-override/doc.txt');
 
 		serve = (opts = {}) => {
