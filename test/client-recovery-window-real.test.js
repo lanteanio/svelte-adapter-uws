@@ -79,6 +79,36 @@ describe('unanswered recovery offsets on the actual client socket', () => {
 			expect(next.frame.recover?.room).toBeUndefined();
 		});
 	}
+	it('does not commit speculative progress invalidated immediately before its acknowledgement', async () => {
+		const recovering = await reconnect();
+		send(recovering.socket, { topic: 'room', event: 'put', data: 'speculative', seq: 10 });
+		send(recovering.socket, { topic: '__replay:room', event: 'truncated', data: null });
+		send(recovering.socket, { type: 'subscribed', topic: 'room', ref: recovering.frame.ref, epoch: 7 });
+		await barrier(recovering.socket, 'invalidated then acknowledged');
+		expect((await reconnect()).frame.recover?.room).toBeUndefined();
+	});
+
+	it('clears an unanswered recovery when the next socket subscribes without an offset', async () => {
+		const recovering = await reconnect();
+		send(recovering.socket, { topic: '__replay:room', event: 'truncated', data: null });
+		await barrier(recovering.socket, 'offset dropped');
+		const fresh = await reconnect();
+		expect(fresh.frame.recover?.room).toBeUndefined();
+		send(fresh.socket, { topic: 'room', event: 'put', data: 'fresh sequence', seq: 20 });
+		await barrier(fresh.socket, 'fresh sequence delivered');
+		expect((await reconnect()).frame.recover.room).toEqual({ offset: 20, epoch: 7 });
+	});
+
+	it('clears an unanswered recovery when its topic is released and subscribed again', async () => {
+		const recovering = await reconnect();
+		unsubscribe(); unsubscribe = null;
+		await waitFor(() => frames.some(value => value.socket === recovering.socket && value.frame.type === 'unsubscribe'));
+		unsubscribe = connection.on('room').subscribe(() => {});
+		await waitFor(() => requests.filter(value => value.socket === recovering.socket).length === 2);
+		send(recovering.socket, { topic: 'room', event: 'put', data: 'new subscription', seq: 30 });
+		await barrier(recovering.socket, 'new subscription delivered');
+		expect((await reconnect()).frame.recover.room).toEqual({ offset: 30, epoch: 7 });
+	});
 	it('resumes committed progress after a matching acknowledgement and subsequent live frames', async () => {
 		const recovering = await reconnect();
 		send(recovering.socket, { topic: 'room', event: 'put', data: 'ahead', seq: 10 });

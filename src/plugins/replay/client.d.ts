@@ -26,6 +26,8 @@ export interface TruncatedEvent {
 
 /**
  * Subscribe to a topic with replay support.
+ * Unanswered replays resume after reconnection from the last delivered replay
+ * sequence. After close(), only an explicit connect() starts a new connection.
  *
  * Works exactly like `on(topic)` from `svelte-adapter-uws/client` but also
  * requests a replay of messages the client missed between SSR and WebSocket

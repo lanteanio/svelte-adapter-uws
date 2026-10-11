@@ -18,7 +18,8 @@
  * @module svelte-adapter-uws/plugins/replay/client
  */
 
-import { on, connect, ready } from '../../client.js';
+import { on, status } from '../../client.js';
+import { clientConnection } from '../../client-connection.js';
 import { microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 
@@ -32,6 +33,8 @@ let _reqIdCounter = 0;
 
 /**
  * Subscribe to a topic with replay support.
+ * Unanswered replays resume after reconnection from the last delivered replay
+ * sequence. After close(), only an explicit connect() starts a new connection.
  *
  * Works exactly like `on(topic)` but also requests a replay of messages
  * the client missed between SSR and WebSocket connect. During the replay
@@ -85,7 +88,7 @@ export function onReplay(topic, options) {
 	// __replay:{topic} channel when multiple onReplay() instances exist for the
 	// same topic. The server embeds the reqId in every msg and end event it sends
 	// back, so each instance can ignore responses that belong to another request.
-	const reqId = ++_reqIdCounter;
+	let reqId;
 
 	// Output store - what the user subscribes to
 	/** @type {import('svelte/store').Writable<import('../../client.js').WSEvent | null>} */
@@ -95,13 +98,15 @@ export function onReplay(topic, options) {
 	let storeUnsub = /** @type {(() => void) | null} */ (null);
 	let replayUnsub = /** @type {(() => void) | null} */ (null);
 	let refCount = 0;
-	// Prevents a stale ready().then() from firing a replay request after
-	// the store has been torn down (e.g. component destroyed before socket opens).
-	let cancelled = false;
+	let statusUnsub = /** @type {(() => void) | null} */ (null);
+	let generation = 0;
 
 	function startListening() {
-		cancelled = false;
+		const ownGeneration = ++generation;
 		let replayPending = false;
+		let replayScheduled = false;
+		let requestGeneration = 0;
+		let replaySince = since;
 		let truncated = false;
 		const liveStore = on(topic);
 		const replayStore = on(TOPIC_PREFIX + topic);
@@ -114,7 +119,7 @@ export function onReplay(topic, options) {
 
 		// Subscribe to the replay topic for missed messages + end marker
 		replayUnsub = replayStore.subscribe((event) => {
-			if (event === null || !replayPending || replayDone) return;
+			if (generation !== ownGeneration || event === null || !replayPending || replayDone) return;
 
 			// If the server embedded a reqId, ignore responses for other requests.
 			// Servers that don't embed reqId (old deployments) omit the field and
@@ -137,18 +142,19 @@ export function onReplay(topic, options) {
 					truncated = true;
 					output.set({ topic, event: 'truncated', data: null });
 				}
+				if (generation !== ownGeneration) return;
 				replayDone = true;
 				// Clean up the replay subscription - no longer needed
-				if (replayUnsub) {
-					microtask(() => {
-						replayUnsub?.();
-						replayUnsub = null;
-					});
-				}
+				const cleanup = replayUnsub;
+				if (cleanup) microtask(() => {
+					cleanup();
+					if (replayUnsub === cleanup) replayUnsub = null;
+				});
 				return;
 			}
 
 			if (event.event === 'msg' && d != null) {
+				if (Number.isSafeInteger(d.seq) && d.seq > replaySince) replaySince = d.seq;
 				output.set({
 					topic,
 					event: d.event,
@@ -157,19 +163,34 @@ export function onReplay(topic, options) {
 			}
 		});
 
-		// Request replay once connected. If the connection is permanently closed
-		// before open, ready() rejects - swallow the error so it does not become
-		// an unhandled rejection. The store will simply receive no replay messages.
-		ready().then(() => {
-			if (!cancelled) {
-				replayPending = true;
-				if (!connect().send({ type: 'replay', topic, since, reqId })) replayPending = false;
+		// A replacement connection must answer an outstanding replay too. Read
+		// the implicit connection so plugin activity never reopens a closed one.
+		statusUnsub = status.subscribe(value => {
+			if (generation !== ownGeneration) return;
+			if (value !== 'open' && value !== 'suspended') {
+				requestGeneration++;
+				replayPending = replayScheduled = false;
+				return;
 			}
-		}).catch(() => {});
+			if (replayDone || replayPending || replayScheduled) return;
+			const connection = clientConnection.get();
+			const request = ++requestGeneration;
+			replayScheduled = true;
+			// Let hello and the topic subscription reach the wire first.
+			microtask(() => {
+				if (generation !== ownGeneration || requestGeneration !== request) return;
+				replayScheduled = false;
+				reqId = ++_reqIdCounter;
+				truncated = false;
+				replayPending = true;
+				if (!connection.send({ type: 'replay', topic, since: replaySince, reqId })) replayPending = false;
+			});
+		});
 	}
 
 	function stopListening() {
-		cancelled = true;
+		generation++;
+		if (statusUnsub) { statusUnsub(); statusUnsub = null; }
 		if (storeUnsub) { storeUnsub(); storeUnsub = null; }
 		if (replayUnsub) { replayUnsub(); replayUnsub = null; }
 		replayDone = false;
