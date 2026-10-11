@@ -75,6 +75,6 @@
 	"src/runtime/utils/rate-limiter.js": ["map.set"],
 	"src/runtime/utils/seq-bound.js": ["floors.set","from.set"],
 	"src/runtime/utils/topic.js": ["cache.set"],
-	"src/runtime/utils/ws-symbols.js": ["pending.set"],
+	"src/runtime/utils/ws-symbols.js": ["pending.set","states.set","subscriptionRegistryStates().set"],
 	"src/plugins/cursor/render/canvas2d.js": ["this._colors.set"]
 }
