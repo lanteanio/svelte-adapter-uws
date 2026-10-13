@@ -151,7 +151,7 @@ describe("ecosystem compatibility manifest", () => {
 			realtime_version: "0.6.0-next.91",
 			extensions_version: "0.6.0-next.64",
 			realtime_head: "84421574722f9029399d29c8ee932fd575903ee7",
-			extensions_head: "cccfabe40367717e16a84f79cc8ce82339cb6780",
+			extensions_head: "b0880fb53b7e12f4b7c975611d8e3450c9eb2f37",
 			wire_protocol: "1",
 			procedure:
 				"docs/releasing.md#prerelease-publication docs/releasing.md#abort",
