@@ -219,9 +219,9 @@ failure latency; it does not prove that missed cross-instance events or writes
 were reconstructed.
 
 A store that erases by user must carry the tenant dimension or declare itself
-unscoped. A topic-bearing store scopes erasure by the tenant-qualified topic its
-records carry; an unscoped store relies on globally unique user IDs or on one
-physical store per tenant, which the caller selects.
+unscoped. A topic-bearing store must scope erasure by the tenant-qualified topic
+its records carry; an unscoped store relies on globally unique user IDs or on
+one physical store per tenant that the caller selects.
 
 ## Subscription-pressure signal
 
