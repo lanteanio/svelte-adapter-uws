@@ -2579,10 +2579,10 @@ describe("ecosystem compatibility manifest", () => {
 		} finally {
 			rmSync(temp, { recursive: true, force: true });
 		}
-		// This drives the checker CLI end to end about twenty times, and each
-		// spawn cold-imports markdown-it and parse5; on Windows that sits near
-		// the default budget, so the ceiling is explicit.
-	}, 120_000);
+		// This drives more than forty checker processes with fresh Markdown
+		// parsers. Allow the complete CLI matrix to finish on Windows while
+		// retaining a finite timeout for a stalled subprocess.
+	}, 300_000);
 
 	itNpm("fails a drifted package through the executable publication lifecycle", () => {
 		const temp = mkdtempSync(join(tmpdir(), "adapter-compat-lifecycle-"));
