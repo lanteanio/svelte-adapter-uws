@@ -108,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value.
+  - **Affects:** Memory dashboards and custom metric registries.
+  - **Action:** Implement optional gauge.remove() to clear samples that become unavailable.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Registries without removal receive this gauge only when a permanent engine ceiling is available.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy.
   - **Affects:** Linux deployments using cgroup v1 or v2 memory limits.
   - **Action:** No configuration change is required.
@@ -894,6 +901,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Metric-label checks cover resource-growth probe names and detect instrument emitters in previously untested modules.
 
 - Runtime proxy warnings name the configured environment prefix in their explanations and suggested address, hop-depth, and trusted-proxy settings.
+
+- **Unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value. Registries without removal receive this gauge only when a permanent engine ceiling is available.
 
 - **Documentation and contract checks match the shipped runtime.** Client reconnect defaults and authentication retry outcomes match the implementation; cache descriptions identify insertion-order eviction; sequence tests explain the current arity contract; strict TypeScript consumers pin readonly numeric assertion maps; metric-label checks drive actual instrumented terminal paths; release instructions separate the frozen source from subsequent ledger bookkeeping and merge stable hotfixes before tagging.
 

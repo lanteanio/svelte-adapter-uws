@@ -47,7 +47,7 @@ Import `dashboard.v1.json` for a compact Grafana view of these target-preserving
 | `pressure_reason_transitions_total` | counter | count | `rate(pressure_reason_transitions_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `pressure_sample_timestamp_seconds` | gauge | seconds | `pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}` | The snapshot reports the stalest worker, so this is the freshness of the whole cluster. |
 | `resident_memory_bytes` | gauge | bytes | `resident_memory_bytes{adapter="svelte-adapter-uws"}` | Whole-process value - every worker reports the same number, so the snapshot takes the maximum. Never sum it. |
-| `heap_used_ratio` | gauge | ratio | `heap_used_ratio{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. |
+| `heap_used_ratio` | gauge | ratio | `heap_used_ratio{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. (not always registered) |
 | `psi_cpu_some_avg10` | gauge | percent | `psi_cpu_some_avg10{adapter="svelte-adapter-uws"}` | Whole-process value - every worker reports the same number, so the snapshot takes the maximum. Never sum it. (not always registered) |
 | `psi_memory_full_avg10` | gauge | percent | `psi_memory_full_avg10{adapter="svelte-adapter-uws"}` | Whole-process value - every worker reports the same number, so the snapshot takes the maximum. Never sum it. (not always registered) |
 | `psi_io_full_avg10` | gauge | percent | `psi_io_full_avg10{adapter="svelte-adapter-uws"}` | Whole-process value - every worker reports the same number, so the snapshot takes the maximum. Never sum it. (not always registered) |

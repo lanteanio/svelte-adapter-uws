@@ -119,7 +119,7 @@ attests the family; a required unsampled gauge makes the snapshot incomplete.
 | `pressure_reason_transitions_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | from=NONE/SUBSCRIBERS/PUBLISH_RATE/PSI/CPU_QUOTA/CAPACITY/MEMORY; to=NONE/SUBSCRIBERS/PUBLISH_RATE/PSI/CPU_QUOTA/CAPACITY/MEMORY | - | - |
 | `pressure_sample_timestamp_seconds` | gauge | seconds | worker | min | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
 | `resident_memory_bytes` | gauge | bytes | process | max | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
-| `heap_used_ratio` | gauge | ratio | worker | max | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
+| `heap_used_ratio` | gauge | ratio | worker | max | operational | `absent_when_unavailable` | `absent_when_unavailable` | - | - | - |
 | `psi_cpu_some_avg10` | gauge | percent | process | max | operational | `absent_when_unavailable` | `absent_when_unavailable` | - | - | - |
 | `psi_memory_full_avg10` | gauge | percent | process | max | operational | `absent_when_unavailable` | `absent_when_unavailable` | - | - | - |
 | `psi_io_full_avg10` | gauge | percent | process | max | operational | `absent_when_unavailable` | `absent_when_unavailable` | - | - | - |

@@ -115,9 +115,10 @@ describe('ecosystem architecture documentation', () => {
 		expect(prose).toContain('the distance to the nearest memory wall: the worse of two arms');
 		expect(prose).toContain('An engine that reports no ceiling contributes nothing on this arm.');
 		expect(prose).toContain('The container arm compares the resident set with the cgroup memory limit (v2 `memory.max`, v1 `memory.limit_in_bytes`)');
-		expect(prose).toContain('The reading is a 0..1 saturation');
-		expect(prose).toContain('one reading feeds the `MEMORY` reason, which outranks every other pressure reason, the `value` fold, the `heap_used_ratio` gauge and send-gate window sizing');
-		expect(prose).toContain('A process with no discoverable wall on either arm reads 0');
+		expect(prose).toContain('A known wall yields a 0..1 saturation');
+		expect(prose).toContain('No discoverable wall means an unavailable measurement, not measured zero.');
+		expect(prose).toContain('A known reading feeds the `MEMORY` reason, which outranks every other pressure reason, the `value` fold, the gauge and send-gate window sizing');
+		expect(prose).toContain('The `heap_used_ratio` metric is absent when neither wall is available.');
 		expect(prose).toContain('`memoryHeapUsedRatio` option name and its 0.85 default are shared across the family');
 		expect(prose).toContain('Arena fullness (`heapUsed/heapTotal`) is not part of the contract on any engine.');
 	});
