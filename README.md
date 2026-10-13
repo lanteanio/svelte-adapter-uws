@@ -1114,7 +1114,7 @@ boundary.
 0.6 compatibility window it also returns `format: 'legacy'` for an explicit
 inventory: adapter (`[svelte-adapter-uws]`, the named `[adapter-uws/*]`
 families, `[ws]`, `[tls]`, `[primary]`, `[worker <id>]`, `[pressure]`, and
-`[group <name>]`), extensions (`[extensions]`, the assertion families,
+`[group <name>]`), Bun adapter (`[svelte-adapter-bunserve]`, `[adapter-bunserve]`, `[svelte-adapter-bunserve/<component>]`), extensions (`[extensions]`, the assertion families,
 `[redis]`, the named Redis/Postgres families, and `[publish-rate]`), and
 realtime (`[svelte-realtime]`, `[realtime/assert]`, and `[realtime/fatal]`).
 Assertions and the migrated operational events use the canonical prefix; other
