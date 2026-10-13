@@ -526,6 +526,17 @@ export const WS_RELEASE_MEMBERSHIP = Symbol.for('adapter-uws.platform.release-me
 const SUBSCRIPTION_ACCOUNTING_HOOK = Symbol.for('adapter-uws.subscription-accounting-hook');
 
 /**
+ * Development and test sockets do not belong to a production worker's sink.
+ * Remember their registries across bundled copies of the tracked helpers.
+ * @returns {Set<string>}
+ */
+export function createUnaccountedSubscriptionRegistry() {
+	const subscriptions = new Set();
+	subscriptionRegistryStates().set(subscriptions, REGISTRY_UNACCOUNTED);
+	return subscriptions;
+}
+
+/**
  * Install the worker-local logical-subscription delta sink. The production
  * handler supplies the counter update; focused tests can supply a number.
  * The delta always carries the topic it describes, so the sink can keep a
@@ -578,7 +589,7 @@ function accountSubscriptionDelta(delta, topic) {
 // below the truth it stays there, and every later audit reports a negative total
 // or a summed/total gap that no live membership explains.
 //
-// A WeakSet keyed on the registry itself: one is created fresh per connection at
+// A WeakMap keyed on the registry itself: one is created fresh per connection at
 // open (`userData[WS_SUBSCRIPTIONS] = new Set()`) and is never reused for another
 // connection, so a settled registry is settled for good and nothing accumulates.
 //
@@ -591,19 +602,24 @@ function accountSubscriptionDelta(delta, topic) {
 // trackedUnsubscribe, reading a different copy, would find no mark and charge
 // the membership a second time - exactly the double charge this exists to
 // prevent, surviving in the one configuration that matters.
-const SETTLED_REGISTRIES = Symbol.for('adapter-uws.settled-subscription-registries');
+// The same lookup also excludes nonproduction registries from the worker sink.
+// An absent entry means an accounted live registry; unaccounted registries still
+// transition to settled on close so late release calls see a closed connection.
+const REGISTRY_STATES = Symbol.for('adapter-uws.subscription-registry-states');
+const REGISTRY_UNACCOUNTED = 1;
+const REGISTRY_SETTLED = 2;
 
-/** @returns {WeakSet<Set<string>>} */
-function settledRegistries() {
-	let settled = /** @type {any} */ (globalThis)[SETTLED_REGISTRIES];
-	if (!settled) {
-		settled = new WeakSet();
+/** @returns {WeakMap<Set<string>, number>} */
+function subscriptionRegistryStates() {
+	let states = /** @type {any} */ (globalThis)[REGISTRY_STATES];
+	if (!states) {
+		states = new WeakMap();
 		// Defined, not assigned: an accessor here would hand every caller a fresh
-		// WeakSet, so no registry would ever read as settled and the close path
+		// WeakMap, so no registry would ever read as settled and the close path
 		// plus a late unsubscribe would charge the same membership twice.
-		defineSlot(globalThis, SETTLED_REGISTRIES, settled);
+		defineSlot(globalThis, REGISTRY_STATES, states);
 	}
-	return settled;
+	return states;
 }
 
 /**
@@ -618,7 +634,7 @@ function settledRegistries() {
 export function addLogicalSubscription(subscriptions, topic) {
 	if (subscriptions.has(topic)) return false;
 	subscriptions.add(topic);
-	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(1, topic);
+	if (subscriptionRegistryStates().get(subscriptions) === undefined) accountSubscriptionDelta(1, topic);
 	return true;
 }
 
@@ -632,7 +648,7 @@ export function addLogicalSubscription(subscriptions, topic) {
  */
 export function removeLogicalSubscription(subscriptions, topic) {
 	if (!subscriptions.delete(topic)) return false;
-	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(-1, topic);
+	if (subscriptionRegistryStates().get(subscriptions) === undefined) accountSubscriptionDelta(-1, topic);
 	return true;
 }
 
@@ -651,7 +667,7 @@ export function removeLogicalSubscription(subscriptions, topic) {
  * @returns {boolean}
  */
 export function isSettledSubscriptionRegistry(subscriptions) {
-	return subscriptions instanceof Set && settledRegistries().has(subscriptions);
+	return subscriptions instanceof Set && subscriptionRegistryStates().get(subscriptions) === REGISTRY_SETTLED;
 }
 
 /**
@@ -674,13 +690,17 @@ export function accountClosedLogicalSubscriptions(subscriptions) {
 	// releasing neither its capability counts nor its wire state. There is also
 	// nothing here to release, so releasing nothing is the honest answer.
 	if (!(subscriptions instanceof Set)) return 0;
-	if (settledRegistries().has(subscriptions)) return 0;
+	const states = subscriptionRegistryStates();
+	const state = states.get(subscriptions);
+	if (state === REGISTRY_SETTLED) return 0;
 	const count = subscriptions.size;
-	settledRegistries().add(subscriptions);
+	states.set(subscriptions, REGISTRY_SETTLED);
 	// Released per topic rather than as one summed delta, so the sink's
 	// per-topic subscriber counts settle with the total. One cold call per
 	// held membership, on the close path only.
-	for (const topic of subscriptions) accountSubscriptionDelta(-1, topic);
+	if (state !== REGISTRY_UNACCOUNTED) {
+		for (const topic of subscriptions) accountSubscriptionDelta(-1, topic);
+	}
 	return count;
 }
 

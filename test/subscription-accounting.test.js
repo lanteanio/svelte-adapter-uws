@@ -1,13 +1,17 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createServer } from 'node:http';
+import { connectRealClient } from './helpers/real-runtime.js';
 import {
 	WS_PLATFORM,
 	WS_SUBSCRIPTIONS,
 	accountClosedLogicalSubscriptions,
 	addLogicalSubscription,
 	beginPendingSubscribe,
+	isSettledSubscriptionRegistry,
 	registerDerivedTopicPrefix,
+	releaseSubscription,
 	removeLogicalSubscription,
 	setSubscriptionAccountingHook,
 	settleHeldSubscribe,
@@ -234,6 +238,66 @@ describe('production-built subscription accounting wiring', () => {
 		({ platform: productionPlatform } = await import(pathToFileURL(join(fixtureDir, 'build', 'handler', 'platform.js')).href));
 		productionSymbols = await import(pathToFileURL(join(fixtureDir, 'build', 'utils', 'ws-symbols.js')).href);
 	}, 180000);
+
+	it.each(['testing', 'vite'])('keeps real %s memberships out of the loaded production sink', async (surface) => {
+		const baseline = state.counters.totalSubscriptions;
+		let socket;
+		let closed;
+		const onClosed = new Promise(resolve => { closed = resolve; });
+		const handler = { open(ws) { socket = ws; }, close() { closed(); } };
+		let server;
+		if (surface === 'testing') {
+			const { createTestServer } = await import('../src/testing.js');
+			const test = await createTestServer({ handler });
+			server = { wsUrl: test.wsUrl, stop: () => test.close() };
+		} else {
+			const { default: createPlugin } = await import('../src/vite.js');
+			const httpServer = createServer();
+			await new Promise(resolve => httpServer.listen(0, '127.0.0.1', resolve));
+			await createPlugin({ allowedOrigins: '*', handler: '/accounting' }).configureServer({
+				httpServer, middlewares: { stack: [], use() {} },
+				config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
+				async ssrLoadModule() { return handler; }
+			});
+			server = { wsUrl: 'ws://127.0.0.1:' + httpServer.address().port + '/ws', stop: () => new Promise(resolve => httpServer.close(resolve)) };
+		}
+		const client = await connectRealClient(server.wsUrl);
+		try {
+			expect(await client.waitFor(frame => frame.type === 'welcome')).not.toBeNull();
+			expect(trackedSubscribe(socket, 'tracked-release')).toBe(true);
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			expect(releaseSubscription(socket, 'tracked-release')).toBe(true);
+			expect(releaseSubscription(socket, 'tracked-release')).toBe(false);
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			const platform = socket.getUserData()[WS_PLATFORM];
+			expect(await platform.subscribe(socket, 'platform-leave')).toBeNull();
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			trackedUnsubscribe(socket, 'platform-leave');
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			client.send({ type: 'subscribe-batch', topics: ['wire-one', 'wire-two'], ref: 1 });
+			expect(await client.waitFor(frame => frame.type === 'subscribed' && frame.topic === 'wire-two')).not.toBeNull();
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			platform.unsubscribe(socket, 'wire-one');
+			expect(releaseSubscription(socket, 'wire-two')).toBe(true);
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			expect(trackedSubscribe(socket, 'tracked-close')).toBe(true);
+			expect(trackedSubscribe(socket, 'tracked-close')).toBe(true);
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			const registry = socket.getUserData()[WS_SUBSCRIPTIONS];
+			expect(isSettledSubscriptionRegistry(registry)).toBe(false);
+			client.close();
+			await onClosed;
+			expect(state.counters.totalSubscriptions).toBe(baseline);
+			expect(isSettledSubscriptionRegistry(registry)).toBe(true);
+			if (surface === 'vite') {
+				expect(releaseSubscription(socket, 'tracked-close')).toBe(false);
+				expect(state.counters.totalSubscriptions).toBe(baseline);
+			}
+		} finally {
+			client.close();
+			await server.stop();
+		}
+	});
 
 	it('keeps platform, wire-primitive, tracked, unsubscribe, and close deltas balanced', async () => {
 		const baseline = state.counters.totalSubscriptions;

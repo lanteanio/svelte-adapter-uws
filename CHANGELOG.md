@@ -877,6 +877,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Vite development rejects authentication endpoint preflights before app-wide CORS can approve them. Exact custom auth paths retain the production `405` response without changing CORS on other routes.
 
+- `createTestServer` and Vite development subscription registries no longer charge or release a production worker's subscription total when both are loaded in one process; their memberships settle with the connection on close.
+
 - Non-string `envPrefix` values fail adapter configuration instead of producing different environment lookups in development and production. The development config-file fallback is covered through handler, metrics and origin behavior.
 
 - Subscription-pressure documentation defines the per-connection mean, concentrated membership costs, and the separate controls for pressure signals and subscription admission.

@@ -1,4 +1,5 @@
 import { isSet } from 'node:util/types';
+import { createUnaccountedSubscriptionRegistry, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions } from './runtime/utils/ws-symbols.js';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -1321,7 +1322,7 @@ export default function uws(options = {}) {
 			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) { settlePendingSubscribe(ud, topic, tokenS); return 'RATE_LIMITED'; }
 			if (!settlePendingSubscribe(ud, topic, tokenS, true)) return 'FORBIDDEN';
 			ws.subscribe(topic);
-			subs.add(topic);
+			addLogicalSubscription(subs, topic);
 			return null;
 		},
 		// `opts`, not `options`: the plugin-wide `options` is in scope here, and
@@ -1409,7 +1410,7 @@ export default function uws(options = {}) {
 			// same contract production reports.
 			if (!(subs instanceof Set) || !subs.has(topic)) return cancelledPendingV;
 			ws.unsubscribe(topic);
-			subs.delete(topic);
+			removeLogicalSubscription(subs, topic);
 			runUnsubscribeHook(userHandlers.unsubscribe, ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
@@ -2938,14 +2939,14 @@ export default function uws(options = {}) {
 				// claim the slots as own properties before anything writes one,
 				// so an accessor on the prototype chain cannot swallow the write.
 				declareConnectionSlots(userData);
-				userData[WS_SUBSCRIPTIONS] = new Set();
+				userData[WS_SUBSCRIPTIONS] = createUnaccountedSubscriptionRegistry();
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
 				const wsPlatform = Object.create(platform);
 				wsPlatform[WS_RELEASE_MEMBERSHIP] = (_wrapped, ud, topic) => {
 					if (ws.readyState !== 1) return null;
 					subscriptions.get(ws)?.delete(topic);
-					return ud[WS_SUBSCRIPTIONS].delete(topic);
+					return removeLogicalSubscription(ud[WS_SUBSCRIPTIONS], topic);
 				};
 				const carriedRequestId = userData[CARRY_REQUEST_ID];
 				assert(typeof carriedRequestId === 'string', 'ws.request-id-carry', null);
@@ -3242,7 +3243,7 @@ export default function uws(options = {}) {
 									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
-								subs.add(msg.topic);
+								addLogicalSubscription(subs, msg.topic);
 								if (_cap) flushResumeTopicV(_cap, msg.topic);
 								sendSubscribedV(ws, msg.topic, ref);
 								return;
@@ -3257,7 +3258,8 @@ export default function uws(options = {}) {
 								const uudV = /** @type {any} */ (ws).__userData;
 								if (uudV) tombstonePendingSubscribe(uudV, msg.topic);
 								subscriptions.get(ws)?.delete(msg.topic);
-								uudV?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
+								const wireSubs = uudV?.[WS_SUBSCRIPTIONS];
+								if (wireSubs) removeLogicalSubscription(wireSubs, msg.topic);
 								// Read access gone means write access gone, as production does.
 								if (uudV && uudV[WS_PUBLISH_GRANT] === msg.topic) uudV[WS_PUBLISH_GRANT] = undefined;
 								releaseDerivedSubscriptions(wrapped, msg.topic);
@@ -3507,7 +3509,7 @@ export default function uws(options = {}) {
 										continue;
 									}
 									subs?.add(topic);
-									udSubs.add(topic);
+									addLogicalSubscription(udSubs, topic);
 									if (_batchCap) flushResumeTopicV(_batchCap, topic);
 									sendSubscribedV(ws, topic, ref);
 								}
@@ -3669,6 +3671,7 @@ export default function uws(options = {}) {
 						}
 						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
 					runCloseHook(userHandlers, wrapped, ctx);
+					accountClosedLogicalSubscriptions(subs);
 					if (ud[WS_LEASE]) ud[WS_LEASE] = undefined;
 					connections.delete(ws);
 					subscriptions.delete(ws);
