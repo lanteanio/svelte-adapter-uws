@@ -2252,7 +2252,7 @@ connect({ auth: true });
 connect({ auth: "/api/ws-auth" });
 ```
 
-With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', credentials: 'include' })` before every `new WebSocket(...)` call, including after automatic reconnects. Concurrent connect attempts share a single in-flight preflight. A `4xx` response is treated as terminal (the user is not authenticated); `5xx` and network errors fall back to the normal reconnect backoff.
+With `auth: true` the client runs `fetch('/__ws/auth', { method: 'POST', credentials: 'include' })` before every `new WebSocket(...)` call, including after automatic reconnects. Concurrent connect attempts share a single in-flight preflight. A `429` backs off and honors `Retry-After`; other `4xx` responses are terminal (the user is not authenticated). `5xx` and network errors use the normal reconnect backoff.
 
 **Configuration**
 
@@ -3385,7 +3385,7 @@ support details, or debugging. Six `class` values let consumers select
 localized UI without parsing either diagnostic string:
 
 - `'TERMINAL'` - server permanently rejected the client (close codes 1008 / 4401 / 4403). The retry loop is stopped; the user must re-authenticate or refresh.
-- `'EXHAUSTED'` - reconnect attempts exceeded `maxReconnectAttempts`. The network never recovered; surface a manual-retry button.
+- `'EXHAUSTED'` - consecutive retries reached `maxReconnectAttempts` (the count restarts when a connection opens or the page becomes visible or online again); surface a manual-retry button. Throttling increases the delay without spending extra attempts. Each auth preflight and WebSocket opening has a 15-second timeout; there is no overall reconnection deadline, and the default infinite retry budget can keep retrying.
 - `'THROTTLE'` - server signalled rate-limiting (close code 4429). Reconnect is still scheduled, jumped ahead in the backoff curve.
 - `'RETRY'` - normal transient drop (1006 abnormal closure, network blip, server restart). Reconnect is in progress; usually paired with the `'disconnected'` status.
 - `'AUTH'` - the auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry. The HTTP status code is in `status`, not `code`. A `429` from the preflight is reported as `'THROTTLE'` instead: clients behind one address share its budget, so it is retried on the backoff curve and never sooner than its `Retry-After`.
