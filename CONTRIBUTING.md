@@ -237,6 +237,8 @@ and has no config:
   real `.d.ts`, every target is covered by the `files` publish allowlist, and
   every named runtime export has a matching declaration. This is what catches
   "resolves locally, 404s after publish" and "silently degraded to `any`".
+- **generate-platform-contract --check** - the `PLATFORM_MEMBERS` inventory
+  in `src/platform-contract.js` matches the public `Platform` declaration.
 - **check-determinism** - framework source under `src/` reads the clock, RNG and
   timers through `src/runtime/runtime.js` rather than the native primitives. A
   raw call under `src/` fails. The two runtime seam modules are the binding
