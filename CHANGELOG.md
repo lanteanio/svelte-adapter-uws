@@ -129,7 +129,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The fallback remains a valid waiting-room response; permitted custom headers retain their behavior.
   - **Detail:** [Changed engineering detail](#changed).
 
-- **Fixed: module request listeners follow explicit reconnects.** Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a permanently closed connection preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
+- **Changed: heap_used_ratio is absent when no memory wall is known.** Workers omit the sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, instead of reporting an unknown memory ceiling as a measured zero or keeping a stale value.
+  - **Affects:** Memory dashboards, alerts on heap_used_ratio and custom metric registries.
+  - **Action:** Treat an absent heap_used_ratio as unknown rather than healthy; an alert on its absence now fires on hosts with no memory wall. Implement optional gauge.remove() in custom registries to clear samples that become unavailable.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Registries without removal receive this gauge only when a permanent engine ceiling is available.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Changed: a second stop signal ends the process at once.** A repeated SIGTERM or SIGINT during graceful shutdown, or while initialization is still running, now aborts in-flight requests and exits with status 1, and a cluster primary terminates its workers the same way, so an operator can stop a server whose shutdown hook is stuck.
+  - **Affects:** Operators and supervisors that send stop signals more than once.
+  - **Action:** Send one signal to allow graceful cleanup; send a second only to force termination.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Repeated signals now end the process with status 1 rather than being ignored.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Changed: tracing providers receive a null parent for a root operation.** Inside platform.trace.withContext(null, fn), which clears inherited trace context for background work, startSpan receives a null parent, so a custom TraceProvider must start a root span for null rather than read the ambient context, as the README OpenTelemetry example does with ROOT_CONTEXT.
+  - **Affects:** Custom tracing providers.
+  - **Action:** Treat a null parent passed to startSpan as a root.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid carried parents and ambient context outside the boundary are unchanged.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: module request listeners follow explicit reconnects.** Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a connection ended with close() preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
   - **Affects:** Applications using module-level request handlers or one-shot listeners.
   - **Action:** No API change is required.
   - **Requires:** No new dependency or option.
@@ -150,13 +171,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Deferred bodies retain bounded independent streaming; custom runtime schedulers may optionally provide clearImmediate.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value.
-  - **Affects:** Memory dashboards and custom metric registries.
-  - **Action:** Implement optional gauge.remove() to clear samples that become unavailable.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Registries without removal receive this gauge only when a permanent engine ceiling is available.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
 - **Fixed: throttling preserves finite retry budgets.** A throttling response now advances only the reconnect delay while the finite retry budget counts actual attempts, so a client with a small maxReconnectAttempts value can retry after a temporary rate limit instead of immediately exhausting attempts that it never made.
   - **Affects:** Clients with a finite reconnect budget.
   - **Action:** No option changes are required.
@@ -171,14 +185,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Own enumerable string and application-symbol properties are preserved without mutating the source object.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran.
+- **Fixed: connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake in production now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran.
   - **Affects:** Deployments observing connection setup failures after HTTP 101.
-  - **Action:** Monitor runtime.websocket-open.failed and ADAPTER-ERR-CONNECTION-SETUP.
+  - **Action:** Monitor the runtime.websocket-open.failed event; docs/errors.md describes it under ADAPTER-ERR-CONNECTION-SETUP.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Application hook failures keep their existing handling; structural invariant failures remain fatal.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: serialization failures leave publish sequence state unchanged.** Calling publish or publishBatched with data that JSON cannot represent now fails before assigning a topic sequence or mutating replay bookkeeping, so the next successful publish receives the next valid sequence and connected clients do not observe a fabricated delivery gap caused by a rejected application value.
+- **Fixed: serialization failures leave publish sequence state unchanged.** Data that JSON cannot represent now fails before a topic sequence is assigned or replay bookkeeping changes, for publish and for the failing publishBatched entry, so the next successful publish receives the next valid sequence and clients do not observe a fabricated delivery gap.
   - **Affects:** Applications calling publish or publishBatched with custom serialization or unsupported values.
   - **Action:** Pass JSON-representable data and handle serialization errors at the caller.
   - **Requires:** No new dependency or option.
@@ -350,7 +364,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Applications returning streamed or deferred response bodies.
   - **Action:** No configuration change is needed.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing. Concurrent anonymous requests for fetch relays or slow transforms with pending body reads render independently, even when their final body fits the sharing cap.
+  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing. Concurrent anonymous requests whose bodies are still pending after their first chunk render independently, even when their final body fits the sharing cap.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
@@ -674,6 +688,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Inside `platform.trace.withContext(null, fn)`, a tracing provider's `startSpan` receives a null parent and must start a root span rather than read the ambient context; the README OpenTelemetry example passes `ROOT_CONTEXT`.
+
+- **Unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value. Registries without removal receive this gauge only when a permanent engine ceiling is available.
+
 - A second stop signal forces shutdown, aborts open requests, and exits with status 1 instead of waiting for unfinished teardown. Cluster workers close their native handles before exiting.
   - **Affects:** Operators sending repeated SIGTERM or SIGINT signals, including with SHUTDOWN_TIMEOUT=0.
   - **Action:** Send one signal to allow graceful cleanup; repeat only to force termination.
@@ -983,17 +1001,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Runtime proxy warnings name the configured environment prefix in their explanations and suggested address, hop-depth, and trusted-proxy settings.
 
-- Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a permanently closed connection preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
+- Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a connection ended with close() preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
 
 - Server-managed topic ownership now applies even when an ordinary listener attached first, and queued, retry, and reconnect subscription frames respect the current owner, so a frame prepared before the server claimed ownership no longer sends a redundant client subscription or bypasses the topic authorization model.
 
 - Ready response reads resume within the current microtask checkpoint, preserving already-available body data when another request follows on the same connection, while one shared check-phase deadline still bounds deferred prefixes, and released deadlines are cancelled, so ready streams avoid unnecessary scheduling while deferred bodies retain their memory bound.
 
-- The nginx WebSocket location matches its configured path exactly. Protocol conformance assertions retain an independent complete-paragraph oracle for unanswered recovery offsets. README growth requires an explicit old/new-limit record and full-history validation; publication records bind all immutable identity fields to npm-verified pins.
+- The nginx WebSocket location matches its configured path exactly. Protocol conformance assertions retain an independent complete-paragraph oracle for unanswered recovery offsets. README growth requires an explicit old/new-limit record and full-history validation; publication records bind all immutable identity fields to pins recorded from npm metadata.
 
-- Release validation preserves every shell command boundary and rejects invalid event context before querying Git; executable regressions cover split publish flags and missing Git. JSDoc is attached to the declaration it describes, and shared projection comments state current matching rules.
+- Release validation preserves every shell command boundary, and release preparation rejects invalid event context before querying Git; regressions cover split publish flags and missing Git. JSDoc is attached to the declaration it describes, and shared projection comments state current matching rules.
 
 - Legacy diagnostic parsing attributes `svelte-adapter-bunserve`, `adapter-bunserve`, and valid `svelte-adapter-bunserve/<component>` prefixes to the Bun adapter. Tenancy documentation distinguishes tenant identity and metadata from separately configured admission budgets.
+
+- The smooth client paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest on its settled position instead of one frame short.
 
 - Presence and cursor client stores that use the shared connection stay offline after `close()` until an explicit `connect()` starts a replacement session.
 
@@ -1005,7 +1025,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native handshake tests require an actual 101. Native response closing and same-buffer pipelining limitations are documented in the architecture guide; setting Connection: close does not prove later buffered requests were never dispatched.
 
-- The memory notification contract routes future native hints to the next sampling tick without inventing saturation. Managed-topic authorization remains shared by all holders until final release.
+- The architecture guide defines how an adapter that exposes native OS memory notifications uses them: as hints that move the next scheduled pressure sample, never as a saturation reading.
 
 - Subscription pressure is the mean of landed subscriptions per live connection, compared with the configured `subscriberRatio` threshold and not clipped per connection; per-connection admission limits bound individual consumers separately.
 
@@ -1015,15 +1035,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plugin input failures are isolated at their entry point.** Presence and cursor reject a topic the wire encoder cannot carry before changing their state, and a failing topic in a scheduled presence or cursor callback no longer prevents the remaining topics from being processed, so one bad topic cannot stop heartbeats, diffs or cursor ticks for the others. Valid inputs retain their behavior; invalid inputs fail before side effects.
 
-- **Serialization failures leave publish sequence state unchanged.** Calling publish or publishBatched with data that JSON cannot represent now fails before assigning a topic sequence or mutating replay bookkeeping, so the next successful publish receives the next valid sequence and connected clients do not observe a fabricated delivery gap caused by a rejected application value. Valid publish payloads and explicit sequence handling retain their existing wire format.
+- **Serialization failures leave publish sequence state unchanged.** publish with data that JSON cannot represent, and the failing entry of publishBatched, now fail before assigning a topic sequence or mutating replay bookkeeping, so the next successful publish receives the next valid sequence and connected clients do not observe a fabricated delivery gap caused by a rejected application value. Valid publish payloads and explicit sequence handling retain their existing wire format.
 
-- **Connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran. Application hook failures keep their existing handling; structural invariant failures remain fatal.
+- **Connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake in production now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran. Application hook failures keep their existing handling; structural invariant failures remain fatal.
 
 - **Reused upgrade data cannot retain connection internals.** An upgrade hook can reuse its application data object across connections without carrying adapter-owned slots into a later socket, because each accepted upgrade copies enumerable application properties while omitting internal connection symbols before reading their values and initializing fresh connection state. Own enumerable string and application-symbol properties are preserved without mutating the source object.
 
 - **Throttling preserves finite retry budgets.** A throttling response now advances only the reconnect delay while the finite retry budget counts actual attempts, so a client with a small maxReconnectAttempts value can retry after a temporary rate limit instead of immediately exhausting attempts that it never made. Authentication and socket-opening attempts each remain bounded at fifteen seconds; there is no overall reconnect deadline.
-
-- **Unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value. Registries without removal receive this gauge only when a permanent engine ceiling is available.
 
 - **Documentation and contract checks match the shipped runtime.** Client reconnect defaults and authentication retry outcomes match the implementation; cache descriptions identify insertion-order eviction; sequence tests explain the current arity contract; strict TypeScript consumers pin readonly numeric assertion maps; metric-label checks drive actual instrumented terminal paths; release instructions separate the frozen source from subsequent ledger bookkeeping and merge stable hotfixes before tagging.
 
@@ -1107,7 +1125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Vite subscriber iteration passes the adapter socket and its user data to callbacks, so matching subscribers can be inspected and sent messages without throwing.
 
-
 - Pending hook-installed subscriptions no longer count as completed server grants. Server re-grants authorize the membership before acknowledging it, and wire, observer and resume gates reject unconfirmed membership.
 - Subscription API documentation distinguishes confirmed idempotent grants from held membership installed by an awaiting hook, which requires another authorization decision.
 
@@ -1125,7 +1142,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admission and false for a disconnected or paused socket; serialization and
   transport exceptions propagate. Late callbacks cannot overwrite a replacement
   connection's state or subscription retries.
-
 
 - **Vite upgrade lifetime.** The real HTTP upgrade listener routes by the raw
   target, refuses malformed targets and path aliases with 400, and owns socket
@@ -1191,7 +1207,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payloads. Real-socket tests cover all eight send/publish branches, original
   exceptions, nullish fallback and deliveries completed before a later failure.
 
-
 - **Presence updates with an empty folded identity name:** the default guard
   compares the exact configured key when lowercasing and retaining only ASCII
   letters and digits leaves an empty name. A key such as `用户` no longer
@@ -1241,7 +1256,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutable assets; empty list elements cannot match an absent validator. Real
   GET and HEAD requests cover identity, brotli and gzip, conditional metadata,
   unchanged normal responses, precedence and missing date validators.
-
 
 - **Hook containment survives a throwing console logger.** The message and
   lifecycle failure paths guard their diagnostic calls independently of closing
