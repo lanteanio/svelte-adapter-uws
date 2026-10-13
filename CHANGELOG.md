@@ -220,6 +220,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Normal shared mounts and idempotent cleanup remain supported; asynchronous failures are reported after cleanup.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: local smooth motion settles on its final frame.** The smooth client now paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest exactly on its settled position instead of stopping one frame short of it.
+  - **Affects:** Applications rendering local smooth corrections or sweeps.
+  - **Action:** No change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Idle animation frames after the final frame still emit nothing.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy.
   - **Affects:** Linux deployments using cgroup v1 or v2 memory limits.
   - **Action:** No configuration change is required.
