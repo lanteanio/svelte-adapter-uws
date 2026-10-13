@@ -5,10 +5,17 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-next.96] - 2026-09-23
+## [0.6.0-next.96] - 2026-10-13
 
 <!-- consumer-release-summary:start -->
 ### Consumer summary
+
+- **Added: authoritative platform member inventory.** The platform-contract entry exports a generated immutable list of public platform members, allowing extension wrappers and tests to compare their supported surface against the adapter declarations without maintaining a separate list that can silently omit new methods or inherited context members.
+  - **Affects:** Extension authors and platform wrappers.
+  - **Action:** Import PLATFORM_MEMBERS from svelte-adapter-uws/platform-contract when checking the public member inventory.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive inventory; it does not establish which optional capabilities another runtime implements.
+  - **Detail:** [Added engineering detail](#added).
 
 - **Added: SvelteKit 3 build and development support.** Current SvelteKit projects can install the adapter without peer overrides and use direct Vite configuration, with the generated server instance and shared server module graph preserving HTTP, WebSocket and metrics behavior across both supported framework majors.
   - **Affects:** Applications on SvelteKit 3 and existing SvelteKit 2 projects.
@@ -108,11 +115,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No code, type, export or option changes; only documentation files leave the package.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: WebSocket upgrade hooks cannot duplicate the Date header.** Upgrade response helpers and manually returned upgrade metadata reject Date case-insensitively because the native handshake writer already appends it, so successful WebSocket handshakes carry a single server date and an application cannot accidentally add a conflicting second value through either response path.
+  - **Affects:** Applications adding custom headers to successful WebSocket upgrades.
+  - **Action:** Remove Date from custom upgrade headers.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Custom upgrade headers containing Date now fail with a hook-error HTTP 500 instead of accepting a connection with duplicate dates. Remove that header to retain successful upgrades.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Changed: waiting-room renderers cannot override Date.** A custom waiting-room renderer supplying Date now falls back to the built-in page, preserving one transport-owned response date instead of sending a duplicate field, following the existing fallback behavior for invalid renderer results and keeping the holding page available when custom headers are rejected.
+  - **Affects:** Applications adding Date in custom waiting-room renderer headers.
+  - **Action:** Remove Date from renderer headers.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The fallback remains a valid waiting-room response; permitted custom headers retain their behavior.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: module request listeners follow explicit reconnects.** Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a permanently closed connection preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
+  - **Affects:** Applications using module-level request handlers or one-shot listeners.
+  - **Action:** No API change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Permanent close still prevents implicit reconnection.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: managed topic ownership applies to queued subscriptions.** Server-managed topic ownership now applies even when an ordinary listener attached first, and queued, retry, and reconnect subscription frames respect the current owner, so a frame prepared before the server claimed ownership no longer sends a redundant client subscription or bypasses the topic authorization model.
+  - **Affects:** Applications attaching server-managed and ordinary holders to the same topic.
+  - **Action:** Use setTopicManaged for topics authorized by the server.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Managed ownership remains in force until the final holder releases the topic or explicit unsubscribe clears it.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: ready response bodies retain their microtask timing.** Ready response reads resume within the current microtask checkpoint, preserving already-available body data when another request follows on the same connection, while one shared check-phase deadline still bounds deferred prefixes, and released deadlines are cancelled, so ready streams avoid unnecessary scheduling while deferred bodies retain their memory bound.
+  - **Affects:** Applications returning ready byte or TransformStream response bodies.
+  - **Action:** No configuration change is required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Deferred bodies retain bounded independent streaming; custom runtime schedulers may optionally provide clearImmediate.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value.
   - **Affects:** Memory dashboards and custom metric registries.
   - **Action:** Implement optional gauge.remove() to clear samples that become unavailable.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Registries without removal receive this gauge only when a permanent engine ceiling is available.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: throttling preserves finite retry budgets.** A throttling response now advances only the reconnect delay while the finite retry budget counts actual attempts, so a client with a small maxReconnectAttempts value can retry after a temporary rate limit instead of immediately exhausting attempts that it never made.
+  - **Affects:** Clients with a finite reconnect budget.
+  - **Action:** No option changes are required.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Authentication and socket-opening attempts each remain bounded at fifteen seconds; there is no overall reconnect deadline.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: reused upgrade data cannot retain connection internals.** An upgrade hook can reuse its application data object across connections without carrying adapter-owned slots into a later socket, because each accepted upgrade copies enumerable application properties while omitting internal connection symbols before reading their values and initializing fresh connection state.
+  - **Affects:** Hooks returning shared user-data objects.
+  - **Action:** Continue returning application data; do not use internal connection symbols as application fields.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Own enumerable string and application-symbol properties are preserved without mutating the source object.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran.
+  - **Affects:** Deployments observing connection setup failures after HTTP 101.
+  - **Action:** Monitor runtime.websocket-open.failed and ADAPTER-ERR-CONNECTION-SETUP.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Application hook failures keep their existing handling; structural invariant failures remain fatal.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: serialization failures leave publish sequence state unchanged.** Calling publish or publishBatched with data that JSON cannot represent now fails before assigning a topic sequence or mutating replay bookkeeping, so the next successful publish receives the next valid sequence and connected clients do not observe a fabricated delivery gap caused by a rejected application value.
+  - **Affects:** Applications calling publish or publishBatched with custom serialization or unsupported values.
+  - **Action:** Pass JSON-representable data and handle serialization errors at the caller.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid publish payloads and explicit sequence handling retain their existing wire format.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: plugin input failures are isolated at their entry point.** Presence and cursor reject a topic the wire encoder cannot carry before changing their state, and a failing topic in a scheduled presence or cursor callback no longer prevents the remaining topics from being processed, so one bad topic cannot stop heartbeats, diffs or cursor ticks for the others.
+  - **Affects:** Applications using the presence and cursor plugins.
+  - **Action:** Use topic strings without double quotes, backslashes or control characters, and handle errors from direct presence.join and cursor.update calls.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Valid inputs retain their behavior; invalid inputs fail before side effects.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: recovery authorization agrees across development and testing.** Development and test transports now refuse a recovery subscribe batch without a reference just as production does, and development rechecks subscription eligibility after an awaited recovery hook, preventing a revoked subscription from being admitted merely because it was allowed before the asynchronous work began.
+  - **Affects:** Applications testing recovery authorization and revocation.
+  - **Action:** Keep a numeric or string reference on recovery requests.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Reference zero remains valid; ordinary non-recovery subscription behavior is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: cursor mount failures release lifecycle ownership.** A canvas worker mount that fails during initialization now releases its status subscription, motion listeners and mount references before surfacing the error, so another mount can proceed when the canvas permits it and an old teardown cannot accidentally stop the replacement mount.
+  - **Affects:** Applications rendering cursors through a canvas worker.
+  - **Action:** Use a fresh canvas if its drawing surface was already transferred.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Normal shared mounts and idempotent cleanup remain supported; asynchronous failures are reported after cleanup.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: memory sampling follows changing container limits.** Each pressure sample reads the current cgroup limits, so changing a container limit takes effect without restarting the worker, while periodic membership discovery and an immediate retry when a remembered group disappears keep subsequent samples attached to the current hierarchy.
@@ -148,13 +239,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** Return an ordinary Response for intended HTTP statuses.
   - **Requires:** No new dependency or option.
   - **Compatibility:** HEAD errors omit the response body; valid admin responses keep their existing behavior.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Fixed: WebSocket upgrade hooks cannot duplicate the Date header.** Upgrade response helpers and manually returned upgrade metadata reject Date case-insensitively because the native handshake writer already appends it, so successful WebSocket handshakes carry a single server date and an application cannot accidentally add a conflicting second value through either response path.
-  - **Affects:** Applications adding custom headers to successful WebSocket upgrades.
-  - **Action:** Remove Date from custom upgrade headers.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Valid handshakes retain exactly one native Date header; other permitted headers are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: TLS error reporters cannot interrupt recovery cleanup.** A throwing error callback no longer escapes when a certificate watch is lost or interrupts the reload broadcast after a certificate read fails, allowing watcher cleanup to finish and every worker to receive its reload request while the prior certificate identity remains available.
@@ -266,7 +350,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Applications returning streamed or deferred response bodies.
   - **Action:** No configuration change is needed.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing.
+  - **Compatibility:** Ready finite bodies keep length framing and compression; bodies still pending after one event-loop check-phase allowance for their buffered prefix stream chunked without adapter compression or cross-request sharing. Concurrent anonymous requests for fetch relays or slow transforms with pending body reads render independently, even when their final body fits the sharing cap.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: malformed upgrades and disconnects cannot end the Vite dev server.** Invalid WebSocket request targets receive 400, and a peer reset while the handler loads or its asynchronous upgrade hook runs closes only that connection, leaving the same server available for subsequent clients to connect without restarting the development process or losing other live connections.
@@ -353,13 +437,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Only that one outcome changes. A dropped frame followed by entries that fall back to JSON still reports the status of the last send.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: the control-channel ceiling documents its worst case.** The README measured a subscribe batch of short topics, twelve times amplified; filling the 256-topic cap and padding with empty entries, each denied on its own, is twenty-one times, so the 4 MiB per 10 s budget is reached from about 20 KB/s of inbound, not 34.
-  - **Affects:** Operators sizing inbound limits in front of the adapter from the documented figures.
-  - **Action:** None; the ceiling itself is unchanged and still cuts such a client with 4429.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Documentation only.
-  - **Detail:** [Fixed engineering detail](#fixed).
-
 - **Fixed: a rate-limited auth preflight no longer closes the client for good.** The bundled client read every 4xx from the preflight as a verdict on the user, so a 429 - which clients behind one address earn together - marked them all permanently closed until a reload; a 429 now backs off like a throttling close, no sooner than its new Retry-After.
   - **Affects:** Apps using `connect({ auth: true })` whose users share an address (offices, schools, carrier NAT), and anything reading `failure` for the preflight.
   - **Action:** None. A UI keyed on `$failure.class === 'AUTH'` for a 429 now sees `'THROTTLE'` with `kind: 'auth-preflight'`.
@@ -371,7 +448,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Clients on networks that silently drop traffic (captive portals, broken proxies, mobile handovers).
   - **Action:** None.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option; the backoff, `maxReconnectAttempts` and the failure classes are unchanged.
+  - **Compatibility:** An attempt that answers within 15 seconds behaves exactly as before. The bound is internal, not an option, and does not change the backoff or the failure classes.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: the close-hook traffic stats say what bytesOut counts.** `bytesOut` was documented as bytes but adds the `length` of each frame, so a non-ASCII text frame counted fewer bytes than it put on the wire; the declaration now states the unit - bytes for binary frames, UTF-16 code units for text ones - and why it is kept.
@@ -500,7 +577,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Documentation only; the authenticate hook and build-time cookie warning are unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: control-frame amplification examples account for echoed references.** The earlier roughly 21x numeric-reference example was described as a worst case, but a 128-character reference measured roughly 60x on the same inbound byte budget when driven through the real lead runtime.
+- **Fixed: control-frame amplification examples account for echoed references.** Real runtime measurements distinguish short-topic batches, empty-entry overflow and longer echoed references, so operators can size inbound limits from the actual request shape without treating one amplification ratio as a universal upper bound or changing the existing per-connection control budget.
   - **Affects:** Operators sizing control traffic and readers comparing request and response bytes.
   - **Action:** Treat the ratios as measured examples, not upper bounds.
   - **Requires:** No new dependency or option.
@@ -538,6 +615,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **Authoritative platform member inventory.** The platform-contract entry exports a generated immutable list of public platform members, allowing extension wrappers and tests to compare their supported surface against the adapter declarations without maintaining a separate list that can silently omit new methods or inherited context members. Additive inventory; it does not establish which optional capabilities another runtime implements.
 
 - SvelteKit 3 uses the builder-generated server instance and the Vite SSR environment runner; SvelteKit 2 retains its existing builder and dev APIs. A locked application tests production and development HTTP, WebSocket delivery, shared module state, and module-level environment reads. Native ESM tests also pin sorted plugin entry discovery and the documented interleaving of static sibling entries at top-level await.
 
@@ -599,6 +678,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Operators sending repeated SIGTERM or SIGINT signals, including with SHUTDOWN_TIMEOUT=0.
   - **Action:** Send one signal to allow graceful cleanup; repeat only to force termination.
   - **Compatibility:** Repeated signals now end the process rather than being ignored.
+
+- Upgrade hooks returning Date now fail with a hook-error HTTP 500; remove custom Date headers to keep upgrades successful. Upgrade metadata validates reserved headers together, while ordinary native HTTP Responses omit their redundant Date header. A waiting-room renderer returning Date falls back to the built-in page; native responses retain one transport Date.
 
 - **Source comment accuracy and unused projection cleanup.** Redirect encoding
   now cites Location's URI-reference grammar; request-body comments describe
@@ -894,13 +975,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Retire wire topic IDs when their announcement is refused, so another codec on the same connection announces a fresh ID before sending binary. The testing server follows the same rule.
 
-- `platform.trace.withContext(null, fn)` clears inherited trace context across async work and suppresses the connection fallback. Development and testing expose the same context boundary.
+- `platform.trace.withContext(null, fn)` clears inherited trace context across async work and suppresses the connection fallback. Development and testing expose the same context boundary. A tracing provider receives a null parent for an operation started inside that boundary and must treat it as a root, as the README OpenTelemetry example does with `ROOT_CONTEXT`.
 
 - File-descriptor verification boots the generated server and checks low-limit warnings, exported gauges, and platform-specific metric availability.
 
 - Metric-label checks cover resource-growth probe names and detect instrument emitters in previously untested modules.
 
 - Runtime proxy warnings name the configured environment prefix in their explanations and suggested address, hop-depth, and trusted-proxy settings.
+
+- Module-level onRequest handlers and pending once listeners now follow a later explicit connect(), so replacing a permanently closed connection preserves listeners that are still active, while cleanup remains effective during replacement, including removal triggered by a callback, and removed listeners cannot reappear on the new connection.
+
+- Server-managed topic ownership now applies even when an ordinary listener attached first, and queued, retry, and reconnect subscription frames respect the current owner, so a frame prepared before the server claimed ownership no longer sends a redundant client subscription or bypasses the topic authorization model.
+
+- Ready response reads resume within the current microtask checkpoint, preserving already-available body data when another request follows on the same connection, while one shared check-phase deadline still bounds deferred prefixes, and released deadlines are cancelled, so ready streams avoid unnecessary scheduling while deferred bodies retain their memory bound.
+
+- The nginx WebSocket location matches its configured path exactly. Protocol conformance assertions retain an independent complete-paragraph oracle for unanswered recovery offsets. README growth requires an explicit old/new-limit record and full-history validation; publication records bind all immutable identity fields to npm-verified pins.
+
+- Release validation preserves every shell command boundary and rejects invalid event context before querying Git; executable regressions cover split publish flags and missing Git. JSDoc is attached to the declaration it describes, and shared projection comments state current matching rules.
+
+- Legacy diagnostic parsing attributes `svelte-adapter-bunserve`, `adapter-bunserve`, and valid `svelte-adapter-bunserve/<component>` prefixes to the Bun adapter. Tenancy documentation distinguishes tenant identity and metadata from separately configured admission budgets.
+
+- Presence and cursor client stores that use the shared connection stay offline after `close()` until an explicit `connect()` starts a replacement session.
+
+- The replay plugin client resumes an unanswered replay request after reconnection, including an explicit `connect()` that replaces a closed connection, from the last delivered replay sequence.
+
+- Vite development `platform.requestTopic` sends to the adapter's socket wrappers and skips members that are no longer open, as production and `createTestServer` do, and development `publishBatched` no longer counts topic broadcasts in a connection's direct-send counters.
+
+- Harness checks cover real CLI rejection, equals-form flags, deterministic module isolation and cached documentation analysis while retaining integration controls.
+
+- Native handshake tests require an actual 101. Native response closing and same-buffer pipelining limitations are documented in the architecture guide; setting Connection: close does not prove later buffered requests were never dispatched.
+
+- The memory notification contract routes future native hints to the next sampling tick without inventing saturation. Managed-topic authorization remains shared by all holders until final release.
+
+- Subscription pressure is the mean of landed subscriptions per live connection, compared with the configured `subscriberRatio` threshold and not clipped per connection; per-connection admission limits bound individual consumers separately.
+
+- **Cursor mount failures release lifecycle ownership.** A canvas worker mount that fails during initialization now releases its status subscription, motion listeners and mount references before surfacing the error, so another mount can proceed when the canvas permits it and an old teardown cannot accidentally stop the replacement mount. Normal shared mounts and idempotent cleanup remain supported; asynchronous failures are reported after cleanup.
+
+- **Recovery authorization agrees across development and testing.** Development and test transports now refuse a recovery subscribe batch without a reference just as production does, and development rechecks subscription eligibility after an awaited recovery hook, preventing a revoked subscription from being admitted merely because it was allowed before the asynchronous work began. Reference zero remains valid; ordinary non-recovery subscription behavior is unchanged.
+
+- **Plugin input failures are isolated at their entry point.** Presence and cursor reject a topic the wire encoder cannot carry before changing their state, and a failing topic in a scheduled presence or cursor callback no longer prevents the remaining topics from being processed, so one bad topic cannot stop heartbeats, diffs or cursor ticks for the others. Valid inputs retain their behavior; invalid inputs fail before side effects.
+
+- **Serialization failures leave publish sequence state unchanged.** Calling publish or publishBatched with data that JSON cannot represent now fails before assigning a topic sequence or mutating replay bookkeeping, so the next successful publish receives the next valid sequence and connected clients do not observe a fabricated delivery gap caused by a rejected application value. Valid publish payloads and explicit sequence handling retain their existing wire format.
+
+- **Connection setup failures release admitted capacity.** An allocation or registration failure after an accepted WebSocket handshake now closes that socket with a server-error code, emits a structured setup-failure event and releases its admission capacity, allowing another connection to enter without invoking an application close hook for an open hook that never ran. Application hook failures keep their existing handling; structural invariant failures remain fatal.
+
+- **Reused upgrade data cannot retain connection internals.** An upgrade hook can reuse its application data object across connections without carrying adapter-owned slots into a later socket, because each accepted upgrade copies enumerable application properties while omitting internal connection symbols before reading their values and initializing fresh connection state. Own enumerable string and application-symbol properties are preserved without mutating the source object.
+
+- **Throttling preserves finite retry budgets.** A throttling response now advances only the reconnect delay while the finite retry budget counts actual attempts, so a client with a small maxReconnectAttempts value can retry after a temporary rate limit instead of immediately exhausting attempts that it never made. Authentication and socket-opening attempts each remain bounded at fifteen seconds; there is no overall reconnect deadline.
 
 - **Unavailable memory walls do not report a fabricated ratio.** Workers omit the heap_used_ratio sample when neither an engine limit nor a container limit is available, and remove an earlier cgroup-only sample when that limit disappears, keeping telemetry from presenting an unknown memory ceiling as a measured zero or a stale value. Registries without removal receive this gauge only when a permanent engine ceiling is available.
 
@@ -915,8 +1036,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Simulations report swallowed framework assertions.** Framework assertion counters contribute deterministic invariant violations from initialization through teardown, even when application hooks catch the thrown assertion, so a simulation can no longer report a clean run merely because a hook swallowed a failure before the scenario observed it. Only assertions raised during the current run count; existing violations and replay behavior are retained.
 
 - **Invalid admin responses produce a valid server error.** Returning Response.error() from an admin hook now sends a valid HTTP 500 response rather than passing its zero status to the native response writer, preserving valid HTTP framing and allowing the server to answer the next request after the failed hook. HEAD errors omit the response body; valid admin responses keep their existing behavior.
-
-- **WebSocket upgrade hooks cannot duplicate the Date header.** Upgrade response helpers and manually returned upgrade metadata reject Date case-insensitively because the native handshake writer already appends it, so successful WebSocket handshakes carry a single server date and an application cannot accidentally add a conflicting second value through either response path. Valid handshakes retain exactly one native Date header; other permitted headers are unchanged.
 
 - **TLS error reporters cannot interrupt recovery cleanup.** A throwing error callback no longer escapes when a certificate watch is lost or interrupts the reload broadcast after a certificate read fails, allowing watcher cleanup to finish and every worker to receive its reload request while the prior certificate identity remains available. Lost watchers close once, workers still receive reload requests, and the last known certificate identity is retained on read failure.
 
@@ -1096,7 +1215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains recommended, and its implementation and build-time warning are
   unchanged. The protocol reference permits cookies on the handshake.
 - **Measured control-egress examples:** README and control-budget comments no
-  longer call a numeric-reference overflow batch the worst case. On the lead
+  longer call a numeric-reference overflow batch the worst case. On the production
   runtime, an 8,191-byte frame with ref 1 delivered 2,496 replies totaling
   177,042 payload bytes (21.6x); a 128-character ASCII ref delivered 2,453
   replies totaling 490,383 bytes (59.9x). Longer refs can amplify further.
@@ -1353,13 +1472,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The production preflight's 429 now writes that header. `test/client-real.test.js`
   pins the client with fake timers, and `test/auth-throttle-real.test.js` drives
   the built runtime past the budget and reads the header.
-
-- **The control-egress figures name the shape that amplifies most.** Measured
-  on the built runtime: 1,344 shortest-legal topics in 8,121 bytes draw 1,344
-  frames and 97,484 bytes; the 256-topic cap padded with empty strings, which
-  past the cap are only type-checked and each answered with a denial, draws
-  2,466 frames and 174,956 bytes for 8,175. README, `control-egress.js`,
-  `byte-budget.js` and the suite's header now quote the second.
 
 - **`sendWireBatch` returns the status of its last send in every branch.** The
   JSON fallback started its result at 1, so when the dropped binary frame was
