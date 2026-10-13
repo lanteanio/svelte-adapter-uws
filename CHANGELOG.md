@@ -220,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Normal shared mounts and idempotent cleanup remain supported; asynchronous failures are reported after cleanup.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Fixed: local smooth motion settles on its final frame.** The smooth client now paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest exactly on its settled position instead of stopping one frame short of it.
+- **Fixed: local smooth motion settles on its final frame.** The smooth client now paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest exactly on its settled position instead of staying where the last frame before the motion ended left it.
   - **Affects:** Applications rendering local smooth corrections or sweeps.
   - **Action:** No change is required.
   - **Requires:** No new dependency or option.
@@ -1000,7 +1000,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Retire wire topic IDs when their announcement is refused, so another codec on the same connection announces a fresh ID before sending binary. The testing server follows the same rule.
 
-- `platform.trace.withContext(null, fn)` clears inherited trace context across async work and suppresses the connection fallback. Development and testing expose the same context boundary. A tracing provider receives a null parent for an operation started inside that boundary and must treat it as a root, as the README OpenTelemetry example does with `ROOT_CONTEXT`.
+- `platform.trace.withContext(null, fn)` clears inherited trace context across async work and suppresses the connection fallback. Development and testing expose the same context boundary.
 
 - File-descriptor verification boots the generated server and checks low-limit warnings, exported gauges, and platform-specific metric availability.
 
@@ -1020,7 +1020,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Legacy diagnostic parsing attributes `svelte-adapter-bunserve`, `adapter-bunserve`, and valid `svelte-adapter-bunserve/<component>` prefixes to the Bun adapter. Tenancy documentation distinguishes tenant identity and metadata from separately configured admission budgets.
 
-- The smooth client paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest on its settled position instead of one frame short.
+- The smooth client paints the frame that ends a local correction or sweep, so a locally driven entity comes to rest on its settled position instead of where the last frame before the motion ended left it.
 
 - Presence and cursor client stores that use the shared connection stay offline after `close()` until an explicit `connect()` starts a replacement session.
 
@@ -1032,7 +1032,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native handshake tests require an actual 101. Native response closing and same-buffer pipelining limitations are documented in the architecture guide; setting Connection: close does not prove later buffered requests were never dispatched.
 
-- The architecture guide defines how an adapter that exposes native OS memory notifications uses them: as hints that move the next scheduled pressure sample, never as a saturation reading.
+- The architecture guide defines how an adapter that exposes native OS memory notifications uses them: as sampling hints that the next normally scheduled pressure tick consumes, refreshing cgroup membership discovery before it reads the memory walls, never as an extra sample or a saturation reading.
 
 - Subscription pressure is the mean of landed subscriptions per live connection, compared with the configured `subscriberRatio` threshold and not clipped per connection; per-connection admission limits bound individual consumers separately.
 

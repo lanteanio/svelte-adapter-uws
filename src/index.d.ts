@@ -1146,9 +1146,8 @@ export interface WebSocketOptions {
 	 *   memory limit, worst-of (gauge, sampled). The heap arm is
 	 *   per-isolate, so each worker has its own. Absent when neither wall is
 	 *   known; a registry with `remove()` drops a cgroup-only sample whose limit
-	 *   disappears. Above 0.7 the send gate grants
-	 *   flow-controlled connections smaller windows, half-size at the default
-	 *   0.85 MEMORY threshold.
+	 *   disappears. Above 0.7 the send gate grants flow-controlled connections
+	 *   smaller windows, half-size at the default 0.85 MEMORY threshold.
 	 * - `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` -
 	 *   kernel pressure-stall readings (gauges, sampled). Registered only when
 	 *   the startup probe finds PSI; a later transient read failure writes `NaN`
