@@ -11,6 +11,7 @@ describeUWS('WebSocket protocol required on a plain navigation', () => {
 		const response = await fetch(server.httpUrl + '/ws');
 		expect(response.status).toBe(426);
 		expect(response.headers.get('upgrade')).toBe('websocket');
+		expect(response.headers.get('connection').toLowerCase().split(/\s*,\s*/)).toContain('upgrade');
 		expect(await response.text()).toBe('WebSocket upgrade required');
 	});
 });

@@ -3309,6 +3309,7 @@ if (WS_ENABLED) {
 			res.cork(() => {
 				res.writeStatus('426 Upgrade Required');
 				res.writeHeader('upgrade', 'websocket');
+				res.writeHeader('connection', 'Upgrade');
 				res.writeHeader('content-type', 'text/plain');
 				res.end('WebSocket upgrade required');
 			});

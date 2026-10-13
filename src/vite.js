@@ -2783,8 +2783,8 @@ export default function uws(options = {}) {
 					if (handshakeRefusal !== null) {
 						socket.end(handshakeRefusal === 400
 							? 'HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request'
-							: 'HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: ' + WEBSOCKET_VERSION +
-								'\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: close\r\n\r\nUpgrade Required');
+							: 'HTTP/1.1 426 Upgrade Required\r\nUpgrade: websocket\r\nSec-WebSocket-Version: ' + WEBSOCKET_VERSION +
+								'\r\nContent-Type: text/plain\r\nContent-Length: 16\r\nConnection: Upgrade, close\r\n\r\nUpgrade Required');
 						return;
 					}
 					// The missing-Origin branch delegates trust to an app upgrade hook.

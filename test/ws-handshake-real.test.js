@@ -216,7 +216,11 @@ for (const surface of SURFACES) {
 			it(`answers ${expected} to ${name}`, async () => {
 				const { status, headers: got } = await exchange(port, headers);
 				expect(status).toBe(expected);
-				if (expected === 426) expect(got['sec-websocket-version']).toBe('13');
+				if (expected === 426) {
+					expect(got['sec-websocket-version']).toBe('13');
+					expect(got.upgrade).toBe('websocket');
+					expect(got.connection.toLowerCase().split(/\s*,\s*/)).toContain('upgrade');
+				}
 			});
 		}
 
@@ -349,7 +353,9 @@ describeUWS('the handshake is judged before capacity', () => {
 		const metrics = recordingRegistry();
 		const server = await createTestServer({ upgradeAdmission: { maxConnections: 5 }, metrics });
 		try {
-			expect((await exchange(server.port, [])).status, 'a navigation is told to upgrade').toBe(426);
+			const navigation = await exchange(server.port, []);
+			expect(navigation.status, 'a navigation is told to upgrade').toBe(426);
+			expect(navigation.headers.connection.toLowerCase().split(/\s*,\s*/)).toContain('upgrade');
 			expect((await exchange(server.port, [['Connection', 'Upgrade'], ['Upgrade', 'websocket']])).status).toBe(400);
 			expect(metrics.reason('upgrade_rejected_total', 'malformed_handshake')).toBe(1);
 		} finally {
