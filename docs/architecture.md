@@ -218,11 +218,10 @@ optional and is passed to the extension that should use it. It bounds backend
 failure latency; it does not prove that missed cross-instance events or writes
 were reconstructed.
 
-Tenant-qualified identity and migration requirements for erasure are defined
-in [the erasure identity contract](./contracts/tenant-erasure-identity.md).
-
-Durable enqueue identity, receipt recovery and retention are defined in
-[the enqueue receipt contract](./contracts/durable-enqueue-receipts.md).
+A store that erases by user must carry the tenant dimension or declare itself
+unscoped. A topic-bearing store scopes erasure by the tenant-qualified topic its
+records carry; an unscoped store relies on globally unique user IDs or on one
+physical store per tenant, which the caller selects.
 
 ## Subscription-pressure signal
 
