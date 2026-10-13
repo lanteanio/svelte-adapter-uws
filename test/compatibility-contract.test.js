@@ -148,10 +148,10 @@ describe("ecosystem compatibility manifest", () => {
 		expect(validateCompatibility(rows, pkg, trainFacts)).toEqual([]);
 		expect(rows.find((row) => row.current === "true")).toMatchObject({
 			train: "0.6",
-			realtime_version: "0.6.0-next.90",
-			extensions_version: "0.6.0-next.63",
-			realtime_head: "c76a05892aa6f95222644583f49ab22843d29e5c",
-			extensions_head: "90c9f887b888cef96a44c2113950f00e0b8f7f33",
+			realtime_version: "0.6.0-next.91",
+			extensions_version: "0.6.0-next.64",
+			realtime_head: "84421574722f9029399d29c8ee932fd575903ee7",
+			extensions_head: "cccfabe40367717e16a84f79cc8ce82339cb6780",
 			wire_protocol: "1",
 			procedure:
 				"docs/releasing.md#prerelease-publication docs/releasing.md#abort",

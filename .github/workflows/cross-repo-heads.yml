@@ -27,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXTENSIONS_REF: '90c9f887b888cef96a44c2113950f00e0b8f7f33'
-  REALTIME_REF: 'c76a05892aa6f95222644583f49ab22843d29e5c'
+  EXTENSIONS_REF: 'cccfabe40367717e16a84f79cc8ce82339cb6780'
+  REALTIME_REF: '84421574722f9029399d29c8ee932fd575903ee7'
 
 jobs:
   packed-heads:
