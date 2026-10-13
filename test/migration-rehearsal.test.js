@@ -113,7 +113,7 @@ function prepareMigratedConsumer(temp) {
 }
 
 describe('0.5 to 0.6 executable migration route', () => {
-	it('migrates the locked 0.5.9 consumer to the packed candidate and executes its modules', async () => {
+	it('migrates the locked 0.5.10 consumer to the packed candidate and executes its modules', async () => {
 		const baseline = JSON.parse(readFileSync(path.join(fixture, 'package.json'), 'utf8'));
 		const lock = lockFields(readFileSync(path.join(fixture, 'baseline.lock'), 'utf8'));
 		const rows = compatibilityRows();
@@ -124,9 +124,9 @@ describe('0.5 to 0.6 executable migration route', () => {
 		const era = rows.find((row) => row.adapter_version === lock['adapter.version']);
 		const candidate = rows.find((row) => row.current === 'true');
 
-		expect(baseline.dependencies['svelte-adapter-uws']).toBe('0.5.9');
+		expect(baseline.dependencies['svelte-adapter-uws']).toBe('0.5.10');
 		expect(lock['adapter.version']).toBe(baseline.dependencies['svelte-adapter-uws']);
-		expect(lock['adapter.integrity']).toBe('sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw==');
+		expect(lock['adapter.integrity']).toBe('sha512-v1wR2uwNcGJvrqZv0yl/fSgst8yGLGBfBkWOdIJWpqaHY+97/OGBZsdeGSWjKpY1O1CE3EixWH06zjIjsGVmcw==');
 		// The baseline quotes its era's native install spec WHOLE and verbatim
 		// - decomposing it into pieces would hide it from the pin scanner and
 		// from anyone grepping for the tag. The scanner detects it and allows

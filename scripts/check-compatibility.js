@@ -77,15 +77,10 @@ const REQUIRED_CHANNELS = new Map([
 	["prerelease", "next"],
 ]);
 const PUBLISHED_BASELINE_DIGESTS = new Map([
-	// Verified against npm metadata for immutable svelte-adapter-uws@0.5.9
-	// (integrity sha512-pEp8NI7b8bgBFtDYSYyl33zgmiAz0vkzTe5faK4SPuGcQswsmH8dE/
-	// FEv+kgs+2zkZMSVYjzNRmI8iE2jtrVdw==, published 2026-10-02T19:34:04.057Z on
-	// latest). Same columns as the 0.5.8 pin it replaces: train 0.5 with the
-	// six pre-contract release facts empty.
-	[
-		"npm:svelte-adapter-uws@0.5.9",
-		"fa41f354304e06bda3e4cf8a5fd0c306227bcd02ce54e3356e1f243fe0360f50",
-	],
+	// Verified against immutable npm metadata for svelte-adapter-uws@0.5.10,
+	// published 2026-10-09T19:15:32.275Z. The release ledger records its
+	// integrity and shasum; this digest binds all compatibility columns.
+	["npm:svelte-adapter-uws@0.5.10", "22f7335d7d38adb433882f3e15a745929d1fe56ed1e92517c37a3ff66755cdae"],
 ]);
 const COMPATIBILITY_GATE_COMMAND = "node scripts/check-compatibility.js";
 // The check chain already begins with the compatibility gate, so publication

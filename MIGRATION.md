@@ -11,7 +11,7 @@ guides do not move when a newer transition becomes current.
 ## Version selection
 
 <!-- compatibility-migration:start -->
-For the archived [0.4.x to 0.5.x guide](./docs/migrations/0.4-to-0.5.md), pin `svelte-adapter-uws@0.5.9`. The `@latest` and `@next` dist-tags move as releases are promoted; `@next` currently follows the `0.6.0-next` prerelease line. The active [0.5.x to 0.6.x guide](./docs/migrations/0.5-to-0.6.md) follows that prerelease line. See the generated compatibility table in the [README](./README.md#version-compatibility) before choosing a dist-tag.
+For the archived [0.4.x to 0.5.x guide](./docs/migrations/0.4-to-0.5.md), pin `svelte-adapter-uws@0.5.10`. The `@latest` and `@next` dist-tags move as releases are promoted; `@next` currently follows the `0.6.0-next` prerelease line. The active [0.5.x to 0.6.x guide](./docs/migrations/0.5-to-0.6.md) follows that prerelease line. See the generated compatibility table in the [README](./README.md#version-compatibility) before choosing a dist-tag.
 <!-- compatibility-migration:end -->
 
 ## Migration paths

@@ -201,13 +201,13 @@ The three ecosystem packages move together. Bump them as a group:
 | Channel | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Install tag | Runtime |
 |---|---|---|---|---|---|
 | legacy | `0.4.x` | `0.4.x` | `0.4.x` | n/a | n/a |
-| stable | `0.5.9` | `0.5.x` | `0.5.x` | `@latest` | Node `>=22.0.0`; uWS `v20.69.0` |
+| stable | `0.5.10` | `0.5.x` | `0.5.x` | `@latest` | Node `>=22.0.0`; uWS `v20.69.0` |
 | prerelease | `0.6.0-next.96` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
 
 Choose one complete adapter/native-addon tuple; do not mix rows:
 
 ```bash
-# stable 0.5.9 (@latest)
+# stable 0.5.10 (@latest)
 npm install svelte-adapter-uws@latest github:uNetworking/uWebSockets.js#v20.69.0
 # prerelease 0.6.0-next.96 (staged; run only after coordinated publication)
 npm install svelte-adapter-uws@0.6.0-next.96 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
@@ -279,7 +279,7 @@ npm install -D ws
 ```
 
 The prerelease candidate `0.6.0-next.96` adds an installed preflight
-binary; stable `0.5.9` does not contain this command and relies on its
+binary; stable `0.5.10` does not contain this command and relies on its
 automatic postinstall native-load check. On the prerelease candidate, run the
 preflight before editing configuration or spending a build on the app. It
 checks the running Node version, OS, CPU, Linux libc, and an actual load of the

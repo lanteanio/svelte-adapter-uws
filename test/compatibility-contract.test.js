@@ -138,8 +138,8 @@ describe("ecosystem compatibility manifest", () => {
 		]);
 		expect(rows.filter((row) => row.current === "true")).toHaveLength(1);
 		expect(rows.find((row) => row.channel === "stable")).toMatchObject({
-			adapter_version: "0.5.9",
-			provenance: "npm:svelte-adapter-uws@0.5.9",
+			adapter_version: "0.5.10",
+			provenance: "npm:svelte-adapter-uws@0.5.10",
 			uwebsockets: nativeSpec("v20.69.0"),
 		});
 	});
@@ -497,8 +497,8 @@ describe("ecosystem compatibility manifest", () => {
 			row.channel === "stable"
 				? {
 						...row,
-						adapter_version: "0.5.10",
-						provenance: "npm:svelte-adapter-uws@0.5.10",
+						adapter_version: "0.5.9999",
+						provenance: "npm:svelte-adapter-uws@0.5.9999",
 					}
 				: row,
 		);
@@ -727,7 +727,7 @@ describe("ecosystem compatibility manifest", () => {
 			renderMigrationCompatibility(rows),
 		);
 		expect(migration).toContain("archived [0.4.x to 0.5.x guide]");
-		expect(migration).toContain("pin `svelte-adapter-uws@0.5.9`");
+		expect(migration).toContain("pin `svelte-adapter-uws@0.5.10`");
 		expect(migration).toContain("active [0.5.x to 0.6.x guide]");
 		expect(migration).toContain(
 			"`@next` currently follows the `0.6.0-next` prerelease line",
@@ -1395,7 +1395,7 @@ describe("ecosystem compatibility manifest", () => {
 
 		// A superstring or a second version in a bound cell is drift, not a
 		// substring match.
-		const superstring = guide.replace("exact `0.5.9`", "exact `0.5.90`");
+		const superstring = guide.replace("exact `0.5.10`", "exact `0.5.100`");
 		expect(
 			validatePublishedCompatibilityDocuments(
 				{ [MIGRATION_GUIDE_RELATIVE_PATH]: superstring },
@@ -1403,7 +1403,7 @@ describe("ecosystem compatibility manifest", () => {
 			),
 		).toContain(
 			MIGRATION_GUIDE_RELATIVE_PATH +
-				" tuple table Rollback baseline adapter cell disagrees with docs/compatibility.v1.csv (expected 0.5.9)",
+				" tuple table Rollback baseline adapter cell disagrees with docs/compatibility.v1.csv (expected 0.5.10)",
 		);
 
 		// Renaming a bound row away does not escape the binding.
