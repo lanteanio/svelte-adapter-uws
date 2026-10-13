@@ -117,6 +117,7 @@ beforeEach(async () => {
 		/* no singleton yet */
 	}
 	MockWebSocket._last = null;
+	clientModule.connect({ url: 'ws://localhost:5173/ws' });
 	await flush(2);
 });
 
