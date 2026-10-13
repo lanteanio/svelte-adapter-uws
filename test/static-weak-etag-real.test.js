@@ -36,10 +36,10 @@ describeUWS('weak static entity tags on the wire', () => {
 		fs.writeFileSync(file + '.gz', zlib.gzipSync(CONTENT));
 		const mtime = new Date('2026-01-02T03:04:05Z');
 		fs.utimesSync(file, mtime, mtime);
-		const { manifest } = await import('./fixture/build/manifest-bridge.js');
-		immutable = '/weak-etag/' + manifest.appPath + '/immutable/etag.js';
-		fs.mkdirSync(path.join(dir, manifest.appPath, 'immutable'), { recursive: true });
-		fs.writeFileSync(path.join(dir, manifest.appPath, 'immutable', 'etag.js'), CONTENT);
+		const { appPath } = await import('./fixture/build/manifest-bridge.js');
+		immutable = '/weak-etag/' + appPath + '/immutable/etag.js';
+		fs.mkdirSync(path.join(dir, appPath, 'immutable'), { recursive: true });
+		fs.writeFileSync(path.join(dir, appPath, 'immutable', 'etag.js'), CONTENT);
 		const { cacheDir } = await import('./fixture/build/handler/static-assets.js');
 		cacheDir(dir, '/weak-etag', true);
 		for (const coding of ['identity', 'br', 'gzip']) {

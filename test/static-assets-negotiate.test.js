@@ -115,7 +115,7 @@ describeMaybe('static assets: per-encoding representations', () => {
 
 		const { cacheDir, serveStatic } = await import('./fixture/build/handler/static-assets.js');
 		const { staticCache } = await import('./fixture/build/handler/state.js');
-		const { manifest } = await import('./fixture/build/manifest-bridge.js');
+		const { appPath } = await import('./fixture/build/manifest-bridge.js');
 
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uws-static-negotiate-'));
 		brBytes = zlib.brotliCompressSync(Buffer.from(IDENTITY));
@@ -129,14 +129,14 @@ describeMaybe('static assets: per-encoding representations', () => {
 		fs.writeFileSync(path.join(tmpDir, 'bundle.zip'), IDENTITY);
 		fs.writeFileSync(path.join(tmpDir, 'bundle.zip.br'), brBytes);
 
-		const immutableRel = path.join(manifest.appPath, 'immutable', 'chunk.js');
+		const immutableRel = path.join(appPath, 'immutable', 'chunk.js');
 		fs.mkdirSync(path.dirname(path.join(tmpDir, immutableRel)), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, immutableRel), IDENTITY);
 		fs.writeFileSync(path.join(tmpDir, immutableRel + '.br'), brBytes);
 
 		cacheDir(tmpDir, '/negotiate-probe', false);
 		cacheDir(tmpDir, '/negotiate-immutable', true, null, [{
-			pattern: `/${manifest.appPath}/immutable/`,
+			pattern: `/${appPath}/immutable/`,
 			cacheControl: 'no-store'
 		}]);
 		cacheDir(tmpDir, '/negotiate-configured', false, { 'x-frame-options': 'DENY' });
@@ -146,7 +146,7 @@ describeMaybe('static assets: per-encoding representations', () => {
 		}]);
 
 		entry = staticCache.get('/negotiate-probe/asset.txt');
-		immutableEntry = staticCache.get(`/negotiate-immutable/${manifest.appPath}/immutable/chunk.js`);
+		immutableEntry = staticCache.get(`/negotiate-immutable/${appPath}/immutable/chunk.js`);
 		configuredEntry = staticCache.get('/negotiate-configured/asset.txt');
 		customCacheEntry = staticCache.get('/negotiate-custom-cache/asset.txt');
 		downloadEntry = staticCache.get('/negotiate-configured/bundle.zip');
