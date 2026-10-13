@@ -2547,7 +2547,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "017b1c05fedcd8548b85ca9dc806cbb48a1a6be36040c4b8f1b2df25144883a7",
+			"fingerprint": "2e4a6589efba92683863c7d42dc82022ea125d606550cdddcd825bf153262e45",
 			"occurrence": 1,
 			"language": "nginx",
 			"line": 6291,

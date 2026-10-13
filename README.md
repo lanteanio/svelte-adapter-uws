@@ -6296,8 +6296,8 @@ server {
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
-    # WebSocket - must be listed before the catch-all
-    location /ws {
+    # WebSocket - an exact match wins over the catch-all prefix
+    location = /ws {
         proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
