@@ -18,6 +18,11 @@ export interface SubscribableConnection {
  * subscription registry, charging the worker's accounting once. Idempotent for
  * a topic the connection already holds.
  *
+ * This records membership without minting an authorization grant. A denied wire
+ * attempt already awaiting its hook can unwind membership installed here. When a
+ * server grant must survive that denial, `await platform.subscribe(ws, topic)`:
+ * once the application hook allows it, the grant it records survives.
+ *
  * @returns false when the socket is already closed, or when the connection is
  *   at the per-connection subscription cap for a new topic; true otherwise.
  */
