@@ -1796,7 +1796,8 @@ export interface AccessibleWaitingDocument {
 	dir: 'ltr' | 'rtl' | 'auto';
 	/**
 	 * Optional extra response headers. Adapter-owned framing, cache, language,
-	 * and variation headers cannot be overridden.
+	 * and variation headers and the transport-owned `Date` cannot be
+	 * overridden; a renderer that sets them falls back to the built-in page.
 	 */
 	headers?: Record<string, string>;
 }

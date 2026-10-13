@@ -291,8 +291,9 @@ export const overloads: Readable<MessageOverload | null>;
  *
  * - `'TERMINAL'` - server permanently rejected the client (1008, 4401, 4403).
  *   The retry loop is stopped; the user must re-authenticate or refresh.
- * - `'EXHAUSTED'` - reconnect attempts exceeded `maxReconnectAttempts`. The
- *   network never came back; the user typically needs a manual retry.
+ * - `'EXHAUSTED'` - consecutive retries reached `maxReconnectAttempts`;
+ *   throttling raises the delay without spending attempts. The user
+ *   typically needs a manual retry.
  * - `'THROTTLE'` - server signalled rate-limiting (4429). Reconnect is still
  *   scheduled, but jumped ahead in the backoff curve.
  * - `'RETRY'` - normal transient drop (1006 abnormal closure, network blip,
