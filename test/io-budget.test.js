@@ -1087,7 +1087,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The registry emission shape and cold reporter changed; identifier metadata
 	// hashes strings only after failure. No queued payload/frame backing bytes,
 	// normal ingress or send ownership, or copy boundary changed.
-	ingress: 'b6ba42a3180a320043f254480643c53037c412a66f4c8bdb96ec613fb71acbbf',
+	// Shared modules moved this graph, ingress.js itself is unchanged:
+	// utils/epoch.js splits completeSerializedEnvelope out of completeEnvelope
+	// (the same string concatenation), utils/metrics.js gains remove and
+	// setOptional mirror methods, ws-symbols gains copyUpgradeUserData (an
+	// own-key copy of the upgrade object) and keeps registry state in a WeakMap
+	// that also marks unaccounted registries, wire.js exports retireWireId (one
+	// Map delete), plus a connection-setup registry entry, an optional flag on
+	// one manifest signal, two legacy diagnostic prefixes, a clearImmediate
+	// timer seam and a waiting-room Date header key. No frame byte is read,
+	// allocated or copied.
+	ingress: '39358cc7da2623e077b48ab2c3a5f06aa23f2bb5f181735d4fd660dca7b6df6d',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -2054,7 +2064,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The registry emission shape and cold reporter changed; identifier metadata
 	// hashes strings only after failure. No queued payload/frame backing bytes,
 	// normal ingress or send ownership, or copy boundary changed.
-	platform: '48cdc102754123e4c1a53b053bc8c352cd4232ca23588e5a8bbbac7929b4eb99',
+	// platform.js counts outbound bytes only for sends not dropped (the same
+	// send calls, their result now gates bumpOut), serializes publish and
+	// publishBatched bodies before stamping a seq through
+	// completeSerializedEnvelope (the same string concatenation, earlier), and
+	// resolves traceContext through tracing.js, which now runs a null context
+	// as an explicit boundary. The rest is the shared module drift of the
+	// ingress graph plus a cgroup limit sweep in memory-wall.js and an optional
+	// ratio counter in pressure-metrics.js, an unused import dropped from
+	// state.js, an env-prefixed proxy warning in config.js, wire-state.js
+	// retiring an unannounced wire id, and _init.js joining the graph through
+	// the bridges that now await it. No frame byte is read, allocated or copied.
+	platform: '36eb534cc6700c9995bf87f3b185902ee0205f7a5cdd1e6003d24706efd554dd',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -2456,7 +2477,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// It changes grants and subscription bookkeeping, not frame byte ownership.
 	// The shared registry and cold coalesced failure reporter also change this
 	// reachable graph; no fan-out backing bytes or copy boundary changed.
-	'wire-fanout': 'fc3ad12de4e3a97ef40bf0587a201850ed31158b748497c01a8fdaec9c8f0569',
+	// The ingress graph's shared module drift moves this one too, and
+	// wire-fanout.js itself is unchanged: string envelope completion split in
+	// utils/epoch.js, metric mirror methods, registry state in a WeakMap,
+	// copyUpgradeUserData, retireWireId, and data entries. No fan-out payload is
+	// read, allocated or copied.
+	'wire-fanout': '0412fff7a9cb9d20c10df45267db7153e7e54b31ed89c00038d5d7501a5b26b4',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
@@ -2468,7 +2494,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// leaseGrantSize by (1 - ratio) / (1 - HEAP_KNEE) above the knee instead of
 	// 1 - ratio, and its documentation says why the knee sits below the MEMORY
 	// threshold. Window arithmetic only; no bytes are copied or written differently.
-	wire: '6dc4e9d8f7158c3694077825679724bd4645b165713546741327be0e168c7e5d',
+	//
+	// Re-pinned for wire-id retirement: wire.js exports retireWireId, which
+	// deletes one topic from the per-connection id Map after a refused announce
+	// and never reuses the id. One cold Map delete; no byte is read, allocated
+	// or copied, and the frame builder and parser are unchanged.
+	wire: 'fd6db273734ca3ceef9fe18d5e2d5c945d41dd78cbabcde0a32b7e85db338405',
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
 	ingress: Object.freeze(['dispatchIngressFrame']),
