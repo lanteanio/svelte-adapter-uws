@@ -23,6 +23,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 
 **Getting started**
 - [Installation](#installation)
+- [SvelteKit 3 setup](#sveltekit-3-setup)
 - [Quick start: HTTP](#quick-start-http)
 - [Quick start: HTTPS](#quick-start-https)
 - [Quick start: WebSocket](#quick-start-websocket)
@@ -116,6 +117,32 @@ npm install -D ws
 ```
 
 ---
+
+## SvelteKit 3 setup
+
+Adapter 0.5.11 supports SvelteKit 2 and 3. SvelteKit 3 requires Node.js 22.17 or newer and Svelte 5. SvelteKit 2 projects can keep their existing configuration and Svelte 4 or 5.
+
+For SvelteKit 3, configure the adapter inside `sveltekit()` in `vite.config.js`. No `svelte.config.js` is required:
+
+```js
+import { defineConfig } from 'vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+import adapter from 'svelte-adapter-uws';
+import uws from 'svelte-adapter-uws/vite';
+
+export default defineConfig({
+  plugins: [
+    sveltekit({ adapter: adapter({ websocket: true }) }),
+    uws()
+  ]
+});
+```
+
+Place WebSocket hooks in `src/hooks.ws.js` or `src/hooks.ws.ts`. For a custom handler path, pass the same `handler` to `adapter({ websocket: { handler } })` and `uws({ handler })`. For HTTP only, use `adapter()` and omit `uws()`.
+
+The Vite plugin shares server modules between HTTP routes and WebSocket hooks in development and production. It is required for SvelteKit 3 `$app/env/*` imports in WebSocket handlers. Runtime environment variables are available to module-scope handler reads after SvelteKit initializes. Generated `__` server entries also evaluate after initialization on Kit 3; their static sibling imports retain normal top-level-await interleaving.
+
+The `svelte.config.js` examples below use SvelteKit 2 syntax. On Kit 3, pass the same adapter options to `sveltekit({ adapter: adapter(options) })` in the Vite configuration above.
 
 ## Quick start: HTTP
 

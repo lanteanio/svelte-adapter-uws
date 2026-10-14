@@ -439,6 +439,10 @@ export default function uws(options = {}) {
 
 	/** @type {import('vite').ViteDevServer | null} */
 	let viteServer = null;
+	let loadDevModule;
+	let useEnvironmentRunner = false;
+	const reloadModuleId = '\0svelte-adapter-uws:reload';
+	const reloadEvent = 'svelte-adapter-uws:reload';
 
 	/** @type {string | null} Resolved absolute path of the WS handler file */
 	let resolvedHandlerPath = null;
@@ -611,18 +615,98 @@ export default function uws(options = {}) {
 		return null;
 	}
 
+	function reloadHandlers() {
+		return loadDevModule(resolvedHandlerPath).then((mod) => {
+			handlerFailed = false;
+			if (mod.upgrade !== userHandlers.upgrade ||
+				mod.open !== userHandlers.open ||
+				mod.message !== userHandlers.message ||
+				mod.close !== userHandlers.close ||
+				mod.drain !== userHandlers.drain ||
+				mod.subscribe !== userHandlers.subscribe ||
+				mod.subscribeBatch !== userHandlers.subscribeBatch ||
+				mod.unsubscribe !== userHandlers.unsubscribe ||
+				mod.resume !== userHandlers.resume ||
+				mod.authenticate !== userHandlers.authenticate ||
+				mod.init !== userHandlers.init ||
+				mod.shutdown !== userHandlers.shutdown) {
+				applyHandlers(mod);
+				for (const ws of connections) ws.close(1012, 'Handler reloaded');
+				console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
+			}
+		}).catch((err) => {
+			handlerFailed = true;
+			console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
+		});
+	}
+
+	async function connectRunnerReload(server) {
+		const environment = server.environments.ssr;
+		const hot = environment.hot;
+		if (!hot) return;
+		const { onReload } = await environment.runner.import(reloadModuleId);
+		const pending = new Map();
+		let token = 0;
+		let active = true;
+		const disconnect = onReload(async (id) => {
+			const resolve = pending.get(id);
+			if (!resolve) return;
+			try {
+				if (active) await reloadHandlers();
+			} finally {
+				pending.delete(id);
+				resolve();
+			}
+		});
+		if (!disconnect) return;
+		const send = hot.send;
+		function sendWithReload(...args) {
+			const result = send.apply(this, args);
+			const payload = args[0];
+			if (active && resolvedHandlerPath && (payload?.type === 'full-reload' || payload?.type === 'update')) {
+				// The runner processes custom events after the preceding reload has
+				// cleared its cache and reimported affected route entrypoints.
+				const id = ++token;
+				handlerReady = new Promise(resolve => pending.set(id, resolve));
+				send.call(this, { type: 'custom', event: reloadEvent, data: id });
+			}
+			return result;
+		}
+		hot.send = sendWithReload;
+		server.httpServer.once('close', () => {
+			active = false;
+			disconnect();
+			if (hot.send === sendWithReload) hot.send = send;
+			for (const resolve of pending.values()) resolve();
+			pending.clear();
+		});
+	}
+
 	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
 	let ssrHandlerPath = /** @type {string | null} */ (null);
 
 	return {
 		name: 'svelte-adapter-uws',
+		resolveId(id) {
+			if (id === reloadModuleId) return id;
+		},
+		load(id) {
+			if (id === reloadModuleId) {
+				return `export function onReload(callback) {
+	const hot = import.meta.hot;
+	if (!hot) return;
+	hot.on(${JSON.stringify(reloadEvent)}, callback);
+	return () => hot.off(${JSON.stringify(reloadEvent)}, callback);
+}`;
+			}
+		},
 		configResolved(resolved) {
 			// Capture the handler path once the resolved Vite config is
 			// available. SvelteKit runs Vite 7's environment API with
 			// separate `client` and `ssr` environments; `env.isSsrBuild`
 			// in `config()` is `false` even during the SSR build, so we
-			// detect SSR via `resolved.build.ssr` instead.
-			if (resolved.build?.ssr) {
+			// detect the legacy SSR build or the shared server environment.
+			if (resolved.build?.ssr || (resolved.command === 'build' && resolved.environments?.ssr)) {
 				ssrHandlerPath = discoverHandler(resolved.root || process.cwd());
 			}
 		},
@@ -688,14 +772,30 @@ export default function uws(options = {}) {
 			viteServer = server;
 			const root = server.config.root;
 
-			// Load user's WebSocket handler via Vite's ssrLoadModule (handles TS/aliases/etc.)
+			// Kit 3 serves routes through the runnable SSR environment. Its legacy
+			// ssrLoadModule graph is separate, so using it would duplicate shared state.
+			useEnvironmentRunner = (server.config.plugins ?? []).some(plugin => plugin?.api?.options?.adapter?.name === 'adapter-uws');
+			const environmentReady = useEnvironmentRunner && !server.httpServer.listening
+				? new Promise(resolve => server.httpServer.once('listening', resolve))
+				: Promise.resolve();
+			let runnerReloadReady;
+			loadDevModule = async (id) => {
+				if (useEnvironmentRunner) {
+					await environmentReady;
+					await (runnerReloadReady ??= connectRunnerReload(server));
+					return server.environments.ssr.runner.import(id);
+				}
+				return server.ssrLoadModule(id);
+			};
+
+			// Load the user's WebSocket handler with TypeScript and alias support.
 			const handlerPath = options.handler
 				? path.resolve(root, options.handler)
 				: null;
 
 			if (handlerPath) {
 				resolvedHandlerPath = handlerPath;
-				handlerReady = server.ssrLoadModule(handlerPath).then((mod) => {
+				handlerReady = loadDevModule(handlerPath).then((mod) => {
 					handlerFailed = false;
 					applyHandlers(mod);
 				}).catch((err) => {
@@ -711,7 +811,7 @@ export default function uws(options = {}) {
 						if (!existsSync(fullPath)) continue;
 						resolvedHandlerPath = fullPath;
 						try {
-							const mod = await server.ssrLoadModule(fullPath);
+							const mod = await loadDevModule(fullPath);
 							handlerFailed = false;
 							applyHandlers(mod);
 							break;
@@ -1227,35 +1327,10 @@ export default function uws(options = {}) {
 				console.log(`[adapter-uws] Client must match: connect({ path: '${wsPath}' })`);
 			}
 		},
-		handleHotUpdate({ server }) {
-			if (!resolvedHandlerPath) return;
-			// Vite invalidates a module and all its importers when a file changes.
-			// Re-load the handler on every HMR update - ssrLoadModule returns the
-			// cached module instantly when nothing was invalidated, so this is cheap.
-			// We compare function references to detect actual changes.
-			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
-				handlerFailed = false;
-				if (mod.upgrade !== userHandlers.upgrade ||
-					mod.open !== userHandlers.open ||
-					mod.message !== userHandlers.message ||
-					mod.close !== userHandlers.close ||
-					mod.drain !== userHandlers.drain ||
-					mod.subscribe !== userHandlers.subscribe ||
-					mod.subscribeBatch !== userHandlers.subscribeBatch ||
-					mod.unsubscribe !== userHandlers.unsubscribe ||
-					mod.resume !== userHandlers.resume) {
-					applyHandlers(mod);
-					// Close existing connections so they reconnect with the new handler.
-					// 1012 = "Service Restart" - clients with auto-reconnect will reconnect.
-					for (const ws of connections) {
-						ws.close(1012, 'Handler reloaded');
-					}
-					console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
-				}
-			}).catch((err) => {
-				handlerFailed = true;
-				console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
-			});
+		handleHotUpdate() {
+			if (!resolvedHandlerPath || useEnvironmentRunner) return;
+			// Kit 2 invalidates its legacy SSR module graph before this hook.
+			handlerReady = reloadHandlers();
 		}
 	};
 }

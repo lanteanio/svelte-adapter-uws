@@ -68,6 +68,8 @@ export default function (opts = {}) {
 		name: 'adapter-uws',
 
 		async adapt(builder) {
+			const kitConfig = builder.config.paths ? builder.config : builder.config.kit;
+			const kit3 = typeof builder.generateServerInstance === 'function';
 			// Verify uWebSockets.js is installed - it's a native addon from GitHub,
 			// so install failures are common and produce confusing runtime errors
 			try {
@@ -88,8 +90,8 @@ export default function (opts = {}) {
 			builder.mkdirp(tmp);
 
 			builder.log.minor('Copying assets');
-			builder.writeClient(`${out}/client${builder.config.kit.paths.base}`);
-			builder.writePrerendered(`${out}/prerendered${builder.config.kit.paths.base}`);
+			builder.writeClient(`${out}/client${kitConfig.paths.base}`);
+			builder.writePrerendered(`${out}/prerendered${kitConfig.paths.base}`);
 
 			if (precompress) {
 				builder.log.minor('Compressing assets');
@@ -103,12 +105,23 @@ export default function (opts = {}) {
 
 			builder.writeServer(tmp);
 
+			if (kit3) {
+				builder.generateServerInstance(`${tmp}/manifest.js`, { serverDirectory: tmp });
+			} else {
+				writeFileSync(`${tmp}/manifest.js`, [
+					"import { Server } from './index.js';",
+					`const manifest = ${builder.generateManifest({ relativePath: './' })};`,
+					'export const server = new Server(manifest);'
+				].join('\n\n'));
+			}
+
 			writeFileSync(
 				`${tmp}/manifest.js`,
 				[
-					`export const manifest = ${builder.generateManifest({ relativePath: './' })};`,
+					readFileSync(`${tmp}/manifest.js`, 'utf8'),
+					`export const appPath = ${JSON.stringify(builder.getAppPath())};`,
 					`export const prerendered = new Set(${JSON.stringify(builder.prerendered.paths)});`,
-					`export const base = ${JSON.stringify(builder.config.kit.paths.base)};`
+					`export const base = ${JSON.stringify(kitConfig.paths.base)};`
 				].join('\n\n')
 			);
 
@@ -139,13 +152,13 @@ export default function (opts = {}) {
 						// it shares modules with the server bundle (no duplication).
 						const esbuild = await import('esbuild');
 						const { loadEnv } = await import('vite');
-						const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
-						const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
+						const libDir = path.resolve(kitConfig.files?.lib || 'src/lib');
+						const publicPrefix = kitConfig.env?.publicPrefix ?? 'PUBLIC_';
 						const allEnv = loadEnv('production', process.cwd(), '');
-						const version = builder.config.kit.version?.name ?? '';
+						const version = kitConfig.version?.name ?? '';
 
 						const aliasMap = { '$lib': libDir };
-						const kitAliases = builder.config.kit.alias;
+						const kitAliases = kitConfig.alias;
 						if (kitAliases) {
 							for (const [key, value] of Object.entries(kitAliases)) {
 								if (!(key in aliasMap)) {
@@ -170,6 +183,10 @@ export default function (opts = {}) {
 										namespace: 'sveltekit'
 									}));
 									build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
+										if (kit3 && args.path.startsWith('$app/env/')) {
+											throw new Error('SvelteKit 3 $app/env imports in WebSocket handlers require the Vite plugin. ' +
+												"Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.");
+										}
 										if (args.path === '$app/environment') {
 											return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
 										}
@@ -218,6 +235,12 @@ export default function (opts = {}) {
 
 			if (builder.hasServerInstrumentationFile?.()) {
 				input['instrumentation.server'] = `${tmp}/instrumentation.server.js`;
+				if (kit3) {
+					input['instrumentation-init'] = builder.createInstrumentationInitializer({
+						outputDirectory: `${tmp}/instrumentation`,
+						serverDirectory: tmp
+					});
+				}
 			}
 
 			// Include extra entry files written by Vite plugins (e.g. __live-registry.js).
@@ -225,7 +248,7 @@ export default function (opts = {}) {
 			const knownEntries = new Set(Object.values(input).map(f => path.basename(f)));
 			/** @type {string[]} */
 			const extraEntries = [];
-			for (const file of readdirSync(tmp)) {
+			for (const file of readdirSync(tmp).sort()) {
 				if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
 					const name = file.replace(/\.js$/, '');
 					input[name] = `${tmp}/${file}`;
@@ -385,8 +408,8 @@ export default function (opts = {}) {
 				replace: {
 					ENV: './env.js',
 					HANDLER: './handler.js',
+					EXTRA_ENTRIES: kit3 && extraEntries.length > 0 ? "await import('./extra-entries-bridge.js')" : '',
 					MANIFEST: './server/manifest.js',
-					SERVER: './server/index.js',
 					SHIMS: './shims.js',
 					WS_HANDLER: './server/ws-handler.js',
 					ENV_PREFIX: JSON.stringify(envPrefix),
@@ -406,7 +429,15 @@ export default function (opts = {}) {
 					.join('\n');
 				const indexPath = `${out}/index.js`;
 				const indexContent = readFileSync(indexPath, 'utf8');
-				writeFileSync(indexPath, entryImports + '\n' + indexContent);
+				if (kit3) {
+					// Keep sibling imports in one module so their top-level awaits can
+					// interleave, but evaluate the graph only after Kit initializes.
+					writeFileSync(`${out}/extra-entries.js`, entryImports + '\n');
+					writeFileSync(`${out}/extra-entries-bridge.js`,
+						"import './_init.js';\nawait import('./extra-entries.js');\n");
+				} else {
+					writeFileSync(indexPath, entryImports + '\n' + indexContent);
+				}
 				builder.log.minor(`Extra entries: ${extraEntries.join(', ')}`);
 			}
 
@@ -414,6 +445,7 @@ export default function (opts = {}) {
 				builder.instrument?.({
 					entrypoint: `${out}/index.js`,
 					instrumentation: `${out}/server/instrumentation.server.js`,
+					...(kit3 ? { initializer: `${out}/server/instrumentation-init.js` } : {}),
 					module: {
 						exports: ['host', 'port']
 					}

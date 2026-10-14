@@ -1,0 +1,110 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.23.2'
+          cache: 'npm'
+      - run: npm ci
+      - name: Require the native runtime
+        run: node -e "require('uWebSockets.js')"
+      - name: Run the complete unit and runtime suite
+        run: npm test
+      - name: Install the SvelteKit 2 application
+        working-directory: test/fixture
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Build and exercise SvelteKit 2 development and production
+        run: npm run test:e2e
+
+  svelte4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.23.2'
+          cache: 'npm'
+          cache-dependency-path: test/fixtures/svelte4/package-lock.json
+      - name: Install the locked Svelte 4 application
+        working-directory: test/fixtures/svelte4
+        run: npm ci --install-links
+      - name: Check Svelte 4 types and store syntax
+        working-directory: test/fixtures/svelte4
+        run: npm run check
+      - name: Build the Svelte 4 application
+        working-directory: test/fixtures/svelte4
+        run: npm run build
+      - name: Exercise Svelte 4 HTTP, SSR store, and WebSocket behavior
+        working-directory: test/fixtures/svelte4
+        run: npm run smoke
+
+  kit3:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.23.2'
+          cache: 'npm'
+          cache-dependency-path: test/fixtures/kit3/package-lock.json
+      - name: Install the adapter test dependencies
+        run: npm ci
+      - name: Install the locked SvelteKit 3 application
+        working-directory: test/fixtures/kit3
+        run: npm ci --install-links
+      - name: Reject private environment imports without the Vite plugin
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:fallback
+      - name: Build the SvelteKit 3 application
+        working-directory: test/fixtures/kit3
+        run: npm run build
+      - name: Exercise SvelteKit 3 production initialization, HTTP, and WebSockets
+        working-directory: test/fixtures/kit3
+        run: npm run smoke
+      - name: Exercise SvelteKit 3 development HTTP and WebSocket shared state
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev
+      - name: Build SvelteKit 3 with generated plugin entries
+        working-directory: test/fixtures/kit3
+        run: npm run build:entries
+      - name: Exercise generated entry initialization and static sibling evaluation
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:entries
+      - name: Exercise SvelteKit 3 initialization in a cluster worker
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:cluster
+      - name: Exercise SvelteKit 3 instrumentation environment initialization
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:instrumentation
+      - name: Exercise the locked Vite runner across HTTP, WebSocket, and authentication reloads
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:reload

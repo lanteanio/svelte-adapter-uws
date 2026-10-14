@@ -1,5 +1,13 @@
 # Migration guide: svelte-adapter-uws 0.4.x to 0.5.x
 
+## SvelteKit 3 with 0.5.11
+
+Install `svelte-adapter-uws@0.5.11` for SvelteKit 3 support on the stable line. Use Node.js 22.17 or newer and Svelte 5 for Kit 3. Move the adapter configuration from `svelte.config.js` into `sveltekit({ adapter: adapter(options) })` in `vite.config.js`; the [README setup](./README.md#sveltekit-3-setup) includes a complete example. Kit 2 projects keep their existing configuration and support Svelte 4 or 5.
+
+Keep `uws()` after `sveltekit()` when using WebSockets. If you set a custom WebSocket handler path, configure it in both plugins. The Vite plugin is required for Kit 3 `$app/env/*` imports in WebSocket hooks and shares one server module graph between HTTP and WebSocket handlers in development. Production initializes SvelteKit before evaluating WebSocket hooks or Kit 3 generated `__` server entries, so module-scope runtime environment reads work.
+
+## Upgrading from 0.4.x
+
 This guide is organized by **tier**. Most apps only need to read the first two sections.
 
 - **[Critical](#critical-read-first)** - security-class behavior changes; audit required.
@@ -8,7 +16,7 @@ This guide is organized by **tier**. Most apps only need to read the first two s
 - **[Recommended new patterns](#recommended-new-patterns)** - not required, but better.
 - **[Cosmetic](#cosmetic)** - type-only, internal refactors, niche edge cases.
 
-If you are upgrading via `npm install svelte-adapter-uws@latest`, the registry will pull whatever the current `latest` dist-tag points to. To pin a specific 0.5 prerelease, use `svelte-adapter-uws@next`.
+If you are upgrading via `npm install svelte-adapter-uws@latest`, the registry will pull whatever the current `latest` dist-tag points to. To pin this stable release, use `svelte-adapter-uws@0.5.11`. The `next` dist-tag selects the 0.6 prerelease line.
 
 If you have a small app and want the 5-minute version, see the [docs site upgrade quickstart](https://svelte-realtime.dev/docs/upgrade-quickstart).
 

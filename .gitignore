@@ -8,6 +8,7 @@ coverage
 source
 test/fixture/node_modules
 test/fixture/.svelte-kit
+test/fixtures/**/.svelte-kit
 test/fixture/build
 test/e2e/.svelte-kit
 test-results

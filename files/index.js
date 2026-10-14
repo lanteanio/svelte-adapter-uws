@@ -271,6 +271,8 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
+	EXTRA_ENTRIES;
+
 	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
 
 	if (isMainThread) {
