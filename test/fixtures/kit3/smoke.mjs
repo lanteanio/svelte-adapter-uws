@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
+import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import { WebSocket } from 'ws';
 
@@ -41,9 +42,13 @@ function frame(socket, predicate) {
 const fetchHTTP = globalThis.fetch;
 process.env.KIT3_MODULE_TOKEN = 'fixture-secret';
 const mode = process.argv[2] || 'production';
-assert.ok(['production', '--dev', 'entries', 'cluster', 'instrumented'].includes(mode), 'Unknown smoke mode');
-const dev = mode === '--dev';
-const cluster = mode === 'cluster';
+assert.ok(['production', '--dev', '--dev-reload', '--dev-no-adapter', '--dev-wrapped-adapter',
+	'entries', 'cluster', 'cluster-reuseport', 'instrumented'].includes(mode), 'Unknown smoke mode');
+const dev = mode.startsWith('--dev');
+const reload = mode === '--dev-reload';
+const configMode = mode === '--dev-no-adapter' ? 'no-adapter'
+	: mode === '--dev-wrapped-adapter' ? 'wrapped-adapter' : 'development';
+const cluster = mode === 'cluster' || mode === 'cluster-reuseport';
 const instrumentation = mode === 'instrumented' ? { instrumentation: 'fixture-secret' } : {};
 const entries = mode === 'entries' || cluster ? ['start', 'release', 'ready'] : [];
 const port = await freePort();
@@ -52,14 +57,19 @@ let output = '';
 let server;
 let child;
 let socket;
+const route = new URL('./src/routes/counter/+server.js', import.meta.url);
+const routeSave = new URL('./src/routes/counter/+server.js.next', import.meta.url);
+let originalRoute;
 try {
 	if (dev) {
 		const { createServer } = await import('vite');
-		server = await createServer({ server: { host: '127.0.0.1', port, strictPort: true } });
+		server = await createServer({ mode: configMode, server: { host: '127.0.0.1', port, strictPort: true } });
 		await server.listen();
 	} else {
 		child = spawn(process.execPath, ['build/index.js'], {
-			env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), ORIGIN: origin, CLUSTER_WORKERS: cluster ? '1' : '' },
+			env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), ORIGIN: origin, CLUSTER_WORKERS: cluster ? '1' : '',
+				CLUSTER_MODE: mode === 'cluster-reuseport' ? 'reuseport' : 'acceptor',
+				KIT3_INIT_DELAY_MS: mode === 'cluster' ? '750' : '' },
 			stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
 		});
 		child.stdout.on('data', data => { output += data; });
@@ -88,6 +98,12 @@ try {
 		'Extra entries finish before HTTP readiness and share the route module graph');
 	socket = new WebSocket('ws://127.0.0.1:' + port + '/ws', { headers: { Origin: origin } });
 	await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
+	const lifecycleBefore = frame(socket, value => value.type === 'fixture-lifecycle');
+	socket.send(JSON.stringify({ type: 'fixture-lifecycle' }));
+	const before = await lifecycleBefore;
+	assert.equal(before.initialized, true, 'The initial handler captured its platform in init');
+	assert.deepEqual(before.active, [before.instance]);
+	assert.deepEqual(before.events, [{ type: 'init', instance: before.instance }]);
 	const subscribed = frame(socket, value => value.type === 'subscribed' && value.topic === 'kit3');
 	socket.send(JSON.stringify({ type: 'subscribe', topic: 'kit3', ref: 'kit3-subscription' }));
 	await subscribed;
@@ -96,10 +112,47 @@ try {
 	assert.deepEqual((await delivered).data, { value: 42 });
 	assert.deepEqual(await (await fetchHTTP(origin + '/counter')).json(), { messages: 1, entries, ...instrumentation },
 		'HTTP and WebSocket share one server module instance');
+	if (reload) {
+		const closed = once(socket, 'close', { signal: AbortSignal.timeout(10000) });
+		originalRoute = await readFile(route, 'utf8');
+		await writeFile(routeSave, originalRoute + '\n// Reload the route module.\n');
+		await rename(routeSave, route);
+		assert.equal((await closed)[0], 1012, 'A route-only SSR edit restarts the WebSocket handler');
+
+		socket = new WebSocket('ws://127.0.0.1:' + port + '/ws', { headers: { Origin: origin } });
+		await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
+		const lifecycleAfter = frame(socket, value => value.type === 'fixture-lifecycle');
+		socket.send(JSON.stringify({ type: 'fixture-lifecycle' }));
+		const after = await lifecycleAfter;
+		assert.notEqual(after.instance, before.instance, 'The route edit created a fresh handler module');
+		assert.equal(after.initialized, true, 'The reloaded handler captured its platform before accepting messages');
+		assert.deepEqual(after.active, [after.instance], 'The old handler finished shutdown before the replacement became ready');
+		assert.deepEqual(after.events, [
+			{ type: 'init', instance: before.instance },
+			{ type: 'shutdown', instance: before.instance },
+			{ type: 'init', instance: after.instance }
+		]);
+		const resubscribed = frame(socket, value => value.type === 'subscribed' && value.topic === 'kit3');
+		socket.send(JSON.stringify({ type: 'subscribe', topic: 'kit3', ref: 'kit3-after-reload' }));
+		await resubscribed;
+		const redelivered = frame(socket, value => value.topic === 'kit3' && value.event === 'roundtrip');
+		socket.send(JSON.stringify({ type: 'fixture-publish', payload: { value: 43 } }));
+		assert.deepEqual((await redelivered).data, { value: 43 }, 'The replacement uses its initialized platform');
+		assert.deepEqual(await (await fetchHTTP(origin + '/counter')).json(), { messages: 1, entries: [] },
+			'HTTP and the reloaded WebSocket handler share one fresh server module instance');
+	}
 	console.log('Kit 3 ' + mode + ' smoke passed: server initialization, HTTP, and WebSocket shared state');
+} catch (error) {
+	if (output) console.error(output);
+	throw error;
 } finally {
 	socket?.terminate();
-	await server?.close();
+	try {
+		await server?.close();
+	} finally {
+		if (originalRoute !== undefined) await writeFile(route, originalRoute);
+		await unlink(routeSave).catch(error => { if (error.code !== 'ENOENT') throw error; });
+	}
 	if (child && child.exitCode === null) {
 		const exited = once(child, 'exit');
 		child.kill('SIGTERM');

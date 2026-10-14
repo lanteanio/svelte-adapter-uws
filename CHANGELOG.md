@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initialize SvelteKit before evaluating the WebSocket handler and, on SvelteKit 3, generated server entries, so module-scope environment reads receive initialized values.
 - Load development WebSocket handlers through the SvelteKit 3 SSR environment so HTTP routes and WebSocket handlers share one module graph, including after route-only hot reloads.
 - Bundle SvelteKit 3 instrumentation environment initialization with the production server.
+- Initialize each acceptor-mode cluster worker before registering it to receive connections.
+- Await WebSocket handler shutdown and initialization during development reloads, and discard stale module loads before they can replace the active handler.
+- Select the SvelteKit 3 development module graph independently of the configured adapter, and reject unsupported fallback environment imports with configuration instructions.
 
 ## [0.5.10] - 2026-10-09
 

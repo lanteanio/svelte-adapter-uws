@@ -1,33 +1,19 @@
-// Mechanical regression guard for dev/prod platform parity.
-//
-// Parses the `const platform = { ... }` ObjectExpression in files/handler.js
-// (production) and vite.js (dev) and asserts every key on the production
-// base platform exists on the dev base platform. New primitives that land
-// on prod must be mirrored on dev or this test fails with a list of the
-// missing keys.
-//
-// AST-based rather than runtime-based: the dev platform lives inside the
-// Vite plugin's configureServer callback and is awkward to construct from
-// a unit test, but the static shape is exactly what we want to verify.
-// acorn is already a transitive dev dep via Vite, so no new install.
-//
-// What this catches: any future PR that adds a method to the production
-// platform without mirroring it on the dev platform. The reverse (dev has
-// keys prod does not) is allowed in principle (dev-only debugging hooks),
-// so the assertion is one-directional: prod is a subset of dev.
+// Every production platform key must exist on the actual development platform.
+// Read production keys from its object declaration without starting a server;
+// construct the Vite plugin to include methods supplied by helper objects.
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import * as acorn from 'acorn';
+import uws from '../vite.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * Walk the AST and return the first `const platform = { ... }`
- * ObjectExpression found at any depth. Both files have exactly one
- * platform declaration; verified by the test below.
+ * ObjectExpression found at any depth.
  *
  * @param {string} filepath
  * @returns {Set<string>} top-level keys (methods, properties, getters)
@@ -74,10 +60,21 @@ function platformKeys(filepath) {
 describe('platform dev/prod parity', () => {
 	it('every key on the production base platform exists on the dev base platform', () => {
 		const prod = platformKeys(path.join(ROOT, 'files/handler.js'));
-		const dev = platformKeys(path.join(ROOT, 'vite.js'));
+		const previous = Object.getOwnPropertyDescriptor(globalThis, '__uws_dev_platform');
+		let dev;
+		try {
+			uws();
+			dev = new Set(Reflect.ownKeys(globalThis.__uws_dev_platform));
+			for (const name of ['subscribe', 'checkSubscribe', 'unsubscribe']) {
+				expect(typeof globalThis.__uws_dev_platform[name]).toBe('function');
+			}
+		} finally {
+			if (previous) Object.defineProperty(globalThis, '__uws_dev_platform', previous);
+			else delete globalThis.__uws_dev_platform;
+		}
 
 		// Sanity check: both sides have a non-trivial platform surface. If
-		// either is empty the AST walker found the wrong object.
+		// either is empty, the wrong object was inspected.
 		expect(prod.size).toBeGreaterThan(5);
 		expect(dev.size).toBeGreaterThan(5);
 

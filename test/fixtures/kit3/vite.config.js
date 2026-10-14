@@ -20,9 +20,13 @@ function extraEntries() {
 	};
 }
 
-export default defineConfig(({ mode }) => ({
-	plugins: [sveltekit({
-		appDir: '_kit3',
-		adapter: adapter({ websocket: { handler: './src/socket.js' } })
-	}), ...(mode === 'fallback' ? [] : [uws({ handler: './src/socket.js' })]), ...(mode === 'entries' ? [extraEntries()] : [])]
-}));
+export default defineConfig(({ mode }) => {
+	const configuredAdapter = adapter({ websocket: { handler: './src/socket.js' } });
+	return {
+		plugins: [sveltekit({
+			appDir: '_kit3',
+			adapter: mode === 'no-adapter' ? undefined
+				: mode === 'wrapped-adapter' ? { ...configuredAdapter, name: 'fixture-wrapper' } : configuredAdapter
+		}), ...(mode === 'fallback' ? [] : [uws({ handler: './src/socket.js' })]), ...(mode === 'entries' ? [extraEntries()] : [])]
+	};
+});

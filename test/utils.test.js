@@ -3059,6 +3059,8 @@ describe('describeUnsafeSameOriginConfig', () => {
 		expect(err).toMatch(/same-origin/);
 		expect(err).toMatch(/ORIGIN env unset/);
 		expect(err).toMatch(/unsafeSameOriginWithoutHostPin/);
+		expect(err).toContain('in the adapter options');
+		expect(err).not.toContain('svelte.config.js');
 	});
 });
 

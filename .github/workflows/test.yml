@@ -38,6 +38,9 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Build and exercise SvelteKit 2 development and production
         run: npm run test:e2e
+      - name: Exercise SvelteKit 2 generated entries and instrumentation
+        working-directory: test/fixture
+        run: npm run smoke:initialization
 
   svelte4:
     runs-on: ubuntu-latest
@@ -81,7 +84,7 @@ jobs:
       - name: Install the locked SvelteKit 3 application
         working-directory: test/fixtures/kit3
         run: npm ci --install-links
-      - name: Reject private environment imports without the Vite plugin
+      - name: Reject environment imports without the Vite plugin
         working-directory: test/fixtures/kit3
         run: npm run smoke:fallback
       - name: Build the SvelteKit 3 application
@@ -93,6 +96,15 @@ jobs:
       - name: Exercise SvelteKit 3 development HTTP and WebSocket shared state
         working-directory: test/fixtures/kit3
         run: npm run smoke:dev
+      - name: Reinitialize the real SvelteKit 3 handler after a route edit
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev:reload
+      - name: Exercise SvelteKit 3 development without a configured adapter
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev:no-adapter
+      - name: Exercise SvelteKit 3 development with a wrapper adapter
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev:wrapped-adapter
       - name: Build SvelteKit 3 with generated plugin entries
         working-directory: test/fixtures/kit3
         run: npm run build:entries
@@ -102,6 +114,10 @@ jobs:
       - name: Exercise SvelteKit 3 initialization in a cluster worker
         working-directory: test/fixtures/kit3
         run: npm run smoke:cluster
+      - name: Exercise SvelteKit 3 initialization with reuseport workers
+        if: runner.os == 'Linux'
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:cluster:reuseport
       - name: Exercise SvelteKit 3 instrumentation environment initialization
         working-directory: test/fixtures/kit3
         run: npm run smoke:instrumentation

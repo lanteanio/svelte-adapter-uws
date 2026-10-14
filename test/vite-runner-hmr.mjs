@@ -1,4 +1,5 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
@@ -6,6 +7,9 @@ import path from 'node:path';
 import WebSocket from 'ws';
 const { createServer } = await import(process.env.VITE_HMR_ENTRY || 'vite');
 import uws from '../vite.js';
+
+const fixtureBase = process.env.UWS_HMR_TEST_ROOT || await mkdtemp(path.join(tmpdir(), 'uws-hmr-'));
+after(() => rm(fixtureBase, { recursive: true, force: true }));
 
 async function waitFor(check) {
 	const deadline = Date.now() + 5000;
@@ -28,18 +32,68 @@ export function open(ws) { ws.send(JSON.stringify({ state, handler: ${version} }
 export function message(ws) { state.count++; ws.send(JSON.stringify({ state, handler: ${version} })); }
 `;
 
+const lifecycleHandler = (version, { importDelay = 0, initDelay = 20, shutdownDelay = 20, failInit = false, upgradeDelay = 0, platformChecks = false } = {}) => key => `
+import { state } from './shared.js';
+const lifecycle = globalThis[${JSON.stringify(key)}];
+const id = crypto.randomUUID();
+lifecycle.events.push(['load', ${version}, id]);
+await new Promise(resolve => setTimeout(resolve, ${importDelay}));
+let captured;
+let timer;
+const subscriptionData = { [Symbol.for('adapter-uws.ws.subscriptions')]: new Set() };
+const subscriptionSocket = { getUserData: () => subscriptionData, subscribe() {}, unsubscribe() {} };
+const snapshot = () => ({ state, version: ${version}, id, captured: !!captured });
+export async function init({ platform }) {
+ lifecycle.events.push(['init:start', ${version}, id]);
+ await new Promise(resolve => setTimeout(resolve, ${initDelay}));
+ ${failInit ? "throw new Error('Initialization failed');" : ''}
+ captured = platform;
+ ${platformChecks ? `subscriptionData[Symbol.for('adapter-uws.ws.platform')] = platform;
+ lifecycle.events.push(['platform:check', ${version}, id, await platform.checkSubscribe(subscriptionSocket, 'private')]);
+ lifecycle.events.push(['platform:subscribe', ${version}, id, await platform.subscribe(subscriptionSocket, 'private')]);
+ lifecycle.events.push(['platform:public', ${version}, id, await platform.subscribe(subscriptionSocket, 'public')]);` : ''}
+ timer = setInterval(() => {}, 10000);
+ timer.unref();
+ lifecycle.active.add(id);
+ lifecycle.events.push(['init:end', ${version}, id]);
+}
+export async function shutdown({ platform }) {
+ lifecycle.events.push(['shutdown:start', ${version}, id]);
+ await new Promise(resolve => setTimeout(resolve, ${shutdownDelay}));
+ ${platformChecks ? "platform.unsubscribe(subscriptionSocket, 'public');" : ''}
+ clearInterval(timer);
+ lifecycle.active.delete(id);
+ lifecycle.events.push(['shutdown:end', ${version}, id]);
+}
+${upgradeDelay ? `export async function upgrade() {
+ lifecycle.events.push(['upgrade:start', ${version}, id]);
+ await new Promise(resolve => setTimeout(resolve, ${upgradeDelay}));
+ lifecycle.events.push(['upgrade:end', ${version}, id]);
+ return {};
+}` : ''}
+export function open(ws) { lifecycle.events.push(['open', ${version}, id]); ws.send(JSON.stringify(snapshot())); }
+export function message() { lifecycle.events.push(['message', ${version}, id]); }
+export function subscribe(_ws, topic) { lifecycle.events.push(['subscribe', ${version}, id]); ${platformChecks ? "if (topic === 'private') return false;" : ''} }
+export function unsubscribe() { lifecycle.events.push(['unsubscribe', ${version}, id]); }
+export function resume() { lifecycle.events.push(['resume', ${version}, id]); }
+export function close() { lifecycle.events.push(['close', ${version}, id]); }
+export function authenticate() { return Response.json(snapshot()); }
+`;
+
 // Replace a complete source file so the watcher never reads a truncated save.
 async function saveSource(file, source) {
 	await writeFile(file + '.next', source);
 	await rename(file + '.next', file);
 }
 
-async function createFixture(hmr = true, handler = handlerSource(1)) {
-	const root = await mkdtemp(path.join(process.cwd(), '.vite-hmr-test-'));
+async function createFixture(hmr = true, handler = handlerSource(1), options = { allowedOrigins: '*' }) {
+	const root = await mkdtemp(path.join(fixtureBase, 'app-'));
+	const lifecycleKey = `uws-lifecycle:${root}`;
+	const lifecycle = globalThis[lifecycleKey] = { events: [], active: new Set() };
 	await Promise.all([
 		writeFile(path.join(root, 'package.json'), '{"type":"module"}\n'),
 		writeFile(path.join(root, 'shared.js'), 'export const state = { id: crypto.randomUUID(), count: 0 };\n'),
-		writeFile(path.join(root, 'handler.js'), handler),
+		writeFile(path.join(root, 'handler.js'), typeof handler === 'function' ? handler(lifecycleKey) : handler),
 		writeFile(path.join(root, 'route.js'), routeSource(1))
 	]);
 	let originalSend;
@@ -53,8 +107,8 @@ async function createFixture(hmr = true, handler = handlerSource(1)) {
 		optimizeDeps: { noDiscovery: true },
 		server: { host: '127.0.0.1', port: 0, hmr },
 		plugins: [{
-			name: 'server-routes',
-			api: { options: { adapter: { name: 'adapter-uws' } } },
+			name: 'vite-plugin-sveltekit-setup',
+			api: { options: { paths: {}, kit: {}, adapter: { name: 'adapter-uws' } } },
 			configureServer(vite) {
 				const hot = vite.environments.ssr.hot;
 				const send = hot.send;
@@ -75,12 +129,14 @@ async function createFixture(hmr = true, handler = handlerSource(1)) {
 					}
 				});
 			}
-		}, uws({ handler: './handler.js', allowedOrigins: '*' })]
+		}, uws({ handler: './handler.js', ...options })]
 	});
 	await server.listen();
 	const origin = () => `http://127.0.0.1:${server.httpServer.address().port}`;
 	return {
-		server,
+		server, lifecycle,
+		writeHandlerSource: (source) => saveSource(path.join(root, 'handler.js'), typeof source === 'function' ? source(lifecycleKey) : source),
+		removeHandler: () => rm(path.join(root, 'handler.js')),
 		get reloads() { return reloads; },
 		get originalSend() { return originalSend; },
 		writeRoute: (version, delay) => saveSource(path.join(root, 'route.js'), routeSource(version, delay)),
@@ -90,12 +146,20 @@ async function createFixture(hmr = true, handler = handlerSource(1)) {
 			assert.equal(response.status, 200);
 			return response.json();
 		},
-		async authenticate() {
+		async authenticate(status = 200) {
 			const response = await fetch(`${origin()}/__ws/auth`, {
-				method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest' }
+				method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest' }, signal: AbortSignal.timeout(3000)
 			});
-			assert.equal(response.status, 200);
-			return response.json();
+			assert.equal(response.status, status);
+			return status === 200 ? response.json() : response.text();
+		},
+		async rejectedUpgrade() {
+			const socket = new WebSocket(origin().replace('http:', 'ws:') + '/ws');
+			clients.push(socket);
+			return new Promise((resolve, reject) => {
+				socket.once('error', error => resolve(error.message));
+				socket.once('open', () => { socket.terminate(); reject(new Error('Upgrade unexpectedly succeeded')); });
+			});
 		},
 		async connect() {
 			const socket = new WebSocket(origin().replace('http:', 'ws:') + '/ws');
@@ -114,15 +178,214 @@ async function createFixture(hmr = true, handler = handlerSource(1)) {
 			return { socket, next, initial: await next() };
 		},
 		async close() {
-			for (const client of clients) client.terminate();
-			await server.close();
-			assert.equal(server.environments.ssr.hot.send, originalSend);
-			await rm(root, { recursive: true, force: true });
+			try {
+				for (const client of clients) client.terminate();
+				await server.close();
+				assert.equal(server.environments.ssr.hot.send, originalSend);
+			} finally {
+				delete globalThis[lifecycleKey];
+				await rm(root, { recursive: true, force: true });
+			}
 		}
 	};
 }
 
 describe('shared SSR runner hot reload', () => {
+	it('awaits old shutdown and fresh init for WebSocket and authentication requests', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { initDelay: 80, shutdownDelay: 80 }));
+		try {
+			const first = await fixture.connect();
+			assert.equal(first.initial.captured, true);
+			await fixture.http();
+			await fixture.writeRoute(2);
+			await waitFor(() => assert.ok(fixture.reloads > 0));
+			const [second, auth] = await Promise.all([fixture.connect(), fixture.authenticate()]);
+			assert.equal(second.initial.captured, true);
+			assert.equal(auth.id, second.initial.id);
+			assert.notEqual(auth.id, first.initial.id);
+			assert.deepEqual(second.initial.state, (await fixture.http()).state);
+			assert.deepEqual([...fixture.lifecycle.active], [second.initial.id]);
+			assert.deepEqual(fixture.lifecycle.events.filter(([event]) => event.startsWith('init:') || event.startsWith('shutdown:')).map(([event, , id]) => [event, id]), [
+				['init:start', first.initial.id], ['init:end', first.initial.id],
+				['shutdown:start', first.initial.id], ['shutdown:end', first.initial.id],
+				['init:start', second.initial.id], ['init:end', second.initial.id]
+			]);
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, , id]) => event === 'close' && id === first.initial.id)));
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	it('never installs an initial import after a newer handler has initialized', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { importDelay: 700 }));
+		try {
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'load' && version === 1)));
+			await fixture.writeHandlerSource(lifecycleHandler(2, { importDelay: 10 }));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 2)));
+			const newest = await fixture.connect();
+			assert.equal(newest.initial.version, 2);
+			await delay(750);
+			const later = await fixture.authenticate();
+			assert.equal(later.id, newest.initial.id);
+			assert.deepEqual(later.state, (await fixture.http()).state);
+			assert.equal(fixture.lifecycle.events.some(([event, version]) => event === 'init:start' && version === 1), false);
+			assert.deepEqual([...fixture.lifecycle.active], [newest.initial.id]);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	it('fails closed after init errors and recovers with exactly one initialized owner', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1));
+		try {
+			await fixture.connect();
+			await fixture.writeHandlerSource(lifecycleHandler(2, { failInit: true }));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'shutdown:end' && version === 2)));
+			assert.match(await fixture.rejectedUpgrade(), /500/);
+			await fixture.authenticate(500);
+			assert.equal(fixture.lifecycle.active.size, 0);
+			await fixture.writeHandlerSource(lifecycleHandler(3));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 3)));
+			const recovered = await fixture.connect();
+			assert.equal(recovered.initial.version, 3);
+			assert.equal(recovered.initial.captured, true);
+			assert.equal((await fixture.authenticate()).id, recovered.initial.id);
+			assert.deepEqual([...fixture.lifecycle.active], [recovered.initial.id]);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	it('recovers after deleting and recreating the handler', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1));
+		try {
+			await fixture.connect();
+			await fixture.removeHandler();
+			await waitFor(() => assert.equal(fixture.lifecycle.active.size, 0));
+			assert.match(await fixture.rejectedUpgrade(), /500/);
+			await fixture.authenticate(500);
+			await fixture.writeHandlerSource(lifecycleHandler(2));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 2)));
+			const recovered = await fixture.connect();
+			assert.equal(recovered.initial.version, 2);
+			assert.equal(recovered.initial.captured, true);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	for (const phase of ['startup', 'replacement']) it(`awaits ${phase} initialization before admitting a client without Origin`, async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { initDelay: 300, upgradeDelay: 10 }), {});
+		try {
+			let initial;
+			if (phase === 'replacement') {
+				await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event]) => event === 'init:end')));
+				initial = (await fixture.connect()).initial;
+				await fixture.http();
+				await fixture.writeRoute(2);
+			}
+			const expectedStarts = phase === 'startup' ? 1 : 2;
+			await waitFor(() => assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'init:start').length, expectedStarts));
+			assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'init:end').length, expectedStarts - 1);
+			const current = await fixture.connect();
+			assert.equal(current.initial.captured, true);
+			if (initial) assert.notEqual(current.initial.id, initial.id);
+			const events = fixture.lifecycle.events.filter(([, , id]) => id === current.initial.id).map(([event]) => event);
+			assert.ok(events.indexOf('init:end') < events.indexOf('upgrade:start'));
+			assert.ok(events.indexOf('upgrade:end') < events.indexOf('open'));
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	it('keeps subscription gates owned by the module during init and shutdown', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { platformChecks: true }));
+		let second;
+		try {
+			const first = await fixture.connect();
+			assert.deepEqual(fixture.lifecycle.events.filter(([event]) => event.startsWith('platform:')).map(([event, , id, result]) => [event, id, result]), [
+				['platform:check', first.initial.id, 'FORBIDDEN'],
+				['platform:subscribe', first.initial.id, 'FORBIDDEN'],
+				['platform:public', first.initial.id, null]
+			]);
+			await fixture.http();
+			await fixture.writeRoute(2);
+			await waitFor(() => assert.ok(fixture.reloads > 0));
+			second = await fixture.connect();
+			assert.notEqual(second.initial.id, first.initial.id);
+			assert.deepEqual(fixture.lifecycle.events.filter(([event]) => event === 'unsubscribe').map(([, , id]) => id), [first.initial.id]);
+			assert.equal(fixture.lifecycle.events.filter(([event, , , result]) => event === 'platform:check' && result === 'FORBIDDEN').length, 2);
+			assert.equal(fixture.lifecycle.events.filter(([event, , , result]) => event === 'platform:subscribe' && result === 'FORBIDDEN').length, 2);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+		assert.equal(fixture.lifecycle.events.filter(([event, , id]) => event === 'unsubscribe' && id === second.initial.id).length, 1);
+	});
+
+	it('rejects an old async upgrade while a replacement is still initializing', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { initDelay: 400, upgradeDelay: 300 }));
+		try {
+			await fixture.authenticate();
+			await fixture.http();
+			const upgrading = fixture.rejectedUpgrade();
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event]) => event === 'upgrade:start')));
+			await fixture.writeRoute(2);
+			await waitFor(() => assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'init:start').length, 2));
+			assert.match(await upgrading, /503/);
+			assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'init:end').length, 1);
+			assert.equal(fixture.lifecycle.events.some(([event]) => event === 'open'), false);
+			const current = await fixture.connect();
+			assert.equal(current.initial.captured, true);
+			assert.deepEqual(current.initial.state, (await fixture.http()).state);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	it('drops queued data and control frames from a retired connection', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1));
+		try {
+			const first = await fixture.connect();
+			await fixture.http();
+			await fixture.writeRoute(2, 300);
+			await waitFor(() => assert.ok(fixture.reloads > 0));
+			first.socket.send('queued');
+			first.socket.send(JSON.stringify({ type: 'subscribe', topic: 'queued', ref: 1 }));
+			first.socket.send(JSON.stringify({ type: 'resume', sessionId: 'old', lastSeenSeqs: {} }));
+			const current = await fixture.connect();
+			assert.notEqual(first.initial.id, current.initial.id);
+			await waitFor(() => assert.equal(first.socket.readyState, WebSocket.CLOSED));
+			assert.equal(fixture.lifecycle.events.some(([event]) => ['message', 'subscribe', 'resume'].includes(event)), false);
+			current.socket.send('new frame');
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, , id]) => event === 'message' && id === current.initial.id)));
+		} finally { await fixture.close(); }
+	});
+
+	it('retires an initialization superseded by another real runner reload', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1));
+		try {
+			await fixture.connect();
+			await fixture.writeHandlerSource(lifecycleHandler(2, { initDelay: 300 }));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:start' && version === 2)));
+			await fixture.writeHandlerSource(lifecycleHandler(3));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 3)));
+			const current = await fixture.connect();
+			assert.equal(current.initial.version, 3);
+			assert.deepEqual([...fixture.lifecycle.active], [current.initial.id]);
+			assert.deepEqual(fixture.lifecycle.events.filter(([event]) => event.startsWith('init:') || event.startsWith('shutdown:')).map(([event, version]) => [event, version]), [
+				['init:start', 1], ['init:end', 1], ['shutdown:start', 1], ['shutdown:end', 1],
+				['init:start', 2], ['init:end', 2], ['shutdown:start', 2], ['shutdown:end', 2],
+				['init:start', 3], ['init:end', 3]
+			]);
+		} finally { await fixture.close(); }
+		assert.equal(fixture.lifecycle.active.size, 0);
+	});
+
+	for (const stage of ['import', 'init']) it(`closes safely during pending handler ${stage}`, async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, stage === 'import' ? { importDelay: 400 } : { initDelay: 400 }));
+		try {
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event]) => event === (stage === 'import' ? 'load' : 'init:start'))));
+		} finally { await fixture.close(); }
+		await delay(450);
+		assert.equal(fixture.lifecycle.active.size, 0);
+		assert.equal(fixture.lifecycle.events.some(([event]) => event === 'open'), false);
+		assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'shutdown:end').length, stage === 'init' ? 1 : 0);
+		assert.equal(fixture.lifecycle.events.filter(([event]) => event === 'init:start').length, stage === 'init' ? 1 : 0);
+	});
+
 	it('keeps HTTP and WebSocket state shared after a route-only edit', async () => {
 		const fixture = await createFixture();
 		try {

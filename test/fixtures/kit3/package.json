@@ -10,9 +10,13 @@
 		"build:entries": "vite build --mode entries",
 		"smoke:entries": "node smoke.mjs entries",
 		"smoke:cluster": "node smoke.mjs cluster",
+		"smoke:cluster:reuseport": "node smoke.mjs cluster-reuseport",
 		"smoke:fallback": "node fallback-smoke.mjs",
 		"smoke:instrumentation": "node instrumentation-smoke.mjs",
-		"smoke:reload": "node runner-hmr.mjs"
+		"smoke:reload": "node runner-hmr.mjs",
+		"smoke:dev:reload": "node smoke.mjs --dev-reload",
+		"smoke:dev:no-adapter": "node smoke.mjs --dev-no-adapter",
+		"smoke:dev:wrapped-adapter": "node smoke.mjs --dev-wrapped-adapter"
 	},
 	"dependencies": {
 		"@sveltejs/kit": "3.0.1",

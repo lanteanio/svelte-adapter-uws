@@ -4,7 +4,7 @@
 
 Install `svelte-adapter-uws@0.5.11` for SvelteKit 3 support on the stable line. Use Node.js 22.17 or newer and Svelte 5 for Kit 3. Move the adapter configuration from `svelte.config.js` into `sveltekit({ adapter: adapter(options) })` in `vite.config.js`; the [README setup](./README.md#sveltekit-3-setup) includes a complete example. Kit 2 projects keep their existing configuration and support Svelte 4 or 5.
 
-Keep `uws()` after `sveltekit()` when using WebSockets. If you set a custom WebSocket handler path, configure it in both plugins. The Vite plugin is required for Kit 3 `$app/env/*` imports in WebSocket hooks and shares one server module graph between HTTP and WebSocket handlers in development. Production initializes SvelteKit before evaluating WebSocket hooks or Kit 3 generated `__` server entries, so module-scope runtime environment reads work.
+Keep `uws()` after `sveltekit()` when using WebSockets. If you set a custom WebSocket handler path, configure it in both plugins. The Vite plugin is required for Kit 3 environment imports (`$app/env`, `$app/env/*`, and the legacy `$app/environment` and `$env/*` aliases) in WebSocket hooks and shares one server module graph between HTTP and WebSocket handlers in development. Production initializes SvelteKit before evaluating WebSocket hooks or Kit 3 generated `__` server entries, so module-scope runtime environment reads work.
 
 ## Upgrading from 0.4.x
 
@@ -41,7 +41,7 @@ As of `0.5.0-next.23`, the bundled client's `on(topic)` complements the server-s
 **How to migrate.** No action needed if you only subscribe to system topics from server code, or if you use the bundled plugin clients or `svelte-realtime`'s `health` store (these are fixed automatically as of `next.23`). If your app legitimately routes public topics through the `__` prefix (rare), the migration is one of:
 
 - **Recommended**: rename the topic to a non-`__` prefix. The `__` namespace is reserved for the framework and its bundled plugins.
-- Send the wire frame directly via `connect().send({ type: 'subscribe', topic: '__foo', ref: 1 })` and set `websocket.allowSystemTopicSubscribe: true` in `svelte.config.js` on the server. `on('__foo')` from the bundled client will not send the frame for you.
+- Send the wire frame directly via `connect().send({ type: 'subscribe', topic: '__foo', ref: 1 })` and set `websocket.allowSystemTopicSubscribe: true` in the server adapter options. `on('__foo')` from the bundled client will not send the frame for you.
 
 ### SSR dedup cache key includes `base_origin` (cross-tenant leak fix)
 
@@ -114,13 +114,13 @@ These change observable runtime behavior. Most apps are unaffected; a few will n
 
 **What changed.** The default cap on a single inbound WebSocket frame moved from 16 KB to 1 MB. The adapter previously matched uWS's own 16 KB default, which was excessively conservative for typical app payloads - it forced chunked-upload frameworks to use ~12 KB chunks (~9000 chunks for a 100 MB file after typical 90% headroom). Apps that were chunking large payloads to fit under 16 KB will now accept them in fewer chunks (or in a single frame).
 
-**How to migrate.** No action needed for most apps. To pin the previous cap, set `websocket.maxPayloadLength: 16 * 1024` in `svelte.config.js`. To pin any other value, set the option to that byte count. DoS protection remains layered: `upgradeAdmission.maxConcurrent` caps connection count, `maxBackpressure` caps per-connection outbound queue size.
+**How to migrate.** No action needed for most apps. To pin the previous cap, set `websocket.maxPayloadLength: 16 * 1024` in the adapter options. To pin any other value, set the option to that byte count. DoS protection remains layered: `upgradeAdmission.maxConcurrent` caps connection count, `maxBackpressure` caps per-connection outbound queue size.
 
 ### `/__ws/auth` POST requires Origin / `x-requested-with` / `Sec-Fetch-Site`
 
 **What changed.** The authenticate POST endpoint previously accepted any credentialed cross-origin POST. A request must now satisfy at least one of: `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` header matching `allowedOrigins`. The bundled adapter client always stamps `x-requested-with` on its preflight POST, so browser-side flows are unaffected.
 
-**How to migrate.** No action needed for browser apps using the bundled client. For native (non-browser) clients hitting `/__ws/auth` directly, either stamp `x-requested-with: XMLHttpRequest` on the request, or set `websocket.authPathRequireOrigin: false` in `svelte.config.js` to opt out.
+**How to migrate.** No action needed for browser apps using the bundled client. For native (non-browser) clients hitting `/__ws/auth` directly, either stamp `x-requested-with: XMLHttpRequest` on the request, or set `websocket.authPathRequireOrigin: false` in the adapter options to opt out.
 
 ### Dynamic compression skipped for credentialed responses (BREACH defense)
 
@@ -225,7 +225,7 @@ Not required. Adopting these gets you the full 0.5 experience.
 
 ### Use `init({ platform })` / `shutdown({ platform })` for once-per-worker setup
 
-`init` fires once per worker after the listen socket is bound, before any upgrade / open / message hook. The deterministic place to capture `platform` for cron / push registry / metrics / leader election:
+In production, `init` fires once per worker. Acceptor workers await it before registering with the primary. Single-process and reuseport servers run it after binding their listen socket; use synchronous setup or an application readiness gate if clients can arrive during asynchronous initialization. The deterministic place to capture `platform` for cron / push registry / metrics / leader election:
 
 ```js
 export async function init({ platform }) {
@@ -236,6 +236,8 @@ export async function shutdown() {
   // best-effort teardown before the worker exits
 }
 ```
+
+In development, every replacement handler instance runs `init`, including replacements caused by Kit 3 server-route edits. The adapter awaits the previous instance's `shutdown` before starting its replacement, and waits for the replacement's `init` before admitting WebSocket upgrades or authentication requests. Release timers, subscriptions, and external resources in `shutdown`.
 
 Eliminates the boot-to-first-connect window where state captured "on first open" was unavailable to cron ticks or background work. Per-worker in clustered mode; layer leader election if you need cluster-wide singleton semantics. See the [docs site lifecycle page](https://svelte-realtime.dev/docs/lifecycle).
 

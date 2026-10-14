@@ -273,7 +273,7 @@ if (is_primary) {
 
 	EXTRA_ENTRIES;
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
+	const { start, initialize, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
 
 	if (isMainThread) {
 		// Single-process mode (no clustering). Awaiting `start()` lets the
@@ -293,7 +293,8 @@ if (is_primary) {
 			await start(host, port);
 			parentPort.postMessage({ type: 'ready' });
 		} else {
-			// Acceptor: register with the main thread's acceptor app
+			// Finish initialization before the acceptor can dispatch connections.
+			await initialize();
 			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
 		}
 

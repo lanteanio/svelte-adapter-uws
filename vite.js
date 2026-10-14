@@ -308,6 +308,49 @@ export default function uws(options = {}) {
 		});
 	}
 
+	function createSubscriptionMethods(getHandlers) {
+		return {
+			async subscribe(ws, topic) {
+				// Server-side subscribe with the user's `hooks.ws.subscribe`
+				// authorization hook. Same contract as production: returns null
+				// on success, denial reason string on failure. Awaits the user
+				// hook so async hooks (the idiomatic style for hooks that touch
+				// a session store or DB) gate correctly.
+				if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
+				const ud = ws.getUserData();
+				const subs = ud?.[WS_SUBSCRIPTIONS];
+				if (!(subs instanceof Set)) return 'INVALID_TOPIC';
+				if (subs.has(topic)) return null;
+				if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+				const denial = await runUserSubscribeGateV(ws, topic, getHandlers());
+				if (denial !== null) return denial;
+				// Post-await re-check: a concurrent subscribe may have raced
+				// through and already added the topic during the gate await.
+				if (subs.has(topic)) return null;
+				if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+				ws.subscribe(topic);
+				subs.add(topic);
+				return null;
+			},
+			async checkSubscribe(ws, topic) {
+				// Pure gate: consult the user's hook chain without subscribing.
+				// Same precedence as production (subscribeBatch first, falls
+				// back to subscribe). No state mutation, no cap check.
+				if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
+				return await runUserSubscribeGateV(ws, topic, getHandlers());
+			},
+			unsubscribe(ws, topic) {
+				const ud = ws.getUserData();
+				const subs = ud?.[WS_SUBSCRIPTIONS];
+				if (!(subs instanceof Set) || !subs.has(topic)) return false;
+				ws.unsubscribe(topic);
+				subs.delete(topic);
+				runUnsubscribeHook(getHandlers(), ws, topic, { platform: ud[WS_PLATFORM] });
+				return true;
+			}
+		};
+	}
+
 	// Dev-mode platform - same API shape as production. Every primitive on
 	// the production base platform must exist here too, even when dev
 	// degrades it to a no-op or zero-valued snapshot. Downstream wrappers
@@ -353,44 +396,7 @@ export default function uws(options = {}) {
 		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
-		async subscribe(ws, topic) {
-			// Server-side subscribe with the user's `hooks.ws.subscribe`
-			// authorization hook. Same contract as production: returns null
-			// on success, denial reason string on failure. Awaits the user
-			// hook so async hooks (the idiomatic style for hooks that touch
-			// a session store or DB) gate correctly.
-			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			const ud = ws.getUserData();
-			const subs = ud?.[WS_SUBSCRIPTIONS];
-			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
-			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-			const denial = await runUserSubscribeGateV(ws, topic);
-			if (denial !== null) return denial;
-			// Post-await re-check: a concurrent subscribe may have raced
-			// through and already added the topic during the gate await.
-			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-			ws.subscribe(topic);
-			subs.add(topic);
-			return null;
-		},
-		async checkSubscribe(ws, topic) {
-			// Pure gate: consult the user's hook chain without subscribing.
-			// Same precedence as production (subscribeBatch first, falls
-			// back to subscribe). No state mutation, no cap check.
-			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			return await runUserSubscribeGateV(ws, topic);
-		},
-		unsubscribe(ws, topic) {
-			const ud = ws.getUserData();
-			const subs = ud?.[WS_SUBSCRIPTIONS];
-			if (!(subs instanceof Set) || !subs.has(topic)) return false;
-			ws.unsubscribe(topic);
-			subs.delete(topic);
-			runUnsubscribeHook(userHandlers, ws, topic, { platform: ud[WS_PLATFORM] });
-			return true;
-		},
+		...createSubscriptionMethods(() => userHandlers),
 		get assertions() {
 			// Dev never tracks invariant violations; production exposes a
 			// live shared Map of category counts. Return a fresh empty Map
@@ -431,11 +437,19 @@ export default function uws(options = {}) {
 		}
 	};
 
+	function createHandlerPlatform(handlers) {
+		// Keep lifecycle authorization bound to this module through init and shutdown.
+		const owned = Object.defineProperties({}, Object.getOwnPropertyDescriptors(platform));
+		return Object.assign(owned, createSubscriptionMethods(() => handlers));
+	}
+
 	// Expose platform globally so hooks/load functions can access it in dev
 	globalThis.__uws_dev_platform = platform;
 
 	/** @type {Promise<void>} */
-	let handlerReady;
+	let handlerReady = Promise.resolve();
+	let lifecycleState;
+	const environmentStates = new WeakMap();
 
 	/** @type {import('vite').ViteDevServer | null} */
 	let viteServer = null;
@@ -451,10 +465,6 @@ export default function uws(options = {}) {
 	let handlerFailed = false;
 
 	/**
-	 * Extract handler functions from a loaded module.
-	 * @param {Record<string, any>} mod
-	 */
-	/**
 	 * @param {unknown} ref
 	 * @returns {ref is number | string}
 	 */
@@ -467,10 +477,10 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @returns {Promise<string | null>}
 	 */
-	async function runSubscribeHookV(wrapped, topic) {
-		if (!userHandlers.subscribe) return null;
+	async function runSubscribeHookV(wrapped, topic, handlers = userHandlers) {
+		if (!handlers.subscribe) return null;
 		try {
-			const result = await userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+			const result = await handlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 			if (result === false) return 'FORBIDDEN';
 			if (typeof result === 'string') return result;
 			return null;
@@ -485,11 +495,11 @@ export default function uws(options = {}) {
 	 * @param {string[]} topics
 	 * @returns {Promise<Record<string, string> | null>}
 	 */
-	async function runSubscribeBatchHookV(wrapped, topics) {
-		if (!userHandlers.subscribeBatch) return null;
+	async function runSubscribeBatchHookV(wrapped, topics, handlers = userHandlers) {
+		if (!handlers.subscribeBatch) return null;
 		let result;
 		try {
-			result = await userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
+			result = await handlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
 		} catch (err) {
 			console.error('[ws] subscribeBatch hook threw:', err);
 			/** @type {Record<string, string>} */
@@ -517,12 +527,12 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @returns {Promise<string | null>}
 	 */
-	async function runUserSubscribeGateV(wrapped, topic) {
-		const batchDenials = await runSubscribeBatchHookV(wrapped, [topic]);
+	async function runUserSubscribeGateV(wrapped, topic, handlers = userHandlers) {
+		const batchDenials = await runSubscribeBatchHookV(wrapped, [topic], handlers);
 		if (batchDenials !== null) {
 			return batchDenials[topic] ?? null;
 		}
-		return await runSubscribeHookV(wrapped, topic);
+		return await runSubscribeHookV(wrapped, topic, handlers);
 	}
 
 	/**
@@ -550,8 +560,9 @@ export default function uws(options = {}) {
 		bumpOutV(/** @type {any} */ (ws).__userData, payload);
 	}
 
-	function applyHandlers(mod) {
-		userHandlers = {
+	/** @param {Record<string, any>} mod */
+	function extractHandlers(mod) {
+		return {
 			init: mod.init,
 			shutdown: mod.shutdown,
 			upgrade: mod.upgrade,
@@ -567,37 +578,104 @@ export default function uws(options = {}) {
 		};
 	}
 
-	/**
-	 * Fire the user's `init` hook once the WS server is set up. Awaited
-	 * so a slow async init does not race with incoming connections (the
-	 * dev WSS is attached to vite's HTTP server, so connections are
-	 * handled in the same process; for app-level "capture platform"
-	 * patterns the await is enough to guarantee init runs first).
-	 *
-	 * Throws are re-thrown to surface boot failures loudly. Mirrors
-	 * production `handler.js` semantics.
-	 */
-	let initFired = false;
-	async function fireInitOnceV() {
-		if (initFired) return;
-		initFired = true;
-		if (typeof userHandlers.init === 'function') {
-			await userHandlers.init({ platform });
+	async function waitForHandlers() {
+		for (;;) {
+			const ready = handlerReady;
+			await ready;
+			if (ready === handlerReady) return;
 		}
 	}
 
-	/**
-	 * Fire the user's `shutdown` hook on dev server teardown. Throws are
-	 * logged-and-ignored (we cannot refuse to shut down).
-	 */
-	async function fireShutdownOnceV() {
-		if (typeof userHandlers.shutdown === 'function') {
-			try {
-				await userHandlers.shutdown({ platform });
-			} catch (err) {
-				console.error('[ws] shutdown hook threw:', err);
+	function isCurrent(state, generation) {
+		return lifecycleState === state && !state.closed && state.generation === generation;
+	}
+
+	function enqueueLifecycle(state, operation) {
+		state.queue = state.queue.then(operation, operation);
+		return state.queue;
+	}
+
+	async function shutdownInstance(instance) {
+		if (!instance || instance.stopped) return;
+		instance.stopped = true;
+		try {
+			if (typeof instance.handlers.shutdown === 'function') {
+				await instance.handlers.shutdown({ platform: instance.platform });
 			}
+		} catch (error) {
+			console.error('[ws] shutdown hook threw:', error);
 		}
+	}
+
+	async function retireHandlers(state) {
+		const previous = state.active;
+		state.active = null;
+		if (lifecycleState === state) {
+			for (const ws of connections) ws.close(1012, 'Handler reloaded');
+			userHandlers = {};
+		}
+		await shutdownInstance(previous);
+	}
+
+	function stopLifecycle(state) {
+		if (!state) return Promise.resolve();
+		if (state.stopping) return state.stopping;
+		state.closed = true;
+		state.generation++;
+		state.disconnect?.();
+		if (lifecycleState === state) handlerFailed = true;
+		state.stopping = enqueueLifecycle(state, () => retireHandlers(state));
+		return state.stopping;
+	}
+
+	function reloadHandlers(state, gate = Promise.resolve()) {
+		const generation = ++state.generation;
+		const work = (async () => {
+			await gate;
+			if (!isCurrent(state, generation)) return;
+			const mod = await state.load(state.path);
+			if (!isCurrent(state, generation)) return;
+			await enqueueLifecycle(state, async () => {
+				if (!isCurrent(state, generation)) return;
+				const handlers = extractHandlers(mod);
+				if (state.active && Object.keys(handlers).every(key => handlers[key] === state.active.handlers[key])) {
+					handlerFailed = false;
+					return;
+				}
+				await retireHandlers(state);
+				if (!isCurrent(state, generation)) return;
+				const instance = {
+					handlers, stopped: false,
+					platform: createHandlerPlatform(handlers)
+				};
+				state.active = instance;
+				try {
+					if (typeof handlers.init === 'function') await handlers.init({ platform: instance.platform });
+				} catch (error) {
+					state.active = null;
+					await shutdownInstance(instance);
+					throw error;
+				}
+				if (!isCurrent(state, generation)) {
+					state.active = null;
+					await shutdownInstance(instance);
+					return;
+				}
+				userHandlers = handlers;
+				handlerFailed = false;
+			});
+		})().catch(async (error) => {
+			if (!isCurrent(state, generation)) return;
+			await enqueueLifecycle(state, async () => {
+				if (!isCurrent(state, generation)) return;
+				handlerFailed = true;
+				await retireHandlers(state);
+				console.error('[adapter-uws] Failed to load or initialize WebSocket handler:', error);
+			});
+		});
+		state.ready = work;
+		if (lifecycleState === state) handlerReady = work;
+		return work;
 	}
 
 	/**
@@ -615,71 +693,59 @@ export default function uws(options = {}) {
 		return null;
 	}
 
-	function reloadHandlers() {
-		return loadDevModule(resolvedHandlerPath).then((mod) => {
-			handlerFailed = false;
-			if (mod.upgrade !== userHandlers.upgrade ||
-				mod.open !== userHandlers.open ||
-				mod.message !== userHandlers.message ||
-				mod.close !== userHandlers.close ||
-				mod.drain !== userHandlers.drain ||
-				mod.subscribe !== userHandlers.subscribe ||
-				mod.subscribeBatch !== userHandlers.subscribeBatch ||
-				mod.unsubscribe !== userHandlers.unsubscribe ||
-				mod.resume !== userHandlers.resume ||
-				mod.authenticate !== userHandlers.authenticate ||
-				mod.init !== userHandlers.init ||
-				mod.shutdown !== userHandlers.shutdown) {
-				applyHandlers(mod);
-				for (const ws of connections) ws.close(1012, 'Handler reloaded');
-				console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
-			}
-		}).catch((err) => {
-			handlerFailed = true;
-			console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
-		});
-	}
-
-	async function connectRunnerReload(server) {
+	async function connectRunnerReload(server, state) {
 		const environment = server.environments.ssr;
 		const hot = environment.hot;
 		if (!hot) return;
 		const { onReload } = await environment.runner.import(reloadModuleId);
+		if (state.closed) return;
 		const pending = new Map();
 		let token = 0;
-		let active = true;
 		const disconnect = onReload(async (id) => {
-			const resolve = pending.get(id);
-			if (!resolve) return;
-			try {
-				if (active) await reloadHandlers();
-			} finally {
-				pending.delete(id);
-				resolve();
-			}
+			const entry = pending.get(id);
+			if (!entry) return;
+			clearTimeout(entry.timer);
+			pending.delete(id);
+			entry.resolve();
+			await entry.work;
 		});
 		if (!disconnect) return;
 		const send = hot.send;
 		function sendWithReload(...args) {
-			const result = send.apply(this, args);
 			const payload = args[0];
-			if (active && resolvedHandlerPath && (payload?.type === 'full-reload' || payload?.type === 'update')) {
-				// The runner processes custom events after the preceding reload has
-				// cleared its cache and reimported affected route entrypoints.
-				const id = ++token;
-				handlerReady = new Promise(resolve => pending.set(id, resolve));
+			let entry;
+			let id;
+			if (!state.closed && state.path && (payload?.type === 'full-reload' || payload?.type === 'update')) {
+				id = ++token;
+				entry = {};
+				const ready = new Promise((resolve, reject) => Object.assign(entry, { resolve, reject }));
+				// Reserve the new generation before the runner starts invalidating.
+				entry.work = reloadHandlers(state, ready);
+				entry.timer = setTimeout(() => {
+					pending.delete(id);
+					entry.reject(new Error('The Vite SSR reload did not finish. Restart the dev server.'));
+				}, 10000);
+				entry.timer.unref?.();
+				pending.set(id, entry);
+			}
+			const result = send.apply(this, args);
+			if (entry) {
+				// Custom events run after the preceding reload has cleared the runner
+				// cache and reimported affected entrypoints.
 				send.call(this, { type: 'custom', event: reloadEvent, data: id });
 			}
 			return result;
 		}
 		hot.send = sendWithReload;
-		server.httpServer.once('close', () => {
-			active = false;
+		state.disconnect = () => {
 			disconnect();
 			if (hot.send === sendWithReload) hot.send = send;
-			for (const resolve of pending.values()) resolve();
+			for (const entry of pending.values()) {
+				clearTimeout(entry.timer);
+				entry.resolve();
+			}
 			pending.clear();
-		});
+		};
 	}
 
 	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
@@ -768,79 +834,44 @@ export default function uws(options = {}) {
 				);
 			}
 
+			await stopLifecycle(lifecycleState);
+			const state = { generation: 0, active: null, queue: Promise.resolve(), closed: false };
+			lifecycleState = state;
+			for (const environment of Object.values(server.environments ?? {})) environmentStates.set(environment, state);
+			handlerFailed = false;
+			handlerReady = Promise.resolve();
+			server.httpServer.once('close', () => { void stopLifecycle(state); });
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
 			const root = server.config.root;
 
 			// Kit 3 serves routes through the runnable SSR environment. Its legacy
 			// ssrLoadModule graph is separate, so using it would duplicate shared state.
-			useEnvironmentRunner = (server.config.plugins ?? []).some(plugin => plugin?.api?.options?.adapter?.name === 'adapter-uws');
+			useEnvironmentRunner = (server.config.plugins ?? []).some(plugin =>
+				plugin?.name === 'vite-plugin-sveltekit-setup' && plugin.api?.options?.paths
+			);
 			const environmentReady = useEnvironmentRunner && !server.httpServer.listening
 				? new Promise(resolve => server.httpServer.once('listening', resolve))
 				: Promise.resolve();
 			let runnerReloadReady;
-			loadDevModule = async (id) => {
+			state.load = loadDevModule = async (id) => {
 				if (useEnvironmentRunner) {
 					await environmentReady;
-					await (runnerReloadReady ??= connectRunnerReload(server));
+					await (runnerReloadReady ??= connectRunnerReload(server, state));
 					return server.environments.ssr.runner.import(id);
 				}
 				return server.ssrLoadModule(id);
 			};
 
-			// Load the user's WebSocket handler with TypeScript and alias support.
-			const handlerPath = options.handler
-				? path.resolve(root, options.handler)
-				: null;
-
-			if (handlerPath) {
-				resolvedHandlerPath = handlerPath;
-				handlerReady = loadDevModule(handlerPath).then((mod) => {
-					handlerFailed = false;
-					applyHandlers(mod);
-				}).catch((err) => {
-					handlerFailed = true;
-					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err, '\n  See: https://svti.me/ws-handler-load');
-				});
-			} else {
-				// Auto-discover src/hooks.ws.{js,ts,mjs}
-				const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
-				handlerReady = (async () => {
-					for (const candidate of candidates) {
-						const fullPath = path.resolve(root, candidate);
-						if (!existsSync(fullPath)) continue;
-						resolvedHandlerPath = fullPath;
-						try {
-							const mod = await loadDevModule(fullPath);
-							handlerFailed = false;
-							applyHandlers(mod);
-							break;
-						} catch (err) {
-							handlerFailed = true;
-							console.error(`[adapter-uws] Error loading '${candidate}':`, err.message);
-							break;
-						}
-					}
-				})();
-			}
-
-			// Fire the user's `init` hook once the handler module has loaded.
-			// Awaited so a throwing init surfaces during dev startup rather
-			// than on first connect. Skipped if the handler failed to load.
-			handlerReady = handlerReady.then(async () => {
-				if (!handlerFailed) await fireInitOnceV();
-			});
-
-			// Fire the user's `shutdown` hook when the vite dev server closes
-			// (Ctrl-C, restart, programmatic close). Awaited inside vite's
-			// own close pipeline.
-			server.httpServer?.once('close', () => { fireShutdownOnceV(); });
+			state.path = resolvedHandlerPath = discoverHandler(root);
+			if (state.path) reloadHandlers(state);
 
 			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
 			// HTTP POST so session cookies are refreshed via a standard Set-Cookie
 			// on a 200-series response. Mirrors the production handler in dev.
 			server.middlewares.use(wsAuthPath, async (req, res, next) => {
-				await handlerReady;
+				await waitForHandlers();
+				if (handlerFailed) { res.statusCode = 500; res.end('WebSocket handler unavailable'); return; }
 				if (!userHandlers.authenticate) { next(); return; }
 				if (req.method !== 'POST') {
 					res.statusCode = 405;
@@ -897,10 +928,14 @@ export default function uws(options = {}) {
 					duplex: 'half'
 				});
 
+				await waitForHandlers();
+				if (handlerFailed) { res.statusCode = 500; res.end('WebSocket handler unavailable'); return; }
+				if (!userHandlers.authenticate) { next(); return; }
+
 				const cookies = createCookies(headers['cookie']);
 				const clientIp = req.socket?.remoteAddress || '';
 				const authRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
-				const authPlatform = Object.create(platform);
+				const authPlatform = Object.create(state.active?.platform ?? platform);
 				authPlatform.requestId = authRequestId;
 				const event = {
 					request,
@@ -958,6 +993,21 @@ export default function uws(options = {}) {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
 
+				await waitForHandlers();
+
+				// If the handler file exists but failed to load, reject the
+				// upgrade so a broken auth handler does not silently degrade
+				// to open access.
+				if (handlerFailed) {
+					socket.write(
+						'HTTP/1.1 500 Internal Server Error\r\n' +
+						'Content-Type: text/plain\r\n\r\n' +
+						'WebSocket handler failed to load - check the server console'
+					);
+					socket.destroy();
+					return;
+				}
+
 				// Mirror production: enforce allowedOrigins on the dev WSS
 				// upgrade. The dev plugin runs on a localhost port that is
 				// reachable from any other process on the machine - a hostile
@@ -986,20 +1036,6 @@ export default function uws(options = {}) {
 
 				// If user has an upgrade handler, run it for auth
 				let userData = {};
-				await handlerReady;
-
-				// If the handler file exists but failed to load, reject the
-				// upgrade so a broken auth handler does not silently degrade
-				// to open access.
-				if (handlerFailed) {
-					socket.write(
-						'HTTP/1.1 500 Internal Server Error\r\n' +
-						'Content-Type: text/plain\r\n\r\n' +
-						'WebSocket handler failed to load - check the server console'
-					);
-					socket.destroy();
-					return;
-				}
 
 				/** @type {Record<string, string>} */
 				const upgradeHeaders = {};
@@ -1009,6 +1045,7 @@ export default function uws(options = {}) {
 				}
 				const wsRequestId = resolveRequestId(upgradeHeaders['x-request-id']) || randomUUID();
 
+				const upgradeGeneration = state.generation;
 				if (userHandlers.upgrade) {
 					try {
 						const result = await Promise.resolve(
@@ -1054,6 +1091,11 @@ export default function uws(options = {}) {
 					}
 				}
 
+				if (!isCurrent(state, upgradeGeneration)) {
+					socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nWebSocket handler reloading');
+					return;
+				}
+
 				wss.handleUpgrade(req, socket, head, (ws) => {
 					// Ensure remoteAddress is always present in userData, matching
 					// what the production handler injects. Plugins like ratelimit
@@ -1069,6 +1111,7 @@ export default function uws(options = {}) {
 			});
 
 			wss.on('connection', (ws) => {
+				const connectionHandlers = userHandlers;
 				connections.add(ws);
 				subscriptions.set(ws, new Set());
 
@@ -1076,7 +1119,7 @@ export default function uws(options = {}) {
 				userData[WS_SUBSCRIPTIONS] = new Set();
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
-				const wsPlatform = Object.create(platform);
+				const wsPlatform = Object.create(state.active?.platform ?? platform);
 				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 				userData[WS_PLATFORM] = wsPlatform;
 				delete userData[WS_REQUEST_ID_KEY];
@@ -1097,9 +1140,12 @@ export default function uws(options = {}) {
 				bumpOutV(userData, welcome);
 
 				// Call user open handler
-				runHook(userHandlers, 'open', 'Open handler error', wrapped, { platform: userData[WS_PLATFORM] });
+				runHook(connectionHandlers, 'open', 'Open handler error', wrapped, { platform: userData[WS_PLATFORM] });
 
 				ws.on('message', async (raw, isBinary) => {
+					await waitForHandlers();
+					if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
+					if (handlerFailed) { ws.close(1011, 'Handler unavailable'); return; }
 					// Convert to ArrayBuffer (matching uWS interface)
 					const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(/** @type {any} */ (raw));
 					const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
@@ -1152,7 +1198,8 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
-								const denial = await runUserSubscribeGateV(wrapped, msg.topic);
+								const denial = await runUserSubscribeGateV(wrapped, msg.topic, connectionHandlers);
+								if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
 								if (denial !== null) {
 									sendDenied(ws, msg.topic, ref, denial);
 									return;
@@ -1175,7 +1222,7 @@ export default function uws(options = {}) {
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 								subscriptions.get(ws)?.delete(msg.topic);
 								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
-								runUnsubscribeHook(userHandlers, wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+								runUnsubscribeHook(connectionHandlers, wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 								return;
 							}
 							if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -1208,10 +1255,12 @@ export default function uws(options = {}) {
 									}
 									valid.push(topic);
 								}
-								const batchDenials = await runSubscribeBatchHookV(wrapped, valid);
-								const perTopicDenials = batchDenials === null && userHandlers.subscribe
-									? await Promise.all(valid.map((t) => runSubscribeHookV(wrapped, t)))
+								const batchDenials = await runSubscribeBatchHookV(wrapped, valid, connectionHandlers);
+								if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
+								const perTopicDenials = batchDenials === null && connectionHandlers.subscribe
+									? await Promise.all(valid.map((t) => runSubscribeHookV(wrapped, t, connectionHandlers)))
 									: null;
+								if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
 								const udSubs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 								assert(udSubs instanceof Set, 'subs.shape-batch', null);
 								for (let i = 0; i < valid.length; i++) {
@@ -1251,13 +1300,13 @@ export default function uws(options = {}) {
 							}
 							if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 								msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
-								if (userHandlers.resume) {
+								if (connectionHandlers.resume) {
 									try {
 										// Mirror production: await the user hook so
 										// per-topic replay completes before the
 										// `resumed` ack tells the client to switch
 										// to live mode.
-										await userHandlers.resume(wrapped, {
+										await connectionHandlers.resume(wrapped, {
 											sessionId: msg.sessionId,
 											lastSeenSeqs: msg.lastSeenSeqs,
 											platform: wrapped.getUserData()[WS_PLATFORM]
@@ -1266,6 +1315,7 @@ export default function uws(options = {}) {
 										console.error('[adapter-uws] resume hook threw:', err);
 									}
 								}
+								if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
 								ws.send('{"type":"resumed"}');
 								bumpOutV(userData, '{"type":"resumed"}');
 								return;
@@ -1282,8 +1332,8 @@ export default function uws(options = {}) {
 					// Delegate to user handler. `msg` is the JSON-parsed envelope
 					// when the prefix matched + parsed to an object + no control
 					// type matched; otherwise undefined.
-					await handlerReady;
-					runHook(userHandlers, 'message', 'Message handler error', wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
+					if (ws.readyState !== 1 || connectionHandlers !== userHandlers || state.closed) return;
+					runHook(connectionHandlers, 'message', 'Message handler error', wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
 				});
 
 				ws.on('close', (code, reason) => {
@@ -1315,7 +1365,7 @@ export default function uws(options = {}) {
 							bytesOut: stats.bytesOut
 						}
 						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
-					runHook(userHandlers, 'close', null, wrapped, ctx);
+					runHook(connectionHandlers, 'close', null, wrapped, ctx);
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);
@@ -1329,8 +1379,28 @@ export default function uws(options = {}) {
 		},
 		handleHotUpdate() {
 			if (!resolvedHandlerPath || useEnvironmentRunner) return;
-			// Kit 2 invalidates its legacy SSR module graph before this hook.
-			handlerReady = reloadHandlers();
+			// Vite invalidates the legacy SSR module graph before this hook.
+			return reloadHandlers(lifecycleState);
+		},
+		hotUpdate({ type, file }) {
+			const state = lifecycleState;
+			if (!state || state.closed) return;
+			if (!useEnvironmentRunner) {
+				if (this.environment.name === 'client' && state.path) return reloadHandlers(state).then(() => undefined);
+				return;
+			}
+			if (this.environment.name !== 'ssr' || type === 'update') return;
+			const discovered = state.path || discoverHandler(viteServer.config.root);
+			if (!discovered || path.resolve(file) !== path.resolve(discovered)) return;
+			const firstHandler = !state.path;
+			state.path = resolvedHandlerPath = discovered;
+			if (firstHandler) { void reloadHandlers(state); return []; }
+			this.environment.moduleGraph.invalidateAll();
+			this.environment.hot.send({ type: 'full-reload' });
+			return [];
+		},
+		closeBundle() {
+			return stopLifecycle(this.environment ? environmentStates.get(this.environment) : lifecycleState);
 		}
 	};
 }

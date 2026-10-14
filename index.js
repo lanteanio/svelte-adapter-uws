@@ -183,8 +183,9 @@ export default function (opts = {}) {
 										namespace: 'sveltekit'
 									}));
 									build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
-										if (kit3 && args.path.startsWith('$app/env/')) {
-											throw new Error('SvelteKit 3 $app/env imports in WebSocket handlers require the Vite plugin. ' +
+										if (kit3 && (args.path === '$app/env' || args.path.startsWith('$app/env/') ||
+											args.path === '$app/environment' || args.path.startsWith('$env/'))) {
+											throw new Error('SvelteKit 3 environment imports in WebSocket handlers require the Vite plugin. ' +
 												"Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.");
 										}
 										if (args.path === '$app/environment') {
@@ -315,7 +316,7 @@ export default function (opts = {}) {
 				// (connection count) and `maxBackpressure` (per-conn
 				// outbound queue, also 1 MB), so per-frame cost stays
 				// predictable. Apps that want a stricter cap can pin via
-				// `websocket.maxPayloadLength` in svelte.config.js.
+				// `websocket.maxPayloadLength` in the adapter options.
 				maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
 				idleTimeout: websocket?.idleTimeout ?? 120,
 				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,

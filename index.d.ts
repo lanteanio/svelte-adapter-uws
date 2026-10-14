@@ -706,8 +706,7 @@ export interface WebSocketHandler<UserData = unknown> {
 		| Promise<Response | false | void>;
 
 	/**
-	 * Called once after the listen socket is bound and before any
-	 * `upgrade` / `open` / `message` hooks fire. Use this to capture
+	 * Called once per production worker during startup. Use this to capture
 	 * `platform` at boot time - the canonical entry point for cron
 	 * registration, warmup tasks, scheduled metrics dumps, external
 	 * pubsub bridge setup, or any "I need platform before the first
@@ -722,8 +721,15 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * race is harmless (writes are idempotent); use synchronous init or
 	 * an app-level ready-gate if strict ordering matters.
 	 *
-	 * **Per-worker firing in clustered mode.** Each worker process calls
-	 * `start()` and fires `init` independently. An app running with N
+	 * In development, each replacement handler instance also runs `init`.
+	 * The adapter awaits the old instance's `shutdown`, then the new
+	 * instance's `init`, before accepting upgrades or authentication
+	 * requests. Kit 3 server-route edits can replace the handler too.
+	 *
+	 * **Per-worker firing in clustered mode.** Each worker fires `init`
+	 * independently. Acceptor workers await initialization before registering
+	 * with the primary; single-process and reuseport servers initialize
+	 * after binding their own listen socket. An app running with N
 	 * workers will see N `init` calls - one per worker. Do not assume
 	 * singleton semantics; if you need a singleton (e.g. a single cron
 	 * publisher across the cluster), layer leader election on top.
@@ -748,7 +754,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	init?: (ctx: { platform: Platform }) => void | Promise<void>;
 
 	/**
-	 * Called once during graceful shutdown, before the listen socket is
+	 * Called once per handler instance during teardown. In production,
+	 * this runs during graceful shutdown, before the listen socket is
 	 * closed and before existing WebSocket connections are kicked. Use
 	 * this for app-level teardown that needs `platform` - cron drain,
 	 * last metrics dump, external pubsub bridge teardown, queue flush.
@@ -758,6 +765,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * is best-effort and the adapter cannot refuse to stop. If your
 	 * teardown is strictly required, surface its failure via your own
 	 * logging / alerting before the adapter logs it.
+	 *
+	 * In development, also awaited before a reloaded handler runs its
+	 * `init` hook. Use this to release the old instance's timers and resources.
 	 *
 	 * Per-worker firing in clustered mode, same as `init`. Each worker
 	 * fires `shutdown` independently when it receives the shutdown signal.
@@ -1389,7 +1399,7 @@ export interface Platform {
 	 * protocols) to size payloads against the actual cap rather than
 	 * guessing or piggybacking the value on the wire.
 	 *
-	 * Configured via `websocket.maxPayloadLength` in `svelte.config.js`;
+	 * Configured via `websocket.maxPayloadLength` in the adapter options;
 	 * defaults to 1 MB.
 	 *
 	 * @example

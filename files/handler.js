@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import uWS from 'uWebSockets.js';
 import { appPath, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
-// User modules evaluate only after SvelteKit initialization.
+// The WebSocket handler evaluates only after SvelteKit initialization.
 import { server } from './_init.js';
 import { wsModule } from './ws-handler-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
@@ -1145,7 +1145,7 @@ const platform = {
 	 * size payloads against the actual cap rather than guessing or
 	 * piggybacking the value on the wire.
 	 *
-	 * Configured via `websocket.maxPayloadLength` in svelte.config.js;
+	 * Configured via `websocket.maxPayloadLength` in the adapter options;
 	 * defaults to 1 MB.
 	 *
 	 * @example
@@ -2638,7 +2638,7 @@ if (WS_ENABLED) {
 	// `Sec-Fetch-Site: same-origin`, or an `Origin` header that matches the
 	// configured `allowedOrigins`. Apps that need to accept this endpoint
 	// from native (non-browser) clients without these headers can set
-	// `websocket.authPathRequireOrigin: false` in svelte.config.js.
+	// `websocket.authPathRequireOrigin: false` in the adapter options.
 	const AUTH_PATH_REQUIRE_ORIGIN = wsOptions.authPathRequireOrigin !== false;
 
 	// Wire-level subscribes to `__`-prefixed system topics are blocked by
@@ -3491,6 +3491,16 @@ export function drain() {
 // - Exports -----------------------------------------------------------------
 
 let listenSocket = null;
+let initialization;
+
+/** Initialize the WebSocket handler once in this serving worker. */
+export function initialize() {
+	return initialization ??= Promise.resolve().then(async () => {
+		if (WS_ENABLED && typeof wsModule.init === 'function') {
+			await wsModule.init({ platform });
+		}
+	});
+}
 
 /**
  * Start the uWS server. Returns a promise that resolves once the listen
@@ -3522,14 +3532,9 @@ export async function start(host, port) {
 		});
 	});
 
-	// Fire the user's `init` hook (if exported) once per worker, after the
-	// listen socket is bound and before this function resolves. Async hooks
-	// are awaited so callers that `await start(...)` get a fully-ready
-	// signal that includes app-level boot work. A throwing hook re-throws
-	// to the caller - boot failure should be loud.
-	if (WS_ENABLED && typeof wsModule.init === 'function') {
-		await wsModule.init({ platform });
-	}
+	// Listening workers initialize after binding; acceptor workers initialize
+	// before registering their descriptor with the primary thread.
+	await initialize();
 }
 
 /**

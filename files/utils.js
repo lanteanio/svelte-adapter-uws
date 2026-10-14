@@ -786,7 +786,7 @@ export function describeUnsafeSameOriginConfig(input) {
 		'  - export an upgrade() hook from hooks.ws.{js,ts} that authenticates the connection itself\n' +
 		'  - allowedOrigins: [...] with an explicit allowlist\n' +
 		"Apps that have audited this and want the previous warn-only behavior can pass " +
-		'`websocket.unsafeSameOriginWithoutHostPin: true` in svelte.config.js.'
+		'`websocket.unsafeSameOriginWithoutHostPin: true` in the adapter options.'
 	);
 }
 

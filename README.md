@@ -140,7 +140,11 @@ export default defineConfig({
 
 Place WebSocket hooks in `src/hooks.ws.js` or `src/hooks.ws.ts`. For a custom handler path, pass the same `handler` to `adapter({ websocket: { handler } })` and `uws({ handler })`. For HTTP only, use `adapter()` and omit `uws()`.
 
-The Vite plugin shares server modules between HTTP routes and WebSocket hooks in development and production. It is required for SvelteKit 3 `$app/env/*` imports in WebSocket handlers. Runtime environment variables are available to module-scope handler reads after SvelteKit initializes. Generated `__` server entries also evaluate after initialization on Kit 3; their static sibling imports retain normal top-level-await interleaving.
+The Vite plugin shares server modules between HTTP routes and WebSocket hooks in development and production. It is required for SvelteKit 3 environment imports (`$app/env`, `$app/env/*`, and the legacy `$app/environment` and `$env/*` aliases) in WebSocket handlers. Runtime environment variables are available to module-scope handler reads after SvelteKit initializes. Generated `__` server entries also evaluate after initialization on Kit 3; their static sibling imports retain normal top-level-await interleaving.
+
+In production, each acceptor worker completes `init` before receiving connections from the primary. Single-process and reuseport servers call it after binding their listen socket.
+
+During development, a handler replacement awaits the old module's `shutdown` and the new module's `init` before accepting WebSocket upgrades or authentication requests. Existing connections close with code 1012 and can reconnect once initialization finishes. On Kit 3, server-route edits also replace the shared server module graph.
 
 The `svelte.config.js` examples below use SvelteKit 2 syntax. On Kit 3, pass the same adapter options to `sveltekit({ adapter: adapter(options) })` in the Vite configuration above.
 
