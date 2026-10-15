@@ -4,6 +4,16 @@ import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
 import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, runHook, runUnsubscribeHook } from './files/utils.js';
 
+// Vite 5 keeps pending SSR imports across graph invalidation and server.restart().
+// Recovery requires a fresh dev process, including after the old import settles.
+const vite5Applications = new Map();
+const vite5RestartMessage = 'A Vite 5 WebSocket handler import was still pending when another edit or server restart arrived. Stop and rerun the dev command.';
+
+function blockVite5Application(application) {
+	application.blocked = true;
+	for (const state of application.states) state.requireRestart();
+}
+
 /**
  * Vite plugin that provides WebSocket support during development.
  *
@@ -438,9 +448,22 @@ export default function uws(options = {}) {
 	};
 
 	function createHandlerPlatform(handlers) {
-		// Keep lifecycle authorization bound to this module through init and shutdown.
-		const owned = Object.defineProperties({}, Object.getOwnPropertyDescriptors(platform));
-		return Object.assign(owned, createSubscriptionMethods(() => handlers));
+		// Share init-assigned properties with HTTP routes while keeping authorization
+		// bound to this module through init, active connections, and shutdown.
+		const methods = createSubscriptionMethods(() => handlers);
+		const owned = new Proxy(platform, {
+			get(target, key, receiver) {
+				return Object.hasOwn(methods, key) ? methods[key] : Reflect.get(target, key, receiver);
+			},
+			set(target, key, value, receiver) {
+				if (receiver === owned && Object.hasOwn(methods, key)) {
+					methods[key] = value;
+					return true;
+				}
+				return Reflect.set(target, key, value, receiver);
+			}
+		});
+		return owned;
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -448,6 +471,8 @@ export default function uws(options = {}) {
 
 	/** @type {Promise<void>} */
 	let handlerReady = Promise.resolve();
+	let handlersSettled = true;
+	const handlerWaiters = new Set();
 	let lifecycleState;
 	const environmentStates = new WeakMap();
 
@@ -578,10 +603,27 @@ export default function uws(options = {}) {
 		};
 	}
 
+	function setHandlerReady(ready) {
+		handlerReady = ready;
+		handlersSettled = false;
+		void ready.then(() => { if (ready === handlerReady) handlersSettled = true; });
+		for (const notify of handlerWaiters) notify();
+		handlerWaiters.clear();
+	}
+
 	async function waitForHandlers() {
-		for (;;) {
+		while (!handlersSettled) {
 			const ready = handlerReady;
-			await ready;
+			let notify;
+			const changed = new Promise(resolve => { notify = resolve; });
+			handlerWaiters.add(notify);
+			try {
+				// A superseded import can stay pending forever. Wake existing requests
+				// when the generation changes instead of waiting for that import.
+				await Promise.race([ready, changed]);
+			} finally {
+				handlerWaiters.delete(notify);
+			}
 			if (ready === handlerReady) return;
 		}
 	}
@@ -617,13 +659,34 @@ export default function uws(options = {}) {
 		await shutdownInstance(previous);
 	}
 
+	function requireVite5Restart(state) {
+		if (state.restartRequired) return;
+		state.restartRequired = true;
+		state.generation++;
+		if (lifecycleState === state) {
+			handlerFailed = true;
+			for (const ws of connections) ws.close(1012, 'Handler unavailable');
+			setHandlerReady(Promise.resolve());
+		}
+		console.error('[adapter-uws] ' + vite5RestartMessage);
+		void enqueueLifecycle(state, () => retireHandlers(state));
+	}
+
 	function stopLifecycle(state) {
 		if (!state) return Promise.resolve();
 		if (state.stopping) return state.stopping;
+		if (state.vite5 && state.pendingLoads > 0) blockVite5Application(state.application);
+		state.application?.states.delete(state);
+		if (state.application && !state.application.blocked && state.application.states.size === 0) {
+			vite5Applications.delete(state.application.key);
+		}
 		state.closed = true;
 		state.generation++;
 		state.disconnect?.();
-		if (lifecycleState === state) handlerFailed = true;
+		if (lifecycleState === state) {
+			handlerFailed = true;
+			setHandlerReady(Promise.resolve());
+		}
 		state.stopping = enqueueLifecycle(state, () => retireHandlers(state));
 		return state.stopping;
 	}
@@ -633,7 +696,14 @@ export default function uws(options = {}) {
 		const work = (async () => {
 			await gate;
 			if (!isCurrent(state, generation)) return;
-			const mod = await state.load(state.path);
+			if (state.vite5 && (state.pendingLoads > 0 || state.application.blocked)) {
+				blockVite5Application(state.application);
+				return;
+			}
+			let mod;
+			state.pendingLoads++;
+			try { mod = await state.load(state.path); }
+			finally { state.pendingLoads--; }
 			if (!isCurrent(state, generation)) return;
 			await enqueueLifecycle(state, async () => {
 				if (!isCurrent(state, generation)) return;
@@ -674,7 +744,7 @@ export default function uws(options = {}) {
 			});
 		});
 		state.ready = work;
-		if (lifecycleState === state) handlerReady = work;
+		if (lifecycleState === state) setHandlerReady(work);
 		return work;
 	}
 
@@ -693,6 +763,67 @@ export default function uws(options = {}) {
 		return null;
 	}
 
+	function affectsLegacyHandler(server, state, file) {
+		const changed = path.resolve(file);
+		if (path.resolve(state.path) === changed) return true;
+		const graph = server.environments?.ssr?.moduleGraph ?? server.moduleGraph;
+		const modules = graph?.getModulesByFile(state.path.replaceAll('\\', '/'));
+		const pending = [...(modules ?? [])];
+		const visited = new Set();
+		while (pending.length > 0) {
+			const mod = pending.pop();
+			if (visited.has(mod)) continue;
+			visited.add(mod);
+			if (mod.file && path.resolve(mod.file) === changed) return true;
+			for (const dependency of mod.ssrImportedModules ?? mod.importedModules ?? []) pending.push(dependency);
+		}
+		return false;
+	}
+
+	function connectLegacyReload(server, state) {
+		if (server.environments) {
+			// Vite 6+ invalidates the SSR graph after all hotUpdate hooks. Run
+			// the import only when its environment update coordinator completes.
+			const previous = server.config.server.hotUpdateEnvironments;
+			async function updateEnvironments(server, update) {
+				try {
+					if (previous) await previous(server, update);
+					else await Promise.all(Object.values(server.environments).map(environment => update(environment)));
+				} finally {
+					state.legacyUpdates = Math.max(0, state.legacyUpdates - 1);
+				}
+				if (!state.closed && state.legacyUpdates === 0 && state.legacyDirty) {
+					state.legacyDirty = false;
+					void reloadHandlers(state);
+				}
+			}
+			server.config.server.hotUpdateEnvironments = updateEnvironments;
+			state.disconnect = () => {
+				if (server.config.server.hotUpdateEnvironments === updateEnvironments) {
+					if (previous) server.config.server.hotUpdateEnvironments = previous;
+					else delete server.config.server.hotUpdateEnvironments;
+				}
+			};
+			return;
+		}
+
+		// Vite 5 broadcasts from its aggregate hot channel after invalidating
+		// the legacy graph. Individual plugin WebSocket messages are separate.
+		const hot = server.hot;
+		if (!hot) return;
+		const send = hot.send;
+		function sendWithReload(...args) {
+			const result = send.apply(this, args);
+			if (!state.closed && state.legacyDirty && (args[0]?.type === 'full-reload' || args[0]?.type === 'update')) {
+				state.legacyDirty = false;
+				void reloadHandlers(state);
+			}
+			return result;
+		}
+		hot.send = sendWithReload;
+		state.disconnect = () => { if (hot.send === sendWithReload) hot.send = send; };
+	}
+
 	async function connectRunnerReload(server, state) {
 		const environment = server.environments.ssr;
 		const hot = environment.hot;
@@ -701,13 +832,13 @@ export default function uws(options = {}) {
 		if (state.closed) return;
 		const pending = new Map();
 		let token = 0;
-		const disconnect = onReload(async (id) => {
+		const disconnect = onReload((id) => {
 			const entry = pending.get(id);
 			if (!entry) return;
 			clearTimeout(entry.timer);
 			pending.delete(id);
 			entry.resolve();
-			await entry.work;
+			// User init must not block the runner from processing the next edit.
 		});
 		if (!disconnect) return;
 		const send = hot.send;
@@ -835,11 +966,15 @@ export default function uws(options = {}) {
 			}
 
 			await stopLifecycle(lifecycleState);
-			const state = { generation: 0, active: null, queue: Promise.resolve(), closed: false };
+			const state = {
+				generation: 0, active: null, queue: Promise.resolve(), closed: false,
+				legacyUpdates: 0, legacyDirty: false, vite5: !server.environments,
+				pendingLoads: 0, restartRequired: false
+			};
 			lifecycleState = state;
 			for (const environment of Object.values(server.environments ?? {})) environmentStates.set(environment, state);
 			handlerFailed = false;
-			handlerReady = Promise.resolve();
+			setHandlerReady(Promise.resolve());
 			server.httpServer.once('close', () => { void stopLifecycle(state); });
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
@@ -863,7 +998,19 @@ export default function uws(options = {}) {
 				return server.ssrLoadModule(id);
 			};
 
+			if (!useEnvironmentRunner) connectLegacyReload(server, state);
 			state.path = resolvedHandlerPath = discoverHandler(root);
+			if (state.vite5) {
+				const key = path.resolve(root);
+				const application = vite5Applications.get(key) ?? { key, blocked: false, states: new Set() };
+				vite5Applications.set(key, application);
+				state.application = application;
+				state.requireRestart = () => requireVite5Restart(state);
+				application.states.add(state);
+				if (application.blocked || [...application.states].some(current => current.pendingLoads > 0)) {
+					blockVite5Application(application);
+				}
+			}
 			if (state.path) reloadHandlers(state);
 
 			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
@@ -871,7 +1018,11 @@ export default function uws(options = {}) {
 			// on a 200-series response. Mirrors the production handler in dev.
 			server.middlewares.use(wsAuthPath, async (req, res, next) => {
 				await waitForHandlers();
-				if (handlerFailed) { res.statusCode = 500; res.end('WebSocket handler unavailable'); return; }
+				if (handlerFailed) {
+					res.statusCode = state.restartRequired ? 503 : 500;
+					res.end(state.restartRequired ? vite5RestartMessage : 'WebSocket handler unavailable');
+					return;
+				}
 				if (!userHandlers.authenticate) { next(); return; }
 				if (req.method !== 'POST') {
 					res.statusCode = 405;
@@ -929,7 +1080,11 @@ export default function uws(options = {}) {
 				});
 
 				await waitForHandlers();
-				if (handlerFailed) { res.statusCode = 500; res.end('WebSocket handler unavailable'); return; }
+				if (handlerFailed) {
+					res.statusCode = state.restartRequired ? 503 : 500;
+					res.end(state.restartRequired ? vite5RestartMessage : 'WebSocket handler unavailable');
+					return;
+				}
 				if (!userHandlers.authenticate) { next(); return; }
 
 				const cookies = createCookies(headers['cookie']);
@@ -999,6 +1154,10 @@ export default function uws(options = {}) {
 				// upgrade so a broken auth handler does not silently degrade
 				// to open access.
 				if (handlerFailed) {
+					if (state.restartRequired) {
+						socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n' + vite5RestartMessage);
+						return;
+					}
 					socket.write(
 						'HTTP/1.1 500 Internal Server Error\r\n' +
 						'Content-Type: text/plain\r\n\r\n' +
@@ -1377,16 +1536,19 @@ export default function uws(options = {}) {
 				console.log(`[adapter-uws] Client must match: connect({ path: '${wsPath}' })`);
 			}
 		},
-		handleHotUpdate() {
-			if (!resolvedHandlerPath || useEnvironmentRunner) return;
-			// Vite invalidates the legacy SSR module graph before this hook.
-			return reloadHandlers(lifecycleState);
+		handleHotUpdate({ file }) {
+			const state = lifecycleState;
+			if (!state || state.closed || !state.path || useEnvironmentRunner) return;
+			state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
 		},
 		hotUpdate({ type, file }) {
 			const state = lifecycleState;
 			if (!state || state.closed) return;
 			if (!useEnvironmentRunner) {
-				if (this.environment.name === 'client' && state.path) return reloadHandlers(state).then(() => undefined);
+				if (this.environment.name === 'client') {
+					state.legacyUpdates++;
+					if (state.path) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
+				}
 				return;
 			}
 			if (this.environment.name !== 'ssr' || type === 'update') return;

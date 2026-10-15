@@ -19,7 +19,7 @@ if (!port) {
 const server = await createServer({
 	configFile: path.join(fixtureDir, 'vite.config.js'),
 	root: fixtureDir,
-	server: { port, strictPort: true }
+	server: { host: '127.0.0.1', port, strictPort: true }
 });
 await server.listen();
 server.printUrls();

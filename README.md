@@ -140,13 +140,25 @@ export default defineConfig({
 
 Place WebSocket hooks in `src/hooks.ws.js` or `src/hooks.ws.ts`. For a custom handler path, pass the same `handler` to `adapter({ websocket: { handler } })` and `uws({ handler })`. For HTTP only, use `adapter()` and omit `uws()`.
 
-The Vite plugin shares server modules between HTTP routes and WebSocket hooks in development and production. It is required for SvelteKit 3 environment imports (`$app/env`, `$app/env/*`, and the legacy `$app/environment` and `$env/*` aliases) in WebSocket handlers. Runtime environment variables are available to module-scope handler reads after SvelteKit initializes. Generated `__` server entries also evaluate after initialization on Kit 3; their static sibling imports retain normal top-level-await interleaving.
+The Vite plugin shares server modules between HTTP routes and WebSocket hooks in development and production. Use it for SvelteKit 3 virtual modules such as `$app/env/private` in WebSocket handlers. If the optional esbuild fallback is unavailable, the adapter also requires the Vite plugin for production handler builds. Runtime environment variables are available to module-scope handler reads after SvelteKit initializes. On Kit 3, generated `__` server entries evaluate after initialization in serving workers; their static sibling imports retain normal top-level-await interleaving. Kit 2 keeps static entry imports in each process, including the cluster coordinator.
 
 In production, each acceptor worker completes `init` before receiving connections from the primary. Single-process and reuseport servers call it after binding their listen socket.
 
-During development, a handler replacement awaits the old module's `shutdown` and the new module's `init` before accepting WebSocket upgrades or authentication requests. Existing connections close with code 1012 and can reconnect once initialization finishes. On Kit 3, server-route edits also replace the shared server module graph.
+During development, a handler replacement awaits the old module's `shutdown` and the new module's `init` before accepting WebSocket upgrades or authentication requests. Existing connections close with code 1012 and can reconnect once initialization finishes. On Kit 3, server-route and `.svelte` page edits also replace the shared server module graph and restart WebSocket connections. Development calls `shutdown` even when `init` throws, so it can release resources allocated before the failure.
 
-The `svelte.config.js` examples below use SvelteKit 2 syntax. On Kit 3, pass the same adapter options to `sveltekit({ adapter: adapter(options) })` in the Vite configuration above.
+On Vite 5, editing a handler or dependency, or restarting Vite within the same process, while its module import is still evaluating stops WebSocket upgrades and authentication requests with 503. Stop the dev process and rerun `npm run dev`; further saves or an in-process server restart cannot recover that pending import. Ordinary completed-module reloads still work. Vite 6 and newer can move pending requests to the replacement handler automatically.
+
+The configuration and `$lib/...` imports in the examples below use SvelteKit 2 syntax. On Kit 3, pass the same adapter options to `sveltekit({ adapter: adapter(options) })` in the Vite configuration above. Kit 3 no longer creates the `$lib` alias automatically. Merge this mapping into `package.json`:
+
+```json
+{
+  "imports": {
+    "#lib/*": "./src/lib/*"
+  }
+}
+```
+
+Then replace `$lib/...` imports with `#lib/...` and include the file extension. For example, `$lib/server/auth` becomes `#lib/server/auth.js`. Keep any other entries already present in `imports`.
 
 ## Quick start: HTTP
 
@@ -247,12 +259,12 @@ That's it. This gives you a pub/sub WebSocket server at `/ws` with no authentica
 
 ### Step 2: Add the Vite plugin (required)
 
-The Vite plugin is **required** when using WebSockets. It does two things:
+Use the Vite plugin with WebSockets. It does two things:
 
 1. **Dev mode** - spins up a WebSocket server so `event.platform` works during `npm run dev`
-2. **Production builds** - runs your `hooks.ws` file through Vite's pipeline so `$lib`, `$env`, and `$app` imports resolve correctly
+2. **Production builds** - runs your `hooks.ws` file through SvelteKit's Vite pipeline, including `#lib` imports on Kit 3, `$lib` on Kit 2, and the virtual modules supported by that Kit version
 
-Without it, your `hooks.ws` file won't be able to import from `$lib` or use `$env` variables, and `event.platform` won't work in dev.
+Without it, the adapter does not provide a development WebSocket server. Kit 2 production builds retain an esbuild fallback that resolves `$lib` and `$env`. Kit 3 requires `uws()` for SvelteKit virtual imports and whenever esbuild is unavailable.
 
 **vite.config.js**
 ```js

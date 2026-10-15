@@ -6,7 +6,9 @@
     "dev": "vite dev",
     "build": "vite build",
     "start": "node build/index.js",
-    "smoke:initialization": "node initialization-smoke.mjs"
+    "smoke:initialization": "node initialization-smoke.mjs",
+    "smoke:dev:reload": "node reload-smoke.mjs",
+    "smoke:fallback": "node fallback-smoke.mjs"
   },
   "dependencies": {
     "@sveltejs/kit": "^2.0.0",

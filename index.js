@@ -150,17 +150,25 @@ export default function (opts = {}) {
 						// Bundle through esbuild to resolve SvelteKit aliases and handle TS.
 						// This is the fallback path - the Vite plugin is preferred because
 						// it shares modules with the server bundle (no duplication).
-						const esbuild = await import('esbuild');
+						let esbuild;
+						try {
+							esbuild = await import('esbuild');
+						} catch (error) {
+							if (!kit3 || error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+							throw new Error('SvelteKit 3 WebSocket handlers require the Vite plugin when esbuild is not installed. ' +
+								"Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.", { cause: error });
+						}
 						const { loadEnv } = await import('vite');
 						const libDir = path.resolve(kitConfig.files?.lib || 'src/lib');
 						const publicPrefix = kitConfig.env?.publicPrefix ?? 'PUBLIC_';
 						const allEnv = loadEnv('production', process.cwd(), '');
 						const version = kitConfig.version?.name ?? '';
 
-						const aliasMap = { '$lib': libDir };
+						const aliasMap = kit3 ? {} : { '$lib': libDir };
 						const kitAliases = kitConfig.alias;
 						if (kitAliases) {
 							for (const [key, value] of Object.entries(kitAliases)) {
+								if (kit3 && (key === '$lib' || key.startsWith('$lib/'))) continue;
 								if (!(key in aliasMap)) {
 									aliasMap[key] = path.resolve(value);
 								}
@@ -178,14 +186,31 @@ export default function (opts = {}) {
 							plugins: [{
 								name: 'sveltekit-virtual-modules',
 								setup(build) {
+									if (kit3) {
+										build.onResolve({ filter: /^\$lib(?:\/|$)/ }, (args) => {
+											for (const [key, value] of Object.entries(kitAliases || {})) {
+												const wildcard = key.endsWith('/*');
+												const prefix = wildcard ? key.slice(0, -2) : key;
+												const exact = args.path === prefix;
+												const nested = args.path.startsWith(prefix + '/');
+												if (wildcard) {
+													if (!nested || args.path.length === prefix.length + 1) continue;
+												} else if (!exact && (!nested || key + '/*' in kitAliases)) continue;
+												const target = value.replaceAll('\\', '/').replace(/\/\*$/, '');
+												return build.resolve(path.resolve(target, args.path.slice(prefix.length + 1)), {
+													kind: args.kind, resolveDir: args.resolveDir
+												});
+											}
+											throw new Error('SvelteKit 3 does not provide $lib automatically. Declare #lib imports in package.json and use file extensions.');
+										});
+									}
 									build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
 										path: args.path,
 										namespace: 'sveltekit'
 									}));
 									build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
-										if (kit3 && (args.path === '$app/env' || args.path.startsWith('$app/env/') ||
-											args.path === '$app/environment' || args.path.startsWith('$env/'))) {
-											throw new Error('SvelteKit 3 environment imports in WebSocket handlers require the Vite plugin. ' +
+										if (kit3) {
+											throw new Error('SvelteKit 3 virtual imports in WebSocket handlers require the Vite plugin. ' +
 												"Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.");
 										}
 										if (args.path === '$app/environment') {

@@ -2,9 +2,9 @@
 
 ## SvelteKit 3 with 0.5.11
 
-Install `svelte-adapter-uws@0.5.11` for SvelteKit 3 support on the stable line. Use Node.js 22.17 or newer and Svelte 5 for Kit 3. Move the adapter configuration from `svelte.config.js` into `sveltekit({ adapter: adapter(options) })` in `vite.config.js`; the [README setup](./README.md#sveltekit-3-setup) includes a complete example. Kit 2 projects keep their existing configuration and support Svelte 4 or 5.
+Install `svelte-adapter-uws@0.5.11` for SvelteKit 3 support on the stable line. Use Node.js 22.17 or newer and Svelte 5 for Kit 3. Move the adapter configuration from `svelte.config.js` into `sveltekit({ adapter: adapter(options) })` in `vite.config.js`; the [README setup](./README.md#sveltekit-3-setup) includes a complete example. Kit 2 projects keep their existing configuration and support Svelte 4 or 5. Kit 3 no longer creates `$lib` automatically. Merge `"imports": { "#lib/*": "./src/lib/*" }` into `package.json`, preserving existing mappings, then change `$lib/...` imports to `#lib/...` with file extensions, including WebSocket handlers. For example, `$lib/server/auth` becomes `#lib/server/auth.js`.
 
-Keep `uws()` after `sveltekit()` when using WebSockets. If you set a custom WebSocket handler path, configure it in both plugins. The Vite plugin is required for Kit 3 environment imports (`$app/env`, `$app/env/*`, and the legacy `$app/environment` and `$env/*` aliases) in WebSocket hooks and shares one server module graph between HTTP and WebSocket handlers in development. Production initializes SvelteKit before evaluating WebSocket hooks or Kit 3 generated `__` server entries, so module-scope runtime environment reads work.
+Keep `uws()` after `sveltekit()` when using WebSockets. If you set a custom WebSocket handler path, configure it in both plugins. The Vite plugin is required for Kit 3 virtual modules such as `$app/env/private` in WebSocket hooks, and for production handler builds when esbuild is unavailable. It shares one server module graph between HTTP and WebSocket handlers in development. If a Vite 5 handler or dependency changes, or Vite restarts within the same process, while an earlier module import is still evaluating, WebSocket upgrades and authentication requests return 503 until you stop and rerun the dev process. Saving again or restarting Vite within the same process cannot clear that pending import. Ordinary reloads still work; Vite 6 and newer recover pending requests automatically. Production initializes SvelteKit before evaluating WebSocket hooks or Kit 3 generated `__` server entries, so module-scope runtime environment reads work.
 
 ## Upgrading from 0.4.x
 
@@ -237,7 +237,7 @@ export async function shutdown() {
 }
 ```
 
-In development, every replacement handler instance runs `init`, including replacements caused by Kit 3 server-route edits. The adapter awaits the previous instance's `shutdown` before starting its replacement, and waits for the replacement's `init` before admitting WebSocket upgrades or authentication requests. Release timers, subscriptions, and external resources in `shutdown`.
+In development, every replacement handler instance runs `init`, including replacements caused by Kit 3 server-route or `.svelte` page edits. The adapter awaits the previous instance's `shutdown` before starting its replacement, and waits for the replacement's `init` before admitting WebSocket upgrades or authentication requests. Release timers, subscriptions, and external resources in `shutdown`; development also calls it after a failed `init` to clean up partially initialized state.
 
 Eliminates the boot-to-first-connect window where state captured "on first open" was unavailable to cron ticks or background work. Per-worker in clustered mode; layer leader election if you need cluster-wide singleton semantics. See the [docs site lifecycle page](https://svelte-realtime.dev/docs/lifecycle).
 

@@ -44,9 +44,12 @@ export interface UWSPluginOptions extends SharedAdapterOptions {
 /**
  * Vite plugin for svelte-adapter-uws.
  *
- * Required when using WebSockets. Handles two things:
+ * Provides WebSocket development support and integrates production handlers:
  * - Dev: spins up a WebSocket server so `event.platform` works during `npm run dev`
- * - Build: injects `hooks.ws` into Vite's SSR pipeline so `$lib`, `$env`, and `$app` resolve correctly
+ * - Build: injects `hooks.ws` into SvelteKit's SSR pipeline, resolving `#lib`
+ *   on Kit 3, `$lib` on Kit 2, and the virtual modules supported by that Kit.
+ * Kit 3 requires this plugin for SvelteKit virtual imports in handlers and
+ * when the optional esbuild fallback is unavailable.
  *
  * ```js
  * import { sveltekit } from '@sveltejs/kit/vite';

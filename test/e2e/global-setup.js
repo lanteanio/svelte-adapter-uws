@@ -15,7 +15,7 @@ function stripAnsi(str) {
 
 function isReady(text) {
 	const clean = stripAnsi(text);
-	return clean.includes('localhost:') || clean.includes('Listening on');
+	return clean.includes('localhost:') || clean.includes('127.0.0.1:') || clean.includes('Listening on');
 }
 
 function startServer(script, port) {

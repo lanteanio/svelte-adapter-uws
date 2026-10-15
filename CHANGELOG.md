@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.11] - 2026-10-14
+## [0.5.11] - 2026-10-15
 
 ### Added
 
@@ -17,10 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initialize SvelteKit before evaluating the WebSocket handler and, on SvelteKit 3, generated server entries, so module-scope environment reads receive initialized values.
 - Load development WebSocket handlers through the SvelteKit 3 SSR environment so HTTP routes and WebSocket handlers share one module graph, including after route-only hot reloads.
-- Bundle SvelteKit 3 instrumentation environment initialization with the production server.
+- Bundle SvelteKit 3 instrumentation environment initialization for the single-process production entrypoint.
 - Initialize each acceptor-mode cluster worker before registering it to receive connections.
-- Await WebSocket handler shutdown and initialization during development reloads, and discard stale module loads before they can replace the active handler.
-- Select the SvelteKit 3 development module graph independently of the configured adapter, and reject unsupported fallback environment imports with configuration instructions.
+- Await WebSocket handler shutdown and initialization during development reloads, keep pending requests attached to the newest handler on Vite 6 and newer, and discard stale module loads before they can replace it. Vite 5 returns 503 with restart guidance when an in-flight import is superseded. Preserve the shared HTTP/WebSocket module graph on Kit 2 and platform properties assigned during initialization.
+- Select the SvelteKit 3 development module graph independently of the configured adapter, and provide configuration instructions when fallback handler builds lack esbuild or use unsupported SvelteKit virtual imports.
 
 ## [0.5.10] - 2026-10-09
 

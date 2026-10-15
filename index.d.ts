@@ -712,19 +712,23 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * pubsub bridge setup, or any "I need platform before the first
 	 * connection" pattern.
 	 *
-	 * Async-allowed. The adapter awaits the returned promise before
-	 * `start()` resolves (production) or `createTestServer()` resolves
-	 * (test harness). Connections accepted at the kernel level during a
-	 * slow async init queue until init resolves - but `open` / `message`
-	 * hooks for those queued connections may run concurrently with the
-	 * tail of init's execution. For most "capture platform" patterns the
-	 * race is harmless (writes are idempotent); use synchronous init or
-	 * an app-level ready-gate if strict ordering matters.
+	 * Async-allowed. Listening servers await the promise before `start()`
+	 * resolves; the test harness does so before `createTestServer()` resolves.
+	 * Single-process and reuseport production servers already have a bound
+	 * socket during init: HTTP requests and WebSocket hooks can run before
+	 * an asynchronous init finishes. Use synchronous setup or an application
+	 * readiness gate when those requests depend on initialization.
+	 * Acceptor workers finish init before registering to receive connections.
 	 *
 	 * In development, each replacement handler instance also runs `init`.
 	 * The adapter awaits the old instance's `shutdown`, then the new
 	 * instance's `init`, before accepting upgrades or authentication
-	 * requests. Kit 3 server-route edits can replace the handler too.
+	 * requests. Kit 3 server-route and page edits can replace the handler too.
+	 * If a handler or dependency changes, or Vite restarts in the same
+	 * process, while a module import is pending on Vite 5, upgrades and
+	 * authentication return 503 until the dev process
+	 * is stopped and started again. Vite 6 and newer can load the replacement
+	 * without waiting for the earlier import.
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker fires `init`
 	 * independently. Acceptor workers await initialization before registering
@@ -734,10 +738,11 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * singleton semantics; if you need a singleton (e.g. a single cron
 	 * publisher across the cluster), layer leader election on top.
 	 *
-	 * Throws re-throw to the caller: boot failure should be loud. The
-	 * `start()` promise rejects, the index.js entrypoint logs it, and the
-	 * process crashes - which is the right behavior for a server that
-	 * cannot complete its boot work.
+	 * A throwing init rejects startup. A single-process server exits; a
+	 * clustered worker exits and the primary applies its restart policy.
+	 * In development, upgrades and authentication fail until a corrected
+	 * handler initializes. Development also calls `shutdown` after a failed
+	 * init to release resources allocated before the failure.
 	 *
 	 * @example
 	 * ```js
@@ -767,7 +772,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * logging / alerting before the adapter logs it.
 	 *
 	 * In development, also awaited before a reloaded handler runs its
-	 * `init` hook. Use this to release the old instance's timers and resources.
+	 * `init` hook, and called if a development `init` throws. Use this to
+	 * release timers and resources, including partially initialized state.
 	 *
 	 * Per-worker firing in clustered mode, same as `init`. Each worker
 	 * fires `shutdown` independently when it receives the shutdown signal.

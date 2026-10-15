@@ -11,8 +11,8 @@ import uws from '../vite.js';
 const fixtureBase = process.env.UWS_HMR_TEST_ROOT || await mkdtemp(path.join(tmpdir(), 'uws-hmr-'));
 after(() => rm(fixtureBase, { recursive: true, force: true }));
 
-async function waitFor(check) {
-	const deadline = Date.now() + 5000;
+async function waitFor(check, timeout = 5000) {
+	const deadline = Date.now() + timeout;
 	for (;;) {
 		try { return await check(); } catch (error) {
 			if (Date.now() >= deadline) throw error;
@@ -32,12 +32,13 @@ export function open(ws) { ws.send(JSON.stringify({ state, handler: ${version} }
 export function message(ws) { state.count++; ws.send(JSON.stringify({ state, handler: ${version} })); }
 `;
 
-const lifecycleHandler = (version, { importDelay = 0, initDelay = 20, shutdownDelay = 20, failInit = false, upgradeDelay = 0, platformChecks = false } = {}) => key => `
+const lifecycleHandler = (version, { importDelay = 0, initDelay = 20, shutdownDelay = 20, failInit = false, upgradeDelay = 0, platformChecks = false, pendingImport = false, platformMarker = false } = {}) => key => `
 import { state } from './shared.js';
 const lifecycle = globalThis[${JSON.stringify(key)}];
 const id = crypto.randomUUID();
 lifecycle.events.push(['load', ${version}, id]);
 await new Promise(resolve => setTimeout(resolve, ${importDelay}));
+${pendingImport ? 'await new Promise(resolve => { lifecycle.releaseImport = resolve; });' : ''}
 let captured;
 let timer;
 const subscriptionData = { [Symbol.for('adapter-uws.ws.subscriptions')]: new Set() };
@@ -48,6 +49,7 @@ export async function init({ platform }) {
  await new Promise(resolve => setTimeout(resolve, ${initDelay}));
  ${failInit ? "throw new Error('Initialization failed');" : ''}
  captured = platform;
+ ${platformMarker ? `platform.initMarker = 'owner-${version}';` : ''}
  ${platformChecks ? `subscriptionData[Symbol.for('adapter-uws.ws.platform')] = platform;
  lifecycle.events.push(['platform:check', ${version}, id, await platform.checkSubscribe(subscriptionSocket, 'private')]);
  lifecycle.events.push(['platform:subscribe', ${version}, id, await platform.subscribe(subscriptionSocket, 'private')]);
@@ -99,6 +101,7 @@ async function createFixture(hmr = true, handler = handlerSource(1), options = {
 	let originalSend;
 	let reloads = 0;
 	const clients = [];
+	const requests = [];
 	const server = await createServer({
 		root,
 		configFile: false,
@@ -118,11 +121,12 @@ async function createFixture(hmr = true, handler = handlerSource(1), options = {
 				};
 				originalSend = hot.send;
 				vite.middlewares.use(async (req, res, next) => {
+					requests.push(req.url);
 					if (req.url !== '/state') return next();
 					try {
 						const { state, version } = await vite.environments.ssr.runner.import(path.join(root, 'route.js'));
 						res.setHeader('content-type', 'application/json');
-						res.end(JSON.stringify({ state, version }));
+						res.end(JSON.stringify({ state, version, initMarker: globalThis.__uws_dev_platform.initMarker ?? null }));
 					} catch (error) {
 						res.statusCode = 500;
 						res.end(String(error));
@@ -134,7 +138,7 @@ async function createFixture(hmr = true, handler = handlerSource(1), options = {
 	await server.listen();
 	const origin = () => `http://127.0.0.1:${server.httpServer.address().port}`;
 	return {
-		server, lifecycle,
+		server, lifecycle, requests,
 		writeHandlerSource: (source) => saveSource(path.join(root, 'handler.js'), typeof source === 'function' ? source(lifecycleKey) : source),
 		removeHandler: () => rm(path.join(root, 'handler.js')),
 		get reloads() { return reloads; },
@@ -180,6 +184,7 @@ async function createFixture(hmr = true, handler = handlerSource(1), options = {
 		async close() {
 			try {
 				for (const client of clients) client.terminate();
+				lifecycle.releaseImport?.();
 				await server.close();
 				assert.equal(server.environments.ssr.hot.send, originalSend);
 			} finally {
@@ -233,6 +238,55 @@ describe('shared SSR runner hot reload', () => {
 		assert.equal(fixture.lifecycle.active.size, 0);
 	});
 
+	it('moves early WebSocket and authentication requests past an unresolved old import', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { pendingImport: true }));
+		let requests;
+		try {
+			await waitFor(() => assert.equal(typeof fixture.lifecycle.releaseImport, 'function'));
+			requests = Promise.all([fixture.connect(), fixture.authenticate()]);
+			requests.catch(() => {});
+			await waitFor(() => assert.ok(fixture.requests.includes('/__ws/auth')));
+			await delay(50);
+			await fixture.writeHandlerSource(lifecycleHandler(2));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 2)));
+			const [socket, auth] = await requests;
+			assert.equal(socket.initial.version, 2);
+			assert.equal(auth.id, socket.initial.id);
+			assert.equal(fixture.lifecycle.events.some(([event, version]) => event === 'init:start' && version === 1), false);
+		} finally { await fixture.close(); await requests?.catch(() => {}); }
+	});
+
+	it('lets the runner process another save while a slow user init is pending', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1));
+		try {
+			await fixture.connect();
+			const before = fixture.reloads;
+			await fixture.writeHandlerSource(lifecycleHandler(2, { initDelay: 12000 }));
+			await waitFor(() => assert.ok(fixture.reloads > before));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:start' && version === 2)));
+			await delay(120);
+			await fixture.writeHandlerSource(lifecycleHandler(3));
+			await waitFor(() => assert.ok(fixture.reloads > before + 1));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'load' && version === 3)));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 3)), 16000);
+			const current = await fixture.connect();
+			assert.equal(current.initial.version, 3);
+			assert.deepEqual([...fixture.lifecycle.active], [current.initial.id]);
+		} finally { await fixture.close(); }
+	});
+
+	it('exposes initialized platform properties to HTTP routes', async () => {
+		const fixture = await createFixture(true, lifecycleHandler(1, { platformMarker: true }));
+		try {
+			await fixture.connect();
+			assert.equal((await fixture.http()).initMarker, 'owner-1');
+			await fixture.writeHandlerSource(lifecycleHandler(2, { platformMarker: true }));
+			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 2)));
+			await fixture.connect();
+			assert.equal((await fixture.http()).initMarker, 'owner-2');
+		} finally { await fixture.close(); }
+	});
+
 	it('fails closed after init errors and recovers with exactly one initialized owner', async () => {
 		const fixture = await createFixture(true, lifecycleHandler(1));
 		try {
@@ -242,6 +296,8 @@ describe('shared SSR runner hot reload', () => {
 			assert.match(await fixture.rejectedUpgrade(), /500/);
 			await fixture.authenticate(500);
 			assert.equal(fixture.lifecycle.active.size, 0);
+			// Keep distinct saves outside the watcher's atomic-save coalescing window.
+			await delay(120);
 			await fixture.writeHandlerSource(lifecycleHandler(3));
 			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 3)));
 			const recovered = await fixture.connect();
@@ -358,8 +414,12 @@ describe('shared SSR runner hot reload', () => {
 		const fixture = await createFixture(true, lifecycleHandler(1));
 		try {
 			await fixture.connect();
+			const reloads = fixture.reloads;
 			await fixture.writeHandlerSource(lifecycleHandler(2, { initDelay: 300 }));
+			await waitFor(() => assert.ok(fixture.reloads > reloads));
 			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:start' && version === 2)));
+			// Keep distinct saves outside the watcher's atomic-save coalescing window.
+			await delay(120);
 			await fixture.writeHandlerSource(lifecycleHandler(3));
 			await waitFor(() => assert.ok(fixture.lifecycle.events.some(([event, version]) => event === 'init:end' && version === 3)));
 			const current = await fixture.connect();

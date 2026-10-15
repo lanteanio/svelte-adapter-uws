@@ -4,10 +4,10 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "node build.mjs",
 		"smoke": "node smoke.mjs",
 		"smoke:dev": "node smoke.mjs --dev",
-		"build:entries": "vite build --mode entries",
+		"build:entries": "node build.mjs --mode entries",
 		"smoke:entries": "node smoke.mjs entries",
 		"smoke:cluster": "node smoke.mjs cluster",
 		"smoke:cluster:reuseport": "node smoke.mjs cluster-reuseport",
@@ -16,7 +16,8 @@
 		"smoke:reload": "node runner-hmr.mjs",
 		"smoke:dev:reload": "node smoke.mjs --dev-reload",
 		"smoke:dev:no-adapter": "node smoke.mjs --dev-no-adapter",
-		"smoke:dev:wrapped-adapter": "node smoke.mjs --dev-wrapped-adapter"
+		"smoke:dev:wrapped-adapter": "node smoke.mjs --dev-wrapped-adapter",
+		"smoke:stock": "node stock-install-smoke.mjs"
 	},
 	"dependencies": {
 		"@sveltejs/kit": "3.0.1",

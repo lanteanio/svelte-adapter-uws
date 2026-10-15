@@ -25,8 +25,18 @@ export default defineConfig(({ mode }) => {
 	return {
 		plugins: [sveltekit({
 			appDir: '_kit3',
+			alias: mode === 'fallback-alias' ? { '$lib': './src/lib' }
+				: mode === 'fallback-wildcard' ? { '$lib/*': './src/fallback-wildcard/*' }
+				: mode === 'fallback-both' ? { '$lib': './src/fallback-exact.js', '$lib/*': './src/fallback-wildcard/*' }
+				: mode === 'fallback-specific' ? { '$lib/specific': './src/fallback-exact.js' }
+				: mode === 'fallback-specific-prefix' ? { '$lib/specific': './src/fallback-wildcard' }
+				: mode === 'fallback-specific-both' ? {
+					'$lib/specific': './src/fallback-exact.js',
+					'$lib/specific/*': './src/fallback-wildcard/*',
+					'$lib/*': './src/lib/*'
+				} : undefined,
 			adapter: mode === 'no-adapter' ? undefined
 				: mode === 'wrapped-adapter' ? { ...configuredAdapter, name: 'fixture-wrapper' } : configuredAdapter
-		}), ...(mode === 'fallback' ? [] : [uws({ handler: './src/socket.js' })]), ...(mode === 'entries' ? [extraEntries()] : [])]
+		}), ...(mode.startsWith('fallback') ? [] : [uws({ handler: './src/socket.js' })]), ...(mode === 'entries' ? [extraEntries()] : [])]
 	};
 });

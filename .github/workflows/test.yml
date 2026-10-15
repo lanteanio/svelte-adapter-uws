@@ -38,6 +38,12 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Build and exercise SvelteKit 2 development and production
         run: npm run test:e2e
+      - name: Exercise SvelteKit 2 shared state and lifecycle during development reloads
+        working-directory: test/fixture
+        run: npm run smoke:dev:reload
+      - name: Exercise SvelteKit 2 fallback aliases and environment values
+        working-directory: test/fixture
+        run: npm run smoke:fallback
       - name: Exercise SvelteKit 2 generated entries and instrumentation
         working-directory: test/fixture
         run: npm run smoke:initialization
@@ -61,6 +67,11 @@ jobs:
       - name: Build the Svelte 4 application
         working-directory: test/fixtures/svelte4
         run: npm run build
+      - name: Exercise SvelteKit 2 development reloads on Vite 5
+        run: node test/fixture/reload-smoke.mjs --fixture test/fixtures/svelte4
+      - name: Exercise Vite 5 pending-import failures and process restart
+        working-directory: test/fixtures/svelte4
+        run: npm run smoke:dev:pending
       - name: Exercise Svelte 4 HTTP, SSR store, and WebSocket behavior
         working-directory: test/fixtures/svelte4
         run: npm run smoke
@@ -84,6 +95,9 @@ jobs:
       - name: Install the locked SvelteKit 3 application
         working-directory: test/fixtures/kit3
         run: npm ci --install-links
+      - name: Exercise a strict stock SvelteKit 3 install without esbuild
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:stock
       - name: Reject environment imports without the Vite plugin
         working-directory: test/fixtures/kit3
         run: npm run smoke:fallback

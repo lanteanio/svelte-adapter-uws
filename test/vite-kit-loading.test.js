@@ -10,7 +10,9 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 	const adapter = { name: 'adapter-uws' };
 	return {
 		httpServer,
-		middlewares: { use: vi.fn() },
+		middlewares: { use: vi.fn((route, middleware) => {
+			httpServer.on('request', (req, res) => middleware(req, res, () => { res.statusCode = 404; res.end(); }));
+		}) },
 		config: {
 			root,
 			server: {},
@@ -20,6 +22,11 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 		ssrLoadModule: vi.fn(loadModule),
 		environments: { ssr: { runner: { import: vi.fn(loadModule) } } }
 	};
+}
+
+async function hotUpdate(plugin, server) {
+	await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'update', file: server.ssrLoadModule.mock.calls[0][0], server });
+	await server.config.server.hotUpdateEnvironments(server, async () => {});
 }
 
 async function listen(server) {
@@ -88,7 +95,7 @@ describe('Vite server module loading', () => {
 
 			expectedLoader.mockResolvedValue({ init, open: (ws) => ws.send('updated handler') });
 			const restarted = once(client, 'close');
-			plugin.handleHotUpdate({ server });
+			hotUpdate(plugin, server);
 			expect((await restarted)[0]).toBe(1012);
 			expect(expectedLoader).toHaveBeenCalledTimes(2);
 			expect(expectedLoader).toHaveBeenLastCalledWith(handlerPath);
@@ -206,7 +213,7 @@ describe('development handler lifecycle', () => {
 			await plugin.configureServer(server);
 			const url = await listen(httpServer);
 			server.ssrLoadModule.mockResolvedValue(newest);
-			await plugin.handleHotUpdate({ server });
+			await hotUpdate(plugin, server);
 			pending.resolve(initial);
 			const client = new WebSocket(url);
 			clients.push(client);
@@ -220,6 +227,74 @@ describe('development handler lifecycle', () => {
 			await close(httpServer, clients);
 		}
 		expect(newest.shutdown).toHaveBeenCalledOnce();
+	});
+
+	it.each([2, 3])('moves pending Kit %i upgrades and authentication to a newer generation before the old import settles', async (kitVersion) => {
+		const pending = deferred();
+		const handler = { init: vi.fn(), open: ws => ws.send('newest'), authenticate: () => Response.json({ version: 'newest' }) };
+		const httpServer = createServer();
+		const clients = [];
+		const server = viteServer(httpServer, kitVersion, () => pending.promise);
+		let onReload;
+		server.environments.ssr.hot = { send: vi.fn() };
+		server.environments.ssr.runner.import.mockImplementation(id => id.startsWith('\0')
+			? Promise.resolve({ onReload(callback) { onReload = callback; return () => {}; } }) : pending.promise);
+		const plugin = uws({ handler: './handler.js', allowedOrigins: '*' });
+		try {
+			await plugin.configureServer(server);
+			const url = await listen(httpServer);
+			const upgrading = once(httpServer, 'upgrade');
+			const client = new WebSocket(url);
+			clients.push(client);
+			const message = handlerMessage(client);
+			message.catch(() => {});
+			await upgrading;
+			const requested = once(httpServer, 'request');
+			const authenticated = fetch(url.replace('ws:', 'http:').replace('/ws', '/__ws/auth'), {
+				method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest' }, signal: AbortSignal.timeout(2000)
+			});
+			authenticated.catch(() => {});
+			await requested;
+			if (kitVersion === 2) {
+				server.ssrLoadModule.mockResolvedValue(handler);
+				hotUpdate(plugin, server);
+			} else {
+				server.environments.ssr.runner.import.mockResolvedValue(handler);
+				server.environments.ssr.hot.send({ type: 'full-reload' });
+				onReload(1);
+			}
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			await vi.waitFor(() => expect(client.readyState).toBe(WebSocket.OPEN));
+			expect(await message).toBe('newest');
+			expect(await (await authenticated).json()).toEqual({ version: 'newest' });
+		} finally {
+			pending.resolve({});
+			await plugin.closeBundle();
+			await close(httpServer, clients);
+		}
+	});
+
+	it.each([2, 3])('shares Kit %i init properties with HTTP while retaining owned subscription hooks', async (kitVersion) => {
+		const httpServer = createServer();
+		const handler = { init: vi.fn(({ platform }) => {
+			platform.initMarker = 'ready';
+			Object.defineProperty(platform, 'initValue', { value: 42, enumerable: true, configurable: true });
+		}) };
+		const server = viteServer(httpServer, kitVersion, async () => handler);
+		const plugin = uws({ handler: './handler.js' });
+		const routePlatform = Object.create(globalThis.__uws_dev_platform);
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(routePlatform.initMarker).toBe('ready');
+			expect(globalThis.__uws_dev_platform.initMarker).toBe('ready');
+			expect(routePlatform.initValue).toBe(42);
+			expect(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'initValue')).toEqual({ value: 42, enumerable: true, configurable: true, writable: false });
+		} finally {
+			await plugin.closeBundle();
+			await close(httpServer, []);
+		}
 	});
 
 	it('serializes overlapping initialization and waits for the newest handler', async () => {
@@ -245,7 +320,7 @@ describe('development handler lifecycle', () => {
 			const url = await listen(httpServer);
 			await vi.waitFor(() => expect(handlers[0].init).toHaveBeenCalledOnce());
 			server.ssrLoadModule.mockResolvedValue(handlers[1]);
-			const second = plugin.handleHotUpdate({ server });
+			const second = hotUpdate(plugin, server);
 			await vi.waitFor(() => expect(handlers[1].init).toHaveBeenCalledOnce());
 			const client = new WebSocket(url);
 			clients.push(client);
@@ -254,7 +329,7 @@ describe('development handler lifecycle', () => {
 			client.on('open', opened);
 			await once(httpServer, 'upgrade');
 			server.ssrLoadModule.mockResolvedValue(handlers[2]);
-			const third = plugin.handleHotUpdate({ server });
+			const third = hotUpdate(plugin, server);
 			finishSecond.resolve();
 			await second;
 			await vi.waitFor(() => expect(handlers[2].init).toHaveBeenCalledOnce());
@@ -266,7 +341,10 @@ describe('development handler lifecycle', () => {
 				'init:start:1', 'init:end:1', 'shutdown:1',
 				'init:start:2', 'init:end:2', 'shutdown:2', 'init:start:3', 'init:end:3'
 			]);
-			await plugin.handleHotUpdate({ server });
+			hotUpdate(plugin, server);
+			const unchanged = new WebSocket(url);
+			clients.push(unchanged);
+			expect(await handlerMessage(unchanged)).toBe('3');
 			expect(handlers[2].init).toHaveBeenCalledOnce();
 			expect(handlers[2].shutdown).not.toHaveBeenCalled();
 		} finally {
@@ -276,6 +354,95 @@ describe('development handler lifecycle', () => {
 			await close(httpServer, clients);
 		}
 		for (const handler of handlers) expect(handler.shutdown).toHaveBeenCalledOnce();
+	});
+
+	it('waits for a custom legacy update coordinator and restores it on close', async () => {
+		const finishedUpdates = deferred();
+		const httpServer = createServer();
+		const first = { init: vi.fn() };
+		const next = { init: vi.fn() };
+		const server = viteServer(httpServer, 2, async () => first);
+		const coordinate = vi.fn(async (currentServer, update) => {
+			await finishedUpdates.promise;
+			await update(currentServer.environments.ssr);
+		});
+		server.config.server.hotUpdateEnvironments = coordinate;
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(first.init).toHaveBeenCalledOnce());
+			server.ssrLoadModule.mockResolvedValue(next);
+			const update = hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(coordinate).toHaveBeenCalledOnce());
+			expect(next.init).not.toHaveBeenCalled();
+			expect(server.ssrLoadModule).toHaveBeenCalledOnce();
+			finishedUpdates.resolve();
+			await update;
+			await vi.waitFor(() => expect(next.init).toHaveBeenCalledOnce());
+		} finally {
+			finishedUpdates.resolve();
+			await plugin.closeBundle();
+			await close(httpServer, []);
+		}
+		expect(server.config.server.hotUpdateEnvironments).toBe(coordinate);
+	});
+
+	it('waits for overlapping legacy environment updates before importing the replacement', async () => {
+		const updates = [deferred(), deferred()];
+		const httpServer = createServer();
+		const initial = { init: vi.fn() };
+		const newest = { init: vi.fn() };
+		const server = viteServer(httpServer, 2, async () => initial);
+		let updateIndex = 0;
+		server.config.server.hotUpdateEnvironments = () => updates[updateIndex++].promise;
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(initial.init).toHaveBeenCalledOnce());
+			server.ssrLoadModule.mockResolvedValue(newest);
+			const first = hotUpdate(plugin, server);
+			const second = hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(updateIndex).toBe(2));
+			updates[0].resolve();
+			await first;
+			expect(server.ssrLoadModule).toHaveBeenCalledOnce();
+			updates[1].resolve();
+			await second;
+			await vi.waitFor(() => expect(newest.init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledTimes(2);
+		} finally {
+			for (const update of updates) update.resolve();
+			await plugin.closeBundle();
+			await close(httpServer, []);
+		}
+	});
+
+	it('starts the Vite 5 import after the invalidation broadcast and restores its channel', async () => {
+		const httpServer = createServer();
+		const initial = { init: vi.fn() };
+		const newest = { init: vi.fn() };
+		const server = viteServer(httpServer, 2, async () => initial);
+		delete server.environments;
+		const send = vi.fn();
+		server.hot = { send };
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(initial.init).toHaveBeenCalledOnce());
+			server.ssrLoadModule.mockResolvedValue(newest);
+			await plugin.handleHotUpdate({ file: path.resolve(server.config.root, 'handler.js'), server });
+			expect(server.ssrLoadModule).toHaveBeenCalledOnce();
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(newest.init).toHaveBeenCalledOnce());
+			expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'full-reload' });
+		} finally {
+			await plugin.closeBundle();
+			await close(httpServer, []);
+		}
+		expect(server.hot.send).toBe(send);
 	});
 
 	it.each(['import', 'init'])('closes during pending %s without installing callbacks', async (stage) => {
@@ -336,7 +503,7 @@ describe('development handler lifecycle', () => {
 			expect(handler.init).toHaveBeenCalledOnce();
 			server.environments.ssr.hot.send({ type: 'full-reload' });
 			await onReload(2);
-			expect(handler.init).toHaveBeenCalledTimes(2);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledTimes(2));
 		} finally {
 			vi.useRealTimers();
 			await plugin.closeBundle();
