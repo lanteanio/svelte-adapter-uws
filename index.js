@@ -154,8 +154,8 @@ export default function (opts = {}) {
 						try {
 							esbuild = await import('esbuild');
 						} catch (error) {
-							if (!kit3 || error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-							throw new Error('SvelteKit 3 WebSocket handlers require the Vite plugin when esbuild is not installed. ' +
+							if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+							throw new Error('WebSocket handlers require the Vite plugin when esbuild is not installed. ' +
 								"Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.", { cause: error });
 						}
 						const { loadEnv } = await import('vite');

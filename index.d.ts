@@ -724,11 +724,15 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * The adapter awaits the old instance's `shutdown`, then the new
 	 * instance's `init`, before accepting upgrades or authentication
 	 * requests. Kit 3 server-route and page edits can replace the handler too.
-	 * If a handler or dependency changes, or Vite restarts in the same
-	 * process, while a module import is pending on Vite 5, upgrades and
-	 * authentication return 503 until the dev process
-	 * is stopped and started again. Vite 6 and newer can load the replacement
-	 * without waiting for the earlier import.
+	 * On Vite 5, superseding a pending handler load temporarily returns 503
+	 * for upgrades and authentication. After it settles, the adapter discards
+	 * stale results and reloads the current source automatically. Kit 2 with
+	 * Vite 6 or newer can load replacements without waiting for earlier imports.
+	 * Kit 3 follows its SSR runner's module evaluation and reload ordering.
+	 * Complete module-scope initialization; start background work in init.
+	 * Development init has a 30-second deadline. A timed-out instance never
+	 * becomes active; its shutdown runs once if initialization later settles.
+	 * User promises are not canceled, so external I/O needs its own timeout.
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker fires `init`
 	 * independently. Acceptor workers await initialization before registering
@@ -774,6 +778,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * In development, also awaited before a reloaded handler runs its
 	 * `init` hook, and called if a development `init` throws. Use this to
 	 * release timers and resources, including partially initialized state.
+	 * Development shutdown has a 30-second deadline. A timeout is logged and
+	 * allows replacement or server closure to continue without canceling the
+	 * user promise. Keep resources owned by each handler instance.
 	 *
 	 * Per-worker firing in clustered mode, same as `init`. Each worker
 	 * fires `shutdown` independently when it receives the shutdown signal.

@@ -4,15 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
 import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, runHook, runUnsubscribeHook } from './files/utils.js';
 
-// Vite 5 keeps pending SSR imports across graph invalidation and server.restart().
-// Recovery requires a fresh dev process, including after the old import settles.
-const vite5Applications = new Map();
-const vite5RestartMessage = 'A Vite 5 WebSocket handler import was still pending when another edit or server restart arrived. Stop and rerun the dev command.';
-
-function blockVite5Application(application) {
-	application.blocked = true;
-	for (const state of application.states) state.requireRestart();
-}
+// Vite 5 shares unfinished SSR imports across server instances. Keep only the
+// outstanding work so a replacement can invalidate stale results after it settles.
+const legacyImports = new Map();
+const lifecycleTimeout = 30000;
+const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish.';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -448,22 +444,39 @@ export default function uws(options = {}) {
 	};
 
 	function createHandlerPlatform(handlers) {
-		// Share init-assigned properties with HTTP routes while keeping authorization
-		// bound to this module through init, active connections, and shutdown.
+		// Each lifecycle owns its properties and descriptors. Active writes are
+		// visible to HTTP routes; retired writes stay with that instance's cleanup.
+		let retired = false;
 		const methods = createSubscriptionMethods(() => handlers);
-		const owned = new Proxy(platform, {
-			get(target, key, receiver) {
-				return Object.hasOwn(methods, key) ? methods[key] : Reflect.get(target, key, receiver);
+		const target = Object.create(Object.getPrototypeOf(platform), {
+			...Object.getOwnPropertyDescriptors(platform),
+			...Object.getOwnPropertyDescriptors(methods)
+		});
+		function mirror(key) {
+			if (retired || Object.hasOwn(methods, key)) return;
+			const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+			if (descriptor) {
+				// A property can be immutable on its owner without locking that
+				// name on the shared HTTP platform for every later lifecycle.
+				Reflect.defineProperty(platform, key, {
+					...descriptor, configurable: true,
+					...(!descriptor.configurable && 'value' in descriptor ? { writable: true } : {})
+				});
+			} else Reflect.deleteProperty(platform, key);
+		}
+		const owned = new Proxy(target, {
+			defineProperty(target, key, descriptor) {
+				const result = Reflect.defineProperty(target, key, descriptor);
+				if (result) mirror(key);
+				return result;
 			},
-			set(target, key, value, receiver) {
-				if (receiver === owned && Object.hasOwn(methods, key)) {
-					methods[key] = value;
-					return true;
-				}
-				return Reflect.set(target, key, value, receiver);
+			deleteProperty(target, key) {
+				const result = Reflect.deleteProperty(target, key);
+				if (result) mirror(key);
+				return result;
 			}
 		});
-		return owned;
+		return { platform: owned, retirePlatform() { retired = true; } };
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -624,8 +637,18 @@ export default function uws(options = {}) {
 			} finally {
 				handlerWaiters.delete(notify);
 			}
-			if (ready === handlerReady) return;
+			if (ready === handlerReady) break;
 		}
+		return { generation: lifecycleState?.generation, instance: lifecycleState?.active, handlers: userHandlers };
+	}
+
+	function currentHandlers(state, snapshot) {
+		return handlersSettled && isCurrent(state, snapshot.generation) &&
+			state.active === snapshot.instance && userHandlers === snapshot.handlers;
+	}
+
+	function advanceGeneration(state) {
+		return ++state.generation;
 	}
 
 	function isCurrent(state, generation) {
@@ -637,16 +660,47 @@ export default function uws(options = {}) {
 		return state.queue;
 	}
 
+	async function runLifecycleHook(instance, hook) {
+		if (typeof instance.handlers[hook] !== 'function') return;
+		const running = Promise.resolve().then(() => instance.handlers[hook]({ platform: instance.platform }));
+		if (hook === 'init') {
+			instance.initializing = running;
+			void running.then(
+				() => { instance.initSettled = true; },
+				() => { instance.initSettled = true; }
+			);
+		}
+		let timer;
+		try {
+			await Promise.race([running, new Promise((resolve, reject) => {
+				timer = setTimeout(() => {
+					const error = new Error(`WebSocket ${hook} hook did not finish within 30 seconds.`);
+					if (hook === 'init') {
+						instance.retirePlatform();
+						console.error('[adapter-uws] ' + error.message + ' Its cleanup will run if initialization finishes later.');
+					}
+					reject(error);
+				}, lifecycleTimeout);
+				timer.unref?.();
+			})]);
+		} finally { clearTimeout(timer); }
+	}
+
 	async function shutdownInstance(instance) {
 		if (!instance || instance.stopped) return;
 		instance.stopped = true;
-		try {
-			if (typeof instance.handlers.shutdown === 'function') {
-				await instance.handlers.shutdown({ platform: instance.platform });
-			}
-		} catch (error) {
-			console.error('[ws] shutdown hook threw:', error);
+		instance.retirePlatform();
+		const cleanup = async () => {
+			try { await runLifecycleHook(instance, 'shutdown'); }
+			catch (error) { console.error('[ws] shutdown hook threw:', error); }
+		};
+		if (instance.initializing && !instance.initSettled) {
+			// A timed-out init can still acquire resources when its await ends.
+			// Clean those resources once, after that invocation settles.
+			void instance.initializing.then(cleanup, cleanup);
+			return;
 		}
+		await cleanup();
 	}
 
 	async function retireHandlers(state) {
@@ -659,30 +713,13 @@ export default function uws(options = {}) {
 		await shutdownInstance(previous);
 	}
 
-	function requireVite5Restart(state) {
-		if (state.restartRequired) return;
-		state.restartRequired = true;
-		state.generation++;
-		if (lifecycleState === state) {
-			handlerFailed = true;
-			for (const ws of connections) ws.close(1012, 'Handler unavailable');
-			setHandlerReady(Promise.resolve());
-		}
-		console.error('[adapter-uws] ' + vite5RestartMessage);
-		void enqueueLifecycle(state, () => retireHandlers(state));
-	}
-
 	function stopLifecycle(state) {
 		if (!state) return Promise.resolve();
 		if (state.stopping) return state.stopping;
-		if (state.vite5 && state.pendingLoads > 0) blockVite5Application(state.application);
-		state.application?.states.delete(state);
-		if (state.application && !state.application.blocked && state.application.states.size === 0) {
-			vite5Applications.delete(state.application.key);
-		}
 		state.closed = true;
-		state.generation++;
+		advanceGeneration(state);
 		state.disconnect?.();
+		state.cancelListening?.();
 		if (lifecycleState === state) {
 			handlerFailed = true;
 			setHandlerReady(Promise.resolve());
@@ -691,19 +728,70 @@ export default function uws(options = {}) {
 		return state.stopping;
 	}
 
+	function settleLegacyLoad(state, loading, generation) {
+		if (state.currentLoad === loading) state.currentLoad = null;
+		if (state.closed) return;
+		if (!isCurrent(state, generation)) state.repairLegacyGraph = true;
+		if (!state.repairLegacyGraph || state.currentLoad || state.repairQueued) return;
+		state.repairQueued = true;
+		queueMicrotask(() => {
+			state.repairQueued = false;
+			if (state.closed || state.currentLoad || !state.repairLegacyGraph) return;
+			state.repairLegacyGraph = false;
+			// The compatibility loader can write stale exports after invalidation.
+			// Let the current import settle, then rebuild one shared graph.
+			state.server.moduleGraph.invalidateAll();
+			void reloadHandlers(state);
+		});
+	}
+
 	function reloadHandlers(state, gate = Promise.resolve()) {
-		const generation = ++state.generation;
+		const generation = advanceGeneration(state);
 		const work = (async () => {
 			await gate;
+			await state.listening;
+			if (!useEnvironmentRunner) {
+				// Legacy transforms started in the invalidation millisecond are not
+				// cached by Vite. Import on a later tick so HTTP reuses this graph.
+				const invalidatedAt = Date.now();
+				do { await new Promise(resolve => setTimeout(resolve, 1)); }
+				while (Date.now() <= invalidatedAt);
+			}
 			if (!isCurrent(state, generation)) return;
-			if (state.vite5 && (state.pendingLoads > 0 || state.application.blocked)) {
-				blockVite5Application(state.application);
+			const unfinished = state.vite5 && legacyImports.get(state.root);
+			if (unfinished?.size) {
+				state.importPending = true;
+				handlerFailed = true;
+				console.error('[adapter-uws] ' + legacyImportMessage);
+				await enqueueLifecycle(state, () => retireHandlers(state));
+				void Promise.allSettled([...unfinished]).then(() => {
+					if (!isCurrent(state, generation)) return;
+					// A late rejection can cache an error after HMR invalidation.
+					// Clear it only after Vite has removed its pending import entry.
+					state.server.moduleGraph.invalidateAll();
+					void reloadHandlers(state);
+				});
 				return;
 			}
-			let mod;
-			state.pendingLoads++;
-			try { mod = await state.load(state.path); }
-			finally { state.pendingLoads--; }
+			state.importPending = false;
+			const loading = state.load(state.path);
+			if (!useEnvironmentRunner && !state.vite5) {
+				state.currentLoad = loading;
+				void loading.then(
+					() => settleLegacyLoad(state, loading, generation),
+					() => settleLegacyLoad(state, loading, generation)
+				);
+			}
+			if (state.vite5) {
+				const pending = legacyImports.get(state.root) ?? new Set();
+				legacyImports.set(state.root, pending);
+				pending.add(loading);
+				void loading.catch(() => {}).finally(() => {
+					pending.delete(loading);
+					if (pending.size === 0 && legacyImports.get(state.root) === pending) legacyImports.delete(state.root);
+				});
+			}
+			const mod = await loading;
 			if (!isCurrent(state, generation)) return;
 			await enqueueLifecycle(state, async () => {
 				if (!isCurrent(state, generation)) return;
@@ -714,14 +802,10 @@ export default function uws(options = {}) {
 				}
 				await retireHandlers(state);
 				if (!isCurrent(state, generation)) return;
-				const instance = {
-					handlers, stopped: false,
-					platform: createHandlerPlatform(handlers)
-				};
+				const instance = { handlers, stopped: false, ...createHandlerPlatform(handlers) };
 				state.active = instance;
-				try {
-					if (typeof handlers.init === 'function') await handlers.init({ platform: instance.platform });
-				} catch (error) {
+				try { await runLifecycleHook(instance, 'init'); }
+				catch (error) {
 					state.active = null;
 					await shutdownInstance(instance);
 					throw error;
@@ -809,7 +893,7 @@ export default function uws(options = {}) {
 
 		// Vite 5 broadcasts from its aggregate hot channel after invalidating
 		// the legacy graph. Individual plugin WebSocket messages are separate.
-		const hot = server.hot;
+		const hot = server.hot ?? server.ws;
 		if (!hot) return;
 		const send = hot.send;
 		function sendWithReload(...args) {
@@ -969,7 +1053,8 @@ export default function uws(options = {}) {
 			const state = {
 				generation: 0, active: null, queue: Promise.resolve(), closed: false,
 				legacyUpdates: 0, legacyDirty: false, vite5: !server.environments,
-				pendingLoads: 0, restartRequired: false
+				importPending: false,
+				server, root: path.resolve(server.config.root)
 			};
 			lifecycleState = state;
 			for (const environment of Object.values(server.environments ?? {})) environmentStates.set(environment, state);
@@ -985,13 +1070,18 @@ export default function uws(options = {}) {
 			useEnvironmentRunner = (server.config.plugins ?? []).some(plugin =>
 				plugin?.name === 'vite-plugin-sveltekit-setup' && plugin.api?.options?.paths
 			);
-			const environmentReady = useEnvironmentRunner && !server.httpServer.listening
-				? new Promise(resolve => server.httpServer.once('listening', resolve))
-				: Promise.resolve();
+			state.listening = server.httpServer.listening ? Promise.resolve() : new Promise(resolve => {
+				const ready = () => {
+					server.httpServer.off('listening', ready);
+					state.cancelListening = null;
+					resolve();
+				};
+				state.cancelListening = ready;
+				server.httpServer.once('listening', ready);
+			});
 			let runnerReloadReady;
 			state.load = loadDevModule = async (id) => {
 				if (useEnvironmentRunner) {
-					await environmentReady;
 					await (runnerReloadReady ??= connectRunnerReload(server, state));
 					return server.environments.ssr.runner.import(id);
 				}
@@ -1000,27 +1090,23 @@ export default function uws(options = {}) {
 
 			if (!useEnvironmentRunner) connectLegacyReload(server, state);
 			state.path = resolvedHandlerPath = discoverHandler(root);
-			if (state.vite5) {
-				const key = path.resolve(root);
-				const application = vite5Applications.get(key) ?? { key, blocked: false, states: new Set() };
-				vite5Applications.set(key, application);
-				state.application = application;
-				state.requireRestart = () => requireVite5Restart(state);
-				application.states.add(state);
-				if (application.blocked || [...application.states].some(current => current.pendingLoads > 0)) {
-					blockVite5Application(application);
-				}
-			}
+
 			if (state.path) reloadHandlers(state);
 
 			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
 			// HTTP POST so session cookies are refreshed via a standard Set-Cookie
 			// on a 200-series response. Mirrors the production handler in dev.
 			server.middlewares.use(wsAuthPath, async (req, res, next) => {
-				await waitForHandlers();
+				let authHandlers = await waitForHandlers();
+				if (req.aborted || res.destroyed) return;
+				if (!currentHandlers(state, authHandlers)) {
+					res.statusCode = 503;
+					res.end('WebSocket handler reloading');
+					return;
+				}
 				if (handlerFailed) {
-					res.statusCode = state.restartRequired ? 503 : 500;
-					res.end(state.restartRequired ? vite5RestartMessage : 'WebSocket handler unavailable');
+					res.statusCode = state.importPending ? 503 : 500;
+					res.end(state.importPending ? legacyImportMessage : 'WebSocket handler unavailable');
 					return;
 				}
 				if (!userHandlers.authenticate) { next(); return; }
@@ -1056,10 +1142,18 @@ export default function uws(options = {}) {
 				const chunks = [];
 				let total = 0;
 				let oversized = false;
-				for await (const chunk of req) {
-					total += chunk.length;
-					if (total > AUTH_BODY_LIMIT) { oversized = true; break; }
-					chunks.push(chunk);
+				try {
+					for await (const chunk of req) {
+						total += chunk.length;
+						if (total > AUTH_BODY_LIMIT) { oversized = true; break; }
+						chunks.push(chunk);
+					}
+				} catch {
+					if (!res.destroyed) {
+						res.statusCode = 400;
+						res.end('Could not read authentication request');
+					}
+					return;
 				}
 				if (oversized) {
 					res.statusCode = 413;
@@ -1079,10 +1173,16 @@ export default function uws(options = {}) {
 					duplex: 'half'
 				});
 
-				await waitForHandlers();
+				authHandlers = await waitForHandlers();
+				if (req.aborted || res.destroyed) return;
+				if (!currentHandlers(state, authHandlers)) {
+					res.statusCode = 503;
+					res.end('WebSocket handler reloading');
+					return;
+				}
 				if (handlerFailed) {
-					res.statusCode = state.restartRequired ? 503 : 500;
-					res.end(state.restartRequired ? vite5RestartMessage : 'WebSocket handler unavailable');
+					res.statusCode = state.importPending ? 503 : 500;
+					res.end(state.importPending ? legacyImportMessage : 'WebSocket handler unavailable');
 					return;
 				}
 				if (!userHandlers.authenticate) { next(); return; }
@@ -1103,7 +1203,13 @@ export default function uws(options = {}) {
 				};
 
 				try {
-					const result = await Promise.resolve(userHandlers.authenticate(event));
+					const result = await Promise.resolve(authHandlers.handlers.authenticate(event));
+					if (req.aborted || res.destroyed) return;
+					if (!currentHandlers(state, authHandlers)) {
+						res.statusCode = 503;
+						res.end('WebSocket handler reloading');
+						return;
+					}
 
 					if (result === false) {
 						res.statusCode = 401;
@@ -1113,6 +1219,13 @@ export default function uws(options = {}) {
 					}
 
 					if (result instanceof Response) {
+						const body = result.body ? Buffer.from(await result.arrayBuffer()) : null;
+						if (req.aborted || res.destroyed) return;
+						if (!currentHandlers(state, authHandlers)) {
+							res.statusCode = 503;
+							res.end('WebSocket handler reloading');
+							return;
+						}
 						res.statusCode = result.status;
 						for (const [hk, hv] of result.headers) {
 							if (hk === 'set-cookie' || hk === 'content-length') continue;
@@ -1123,12 +1236,7 @@ export default function uws(options = {}) {
 							...cookies._serialize()
 						];
 						if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
-						if (result.body) {
-							const buf = Buffer.from(await result.arrayBuffer());
-							res.end(buf);
-						} else {
-							res.end();
-						}
+						res.end(body);
 						return;
 					}
 
@@ -1148,14 +1256,18 @@ export default function uws(options = {}) {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
 
-				await waitForHandlers();
+				const upgradeHandlers = await waitForHandlers();
+				if (!currentHandlers(state, upgradeHandlers)) {
+					socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nWebSocket handler reloading');
+					return;
+				}
 
 				// If the handler file exists but failed to load, reject the
 				// upgrade so a broken auth handler does not silently degrade
 				// to open access.
 				if (handlerFailed) {
-					if (state.restartRequired) {
-						socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n' + vite5RestartMessage);
+					if (state.importPending) {
+						socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n' + legacyImportMessage);
 						return;
 					}
 					socket.write(
@@ -1204,11 +1316,10 @@ export default function uws(options = {}) {
 				}
 				const wsRequestId = resolveRequestId(upgradeHeaders['x-request-id']) || randomUUID();
 
-				const upgradeGeneration = state.generation;
-				if (userHandlers.upgrade) {
+				if (upgradeHandlers.handlers.upgrade) {
 					try {
 						const result = await Promise.resolve(
-							userHandlers.upgrade({
+							upgradeHandlers.handlers.upgrade({
 								headers: upgradeHeaders,
 								cookies: parseCookies(upgradeHeaders['cookie']),
 								url: req.url || pathname,
@@ -1250,7 +1361,7 @@ export default function uws(options = {}) {
 					}
 				}
 
-				if (!isCurrent(state, upgradeGeneration)) {
+				if (!currentHandlers(state, upgradeHandlers)) {
 					socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nWebSocket handler reloading');
 					return;
 				}
@@ -1551,7 +1662,14 @@ export default function uws(options = {}) {
 				}
 				return;
 			}
-			if (this.environment.name !== 'ssr' || type === 'update') return;
+			if (this.environment.name !== 'ssr') return;
+			if (handlerFailed && state.path) {
+				// Failed imports can lack a propagation boundary or dependency node.
+				this.environment.moduleGraph.invalidateAll();
+				this.environment.hot.send({ type: 'full-reload' });
+				return [];
+			}
+			if (type === 'update') return;
 			const discovered = state.path || discoverHandler(viteServer.config.root);
 			if (!discovered || path.resolve(file) !== path.resolve(discovered)) return;
 			const firstHandler = !state.path;

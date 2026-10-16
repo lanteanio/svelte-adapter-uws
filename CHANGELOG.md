@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.11] - 2026-10-15
+## [0.5.11] - 2026-10-16
 
 ### Added
 
@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Load development WebSocket handlers through the SvelteKit 3 SSR environment so HTTP routes and WebSocket handlers share one module graph, including after route-only hot reloads.
 - Bundle SvelteKit 3 instrumentation environment initialization for the single-process production entrypoint.
 - Initialize each acceptor-mode cluster worker before registering it to receive connections.
-- Await WebSocket handler shutdown and initialization during development reloads, keep pending requests attached to the newest handler on Vite 6 and newer, and discard stale module loads before they can replace it. Vite 5 returns 503 with restart guidance when an in-flight import is superseded. Preserve the shared HTTP/WebSocket module graph on Kit 2 and platform properties assigned during initialization.
-- Select the SvelteKit 3 development module graph independently of the configured adapter, and provide configuration instructions when fallback handler builds lack esbuild or use unsupported SvelteKit virtual imports.
+- Await WebSocket handler shutdown and initialization during development reloads, keep pending requests attached to the newest available handler, and discard stale module loads before they can replace it. Vite 5 temporarily returns 503 while a superseded load is pending, then reloads the current source after it settles. Preserve the shared HTTP/WebSocket module graph on Kit 2 and platform properties assigned during initialization.
+- Select the SvelteKit 3 development module graph independently of the configured adapter. Provide configuration instructions when handler builds lack esbuild on either Kit version or use unsupported Kit 3 fallback virtual imports.
+- Preserve shutdown-before-init ordering during in-process development server restarts, bound lifecycle hooks to 30 seconds, and reject upgrades or streamed authentication responses from superseded handlers. Reload Kit 3 handlers when a missing dependency is created, and support handler reloads on Vite 5.0.
 
 ## [0.5.10] - 2026-10-09
 

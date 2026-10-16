@@ -48,8 +48,8 @@ export interface UWSPluginOptions extends SharedAdapterOptions {
  * - Dev: spins up a WebSocket server so `event.platform` works during `npm run dev`
  * - Build: injects `hooks.ws` into SvelteKit's SSR pipeline, resolving `#lib`
  *   on Kit 3, `$lib` on Kit 2, and the virtual modules supported by that Kit.
- * Kit 3 requires this plugin for SvelteKit virtual imports in handlers and
- * when the optional esbuild fallback is unavailable.
+ * Both Kit versions require this plugin when esbuild is unavailable.
+ * Kit 3 also requires it for SvelteKit virtual imports in handlers.
  *
  * ```js
  * import { sveltekit } from '@sveltejs/kit/vite';

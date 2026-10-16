@@ -41,12 +41,18 @@ jobs:
       - name: Exercise SvelteKit 2 shared state and lifecycle during development reloads
         working-directory: test/fixture
         run: npm run smoke:dev:reload
+      - name: Exercise SvelteKit 2 pending imports and lifecycle recovery
+        working-directory: test/fixture
+        run: npm run smoke:dev:lifecycle
       - name: Exercise SvelteKit 2 fallback aliases and environment values
         working-directory: test/fixture
         run: npm run smoke:fallback
       - name: Exercise SvelteKit 2 generated entries and instrumentation
         working-directory: test/fixture
         run: npm run smoke:initialization
+      - name: Exercise a strict SvelteKit 2 and Vite 8 install without esbuild
+        working-directory: test/fixtures/kit2-vite8
+        run: npm run smoke:stock
 
   svelte4:
     runs-on: ubuntu-latest
@@ -69,7 +75,7 @@ jobs:
         run: npm run build
       - name: Exercise SvelteKit 2 development reloads on Vite 5
         run: node test/fixture/reload-smoke.mjs --fixture test/fixtures/svelte4
-      - name: Exercise Vite 5 pending-import failures and process restart
+      - name: Exercise Vite 5 pending imports and lifecycle recovery
         working-directory: test/fixtures/svelte4
         run: npm run smoke:dev:pending
       - name: Exercise Svelte 4 HTTP, SSR store, and WebSocket behavior
@@ -113,6 +119,9 @@ jobs:
       - name: Reinitialize the real SvelteKit 3 handler after a route edit
         working-directory: test/fixtures/kit3
         run: npm run smoke:dev:reload
+      - name: Exercise SvelteKit 3 pending imports and lifecycle recovery
+        working-directory: test/fixtures/kit3
+        run: npm run smoke:dev:lifecycle
       - name: Exercise SvelteKit 3 development without a configured adapter
         working-directory: test/fixtures/kit3
         run: npm run smoke:dev:no-adapter

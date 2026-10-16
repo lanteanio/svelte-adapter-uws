@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
 import WebSocket from 'ws';
@@ -20,6 +20,7 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 			plugins: [{ name: 'vite-plugin-sveltekit-setup', api: { options: kitVersion === 3 ? { paths: {}, adapter } : { kit: { adapter } } } }]
 		},
 		ssrLoadModule: vi.fn(loadModule),
+		moduleGraph: { invalidateAll: vi.fn() },
 		environments: { ssr: { runner: { import: vi.fn(loadModule) } } }
 	};
 }
@@ -73,7 +74,7 @@ describe('Vite server module loading', () => {
 
 		try {
 			await plugin.configureServer(server);
-			expect(expectedLoader).toHaveBeenCalledTimes(kitVersion === 3 ? 0 : 1);
+			expect(expectedLoader).not.toHaveBeenCalled();
 			expect(otherLoader).not.toHaveBeenCalled();
 
 			const url = await listen(httpServer);
@@ -212,6 +213,7 @@ describe('development handler lifecycle', () => {
 		try {
 			await plugin.configureServer(server);
 			const url = await listen(httpServer);
+			await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledOnce());
 			server.ssrLoadModule.mockResolvedValue(newest);
 			await hotUpdate(plugin, server);
 			pending.resolve(initial);
@@ -292,6 +294,37 @@ describe('development handler lifecycle', () => {
 			expect(routePlatform.initValue).toBe(42);
 			expect(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'initValue')).toEqual({ value: 42, enumerable: true, configurable: true, writable: false });
 		} finally {
+			await plugin.closeBundle();
+			await close(httpServer, []);
+		}
+	});
+
+	it('discards an authentication body aborted while initialization is pending', async () => {
+		const initialized = deferred();
+		const httpServer = createServer();
+		const handler = { init: vi.fn(() => initialized.promise), authenticate: vi.fn(() => Response.json({ ready: true })) };
+		const server = viteServer(httpServer, 2, async () => handler);
+		const plugin = uws({ handler: './handler.js', allowedOrigins: '*' });
+		let abandoned;
+		try {
+			await plugin.configureServer(server);
+			const url = (await listen(httpServer)).replace('ws:', 'http:').replace('/ws', '/__ws/auth');
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			const received = once(httpServer, 'request');
+			abandoned = request(url, { method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest', 'content-length': '100' } });
+			abandoned.on('error', () => {});
+			abandoned.write('partial body');
+			const [incoming] = await received;
+			abandoned.destroy();
+			await vi.waitFor(() => expect(incoming.aborted).toBe(true));
+			initialized.resolve();
+			const response = await fetch(url, { method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest' } });
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({ ready: true });
+			expect(handler.authenticate).toHaveBeenCalledOnce();
+		} finally {
+			abandoned?.destroy();
+			initialized.resolve();
 			await plugin.closeBundle();
 			await close(httpServer, []);
 		}
@@ -419,14 +452,14 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
-	it('starts the Vite 5 import after the invalidation broadcast and restores its channel', async () => {
+	it.each(['hot', 'ws'])('starts the Vite 5 import after the %s invalidation broadcast and restores its channel', async (channel) => {
 		const httpServer = createServer();
 		const initial = { init: vi.fn() };
 		const newest = { init: vi.fn() };
 		const server = viteServer(httpServer, 2, async () => initial);
 		delete server.environments;
 		const send = vi.fn();
-		server.hot = { send };
+		server[channel] = { send };
 		const plugin = uws({ handler: './handler.js' });
 		try {
 			await plugin.configureServer(server);
@@ -435,14 +468,14 @@ describe('development handler lifecycle', () => {
 			server.ssrLoadModule.mockResolvedValue(newest);
 			await plugin.handleHotUpdate({ file: path.resolve(server.config.root, 'handler.js'), server });
 			expect(server.ssrLoadModule).toHaveBeenCalledOnce();
-			server.hot.send({ type: 'full-reload' });
+			server[channel].send({ type: 'full-reload' });
 			await vi.waitFor(() => expect(newest.init).toHaveBeenCalledOnce());
 			expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'full-reload' });
 		} finally {
 			await plugin.closeBundle();
 			await close(httpServer, []);
 		}
-		expect(server.hot.send).toBe(send);
+		expect(server[channel].send).toBe(send);
 	});
 
 	it.each(['import', 'init'])('closes during pending %s without installing callbacks', async (stage) => {

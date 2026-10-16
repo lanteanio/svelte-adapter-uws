@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const fixture = fileURLToPath(new URL('.', import.meta.url));
+const kit2 = process.argv.includes('--kit2');
+const fixture = fileURLToPath(new URL(kit2 ? '../kit2-vite8/' : '.', import.meta.url));
 const adapter = path.resolve(fixture, '../../..');
 const npmCli = process.env.npm_execpath;
 assert.ok(npmCli, 'Run this test with npm run smoke:stock');
-const temporary = mkdtempSync(path.join(tmpdir(), 'kit3-stock-'));
+const consumerRoot = path.resolve(process.env.UWS_TEST_CONSUMER_ROOT || path.join(homedir(), 'Git', '__harness', 'svelte-adapter-uws-stock'));
+mkdirSync(consumerRoot, { recursive: true });
+const temporary = mkdtempSync(path.join(consumerRoot, kit2 ? 'kit2-stock-' : 'kit3-stock-'));
 const consumer = path.join(temporary, 'consumer');
 const diagnostic = "Add uws() from 'svelte-adapter-uws/vite' after sveltekit() in vite.config.js.";
 function run(args, cwd = consumer) {
@@ -52,12 +55,12 @@ try {
 		assert.throws(() => require.resolve('esbuild'), { code: 'MODULE_NOT_FOUND' },
 			'esbuild must be absent, including ancestor directories');
 	}
-	const handler = path.join(consumer, 'src/socket.js');
+	const handler = path.join(consumer, kit2 ? 'src/hooks.ws.js' : 'src/socket.js');
 	const original = readFileSync(handler);
 	const vite = path.join(consumer, 'node_modules/vite/bin/vite.js');
 	for (const [name, source] of [
 		['plain', 'export function message(ws) { ws.send("plain"); }\n'],
-		['environment', "import * as environment from '$app/env/private';\nexport function message(ws) { ws.send(JSON.stringify(environment)); }\n"]
+		['environment', "import * as environment from '" + (kit2 ? '$env/dynamic/private' : '$app/env/private') + "';\nexport function message(ws) { ws.send(JSON.stringify(environment)); }\n"]
 	]) {
 		writeFileSync(handler, source);
 		const result = run([vite, 'build', '--mode', 'fallback']);
@@ -68,10 +71,10 @@ try {
 			'Kit 3 adapters must read the flat builder configuration');
 	}
 	writeFileSync(handler, original);
-	succeed([path.join(consumer, 'build.mjs')]);
-	succeed([path.join(consumer, 'smoke.mjs')]);
-	console.log('Kit 3 stock install passed: strict peers, no esbuild, actionable fallback errors, production HTTP and WebSockets');
+	succeed([npmCli, 'run', 'build']);
+	succeed([npmCli, 'run', 'smoke']);
+	console.log('Kit ' + (kit2 ? '2' : '3') + ' stock install passed: strict peers, no esbuild, actionable fallback errors, production HTTP and WebSockets');
 } finally {
-	assert.equal(path.dirname(temporary), path.resolve(tmpdir()), 'Only remove the owned temporary directory');
+	assert.equal(path.dirname(temporary), consumerRoot, 'Only remove the owned consumer directory');
 	rmSync(temporary, { recursive: true, force: true });
 }

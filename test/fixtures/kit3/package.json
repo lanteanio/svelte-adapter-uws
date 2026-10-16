@@ -17,7 +17,8 @@
 		"smoke:dev:reload": "node smoke.mjs --dev-reload",
 		"smoke:dev:no-adapter": "node smoke.mjs --dev-no-adapter",
 		"smoke:dev:wrapped-adapter": "node smoke.mjs --dev-wrapped-adapter",
-		"smoke:stock": "node stock-install-smoke.mjs"
+		"smoke:stock": "node stock-install-smoke.mjs",
+		"smoke:dev:lifecycle": "node ../../fixture/lifecycle-smoke.mjs --fixture ."
 	},
 	"dependencies": {
 		"@sveltejs/kit": "3.0.1",
