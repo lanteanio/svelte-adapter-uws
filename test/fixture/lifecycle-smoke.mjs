@@ -12,7 +12,7 @@ const scenarioIndex = process.argv.indexOf('--scenario');
 const scenario = scenarioIndex < 0 ? null : process.argv[scenarioIndex + 1];
 const kit3 = existsSync(resolve(fixture, 'src/socket.js'));
 const vite5 = JSON.parse(readFileSync(resolve(fixture, 'node_modules/vite/package.json'))).version.startsWith('5.');
-const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : [])];
+const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'platform-cleanup', 'platform-foreign', 'platform-throw', 'platform-timeout', 'platform-init-timeout', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : [])];
 if (!scenario) {
 	for (const name of scenarios) {
 		const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--fixture', fixture, '--scenario', name], { stdio: 'inherit', timeout: 75000 });
@@ -97,6 +97,156 @@ export function message(ws) { state.count++; ws.send(JSON.stringify(snapshot()))
 export function authenticate() { return Response.json(snapshot()); }
 `;
 	}
+	function platformHandler(value, { passive = false } = {}) {
+		return `const probe = globalThis[${JSON.stringify(key)}];
+const value = ${JSON.stringify(value)};
+const owner = crypto.randomUUID();
+let captured;
+let previousPublish;
+let previousDepth;
+const snapshot = () => ({ value, owner, depth: captured.platformDepth ?? null, poolOwner: captured.platformPool?.owner, poolClosed: captured.platformPool?.closed });
+export async function init({ platform }) {
+	captured = platform;
+	probe.inherited.push({ value, depth: platform.platformDepth, pool: platform.platformPool, handoff: platform.platformHandoff, marker: platform.platformMarker });
+	${passive ? '' : `previousPublish = platform.publish;
+	previousDepth = platform.platformDepth;
+	platform.publish = (...args) => { probe.wrapperHits++; return previousPublish(...args); };
+	platform.platformDepth = (previousDepth ?? 0) + 1;
+	platform.platformPool = { owner, closed: false };
+	probe.resources.push(platform.platformPool);
+	platform.platformInitOnly = owner;
+	Object.defineProperty(platform, 'platformMarker', { value: owner, enumerable: true });
+	Object.defineProperty(platform, 'platformAccessor', { get: () => owner, enumerable: true, configurable: true });`}
+	${value === 'first' && scenario === 'platform-init-timeout' ? 'await new Promise(resolve => { probe.releaseInit = resolve; probe.releases.push(resolve); });' : ''}
+	probe.events.push({ name: 'init:end', owner, value });
+}
+export async function shutdown({ platform }) {
+	probe.events.push({ name: 'shutdown:start', owner, value });
+	${value === 'first' && ['platform-foreign', 'platform-timeout'].includes(scenario) ? 'await new Promise(resolve => { probe.releaseShutdown = resolve; probe.releases.push(resolve); });' : 'await new Promise(resolve => setTimeout(resolve, 40));'}
+	${value === 'first' && scenario === 'platform-throw' ? "throw new Error('Platform cleanup failed');" : ''}
+	${passive ? '' : `const pool = Object.getOwnPropertyDescriptor(platform, 'platformPool')?.value;
+	if (pool) pool.closed = true;
+	delete platform.platformPool;
+	delete platform.platformInitOnly;
+	delete platform.platformAccessor;
+	platform.publish = previousPublish;
+	if (previousDepth === undefined) delete platform.platformDepth;
+	else platform.platformDepth = previousDepth;
+	platform.platformHandoff = value;`}
+	probe.events.push({ name: 'shutdown:end', owner, value });
+}
+export function open(ws) { ws.send(JSON.stringify(snapshot())); }
+export function authenticate() { return Response.json(snapshot()); }
+`;
+	}
+	async function platformState(expected) {
+		const { ws, body } = await connect();
+		assert.equal(body.value, expected);
+		ws.terminate();
+		const response = await fetch(origin + '/lifecycle-proof', { signal: AbortSignal.timeout(5000) });
+		assert.equal(response.status, 200, await response.clone().text());
+		const http = await response.json();
+		assert.equal(http.depth, body.depth, 'HTTP and WebSocket must see the same platform depth');
+		assert.equal(http.poolOwner, body.poolOwner);
+		assert.equal(http.poolClosed, body.poolClosed);
+		return { body, http };
+	}
+	async function checkPlatform() {
+		probe.inherited = [];
+		probe.wrapperHits = 0;
+		probe.foreignHits = 0;
+		writeFileSync(route, `export function GET({ platform }) {
+	const probe = globalThis[${JSON.stringify(key)}];
+	probe.wrapperHits = 0;
+	probe.foreignHits = 0;
+	platform.publish('lifecycle-proof', 'message');
+	return Response.json({ hits: probe.wrapperHits, foreignHits: probe.foreignHits, depth: platform.platformDepth ?? null,
+		poolOwner: platform.platformPool?.owner, poolClosed: platform.platformPool?.closed,
+		initOnly: platform.platformInitOnly, accessor: platform.platformAccessor, handoff: platform.platformHandoff });
+}
+`);
+		writeFileSync(hooks, platformHandler('first'));
+		await start();
+		if (scenario === 'platform-init-timeout') {
+			await until(() => probe.releaseInit, 'Paused initialization');
+			await save(hooks, platformHandler('second'));
+			await until(() => saw('init:end', 'second'), 'Replacement after init timeout', 38000);
+			const current = await platformState('second');
+			assert.equal(current.http.depth, 1, 'Timed-out init must restore the shared platform');
+			assert.equal(current.http.hits, 1);
+			assert.equal(probe.inherited[1].pool, undefined);
+			assert.ok(probe.diagnostics.some(message => message.includes('WebSocket init hook did not finish')));
+			probe.releaseInit();
+			await until(() => saw('shutdown:end', 'first'), 'Late init cleanup');
+			assert.equal(probe.resources[0].closed, true);
+			assert.equal(probe.resources[1].closed, false);
+			const after = await platformState('second');
+			assert.equal(after.http.depth, 1);
+			assert.equal(after.http.hits, 1);
+			assert.equal(after.http.handoff, undefined);
+			return;
+		}
+		const first = await platformState('first');
+		assert.equal(first.http.depth, 1);
+		assert.equal(first.http.hits, 1);
+		if (scenario === 'platform-cleanup') {
+			for (const [previous, value] of [['first', 'second'], ['second', 'third'], ['third', 'fourth']]) {
+				await save(hooks, platformHandler(value));
+				await until(() => saw('init:end', value), 'Replacement platform initialization');
+				const current = await platformState(value);
+				assert.equal(current.http.depth, 1, 'Shutdown must restore the previous depth before the next init');
+				assert.equal(current.http.hits, 1, 'Shutdown must remove the previous publish wrapper');
+				assert.equal(current.http.handoff, previous, 'Successful shutdown writes must survive retirement');
+				const inherited = probe.inherited.find(entry => entry.value === value);
+				assert.equal(inherited.pool, undefined, 'The next init must not inherit a closed pool deleted by shutdown');
+				assert.equal(inherited.marker, undefined, 'Retirement must remove immutable properties still owned by the old instance');
+				assert.equal(probe.resources.at(-2).closed, true);
+			}
+		} else {
+			const foreign = scenario === 'platform-foreign';
+			await save(hooks, platformHandler('second', { passive: foreign }));
+			if (foreign) {
+				await until(() => probe.releaseShutdown, 'Paused shutdown');
+				const shared = globalThis.__uws_dev_platform;
+				shared.publish = () => { probe.foreignHits++; return 0; };
+				shared.platformDepth = 40;
+				shared.platformPool = { owner: 'foreign', closed: false };
+				Object.defineProperty(shared, 'platformInitOnly', { value: 'foreign', writable: false, enumerable: false, configurable: false });
+				Object.defineProperty(shared, 'platformAccessor', { get: () => 'foreign', enumerable: false, configurable: true });
+				shared.platformHandoff = 'foreign';
+				probe.releaseShutdown();
+			}
+			await until(() => saw('init:end', 'second'), 'Replacement platform initialization', 38000);
+			const current = await platformState('second');
+			assert.equal(current.http.depth, foreign ? 40 : 1);
+			assert.equal(current.http.hits, foreign ? 0 : 1, 'Retirement must remove a failed or timed-out wrapper');
+			if (foreign) {
+				assert.equal(current.http.foreignHits, 1);
+				assert.equal(current.http.poolOwner, 'foreign');
+				assert.equal(current.http.poolClosed, false, 'Cleanup must not close a foreign pool');
+				assert.equal(current.http.initOnly, 'foreign', 'Shutdown deletion must preserve a foreign descriptor');
+				assert.equal(current.http.accessor, 'foreign', 'Shutdown must preserve a foreign accessor');
+				assert.equal(current.http.handoff, 'foreign', 'A new shutdown write must not replace a foreign handoff');
+				assert.deepEqual(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'platformInitOnly'), { value: 'foreign', writable: false, enumerable: false, configurable: false });
+				assert.equal(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'platformAccessor').enumerable, false);
+			} else {
+				assert.equal(probe.inherited[1].pool, undefined, 'Retirement must remove the old pool before replacement init');
+				assert.equal(probe.inherited[1].marker, undefined);
+				assert.ok(probe.diagnostics.some(message => message.includes(scenario === 'platform-timeout' ? 'WebSocket shutdown hook did not finish' : 'Platform cleanup failed')));
+			}
+			if (scenario === 'platform-timeout') {
+				probe.releaseShutdown();
+				await until(() => saw('shutdown:end', 'first'), 'Late platform cleanup');
+				assert.equal(probe.resources[0].closed, true, 'Late cleanup must retain the retired pool');
+				assert.equal(probe.resources[1].closed, false, 'Late cleanup must not close the replacement pool');
+				const after = await platformState('second');
+				assert.equal(after.http.depth, 1);
+				assert.equal(after.http.hits, 1);
+				assert.equal(after.http.handoff, undefined, 'Late shutdown writes must stay isolated');
+			}
+		}
+	}
+
 	async function until(check, label, timeout = 10000) {
 		const deadline = Date.now() + timeout;
 		let last;
@@ -189,6 +339,11 @@ export function authenticate() { return Response.json(snapshot()); }
 		mkdirSync(routeDir);
 		writeFileSync(route, "import { state } from '../../lifecycle-proof-state.js';\nexport function GET() { return Response.json(state); }\n");
 		writeFileSync(dependency, stateSource('shared'));
+		if (scenario.startsWith('platform-')) {
+			await checkPlatform();
+			console.log('Platform lifecycle passed on Vite ' + version + ': ' + scenario);
+			return;
+		}
 		if (scenario === 'dependency-syntax') writeFileSync(dependency, 'export const state = { ;\n');
 		if (scenario === 'dependency-created') unlinkSync(dependency);
 		if (scenario === 'dependency-transitive-created') writeFileSync(dependency, "export { state } from './lifecycle-proof-missing.js';\n");

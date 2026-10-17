@@ -8,7 +8,7 @@ import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnv
 // outstanding work so a replacement can invalidate stale results after it settles.
 const legacyImports = new Map();
 const lifecycleTimeout = 30000;
-const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish.';
+const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish. If it never settles, fix its module-scope initialization and restart the dev process.';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -447,22 +447,40 @@ export default function uws(options = {}) {
 		// Each lifecycle owns its properties and descriptors. Active writes are
 		// visible to HTTP routes; retired writes stay with that instance's cleanup.
 		let retired = false;
+		let shuttingDown = false;
+		const writes = new Map();
 		const methods = createSubscriptionMethods(() => handlers);
+		const initial = Object.getOwnPropertyDescriptors(platform);
 		const target = Object.create(Object.getPrototypeOf(platform), {
-			...Object.getOwnPropertyDescriptors(platform),
+			...initial,
 			...Object.getOwnPropertyDescriptors(methods)
 		});
+		function sameDescriptor(left, right) {
+			if (!left || !right) return left === right;
+			return ['value', 'writable', 'get', 'set', 'enumerable', 'configurable'].every(key =>
+				Object.hasOwn(left, key) === Object.hasOwn(right, key) && Object.is(left[key], right[key]));
+		}
 		function mirror(key) {
 			if (retired || Object.hasOwn(methods, key)) return;
+			const current = Reflect.getOwnPropertyDescriptor(platform, key);
+			let write = writes.get(key);
+			// A different owner may update the shared platform while shutdown waits.
+			// Its descriptor must survive both cleanup writes and retirement.
+			if (write ? !sameDescriptor(current, write.last) :
+				shuttingDown && !sameDescriptor(current, Object.hasOwn(initial, key) ? initial[key] : undefined)) return;
+			if (!write) write = { original: current, last: current, shutdown: false };
 			const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
-			if (descriptor) {
-				// A property can be immutable on its owner without locking that
-				// name on the shared HTTP platform for every later lifecycle.
-				Reflect.defineProperty(platform, key, {
-					...descriptor, configurable: true,
-					...(!descriptor.configurable && 'value' in descriptor ? { writable: true } : {})
-				});
-			} else Reflect.deleteProperty(platform, key);
+			const mirrored = descriptor && {
+				// An immutable owner property must not lock the shared HTTP platform.
+				...descriptor, configurable: true,
+				...(!descriptor.configurable && 'value' in descriptor ? { writable: true } : {})
+			};
+			const applied = mirrored ? Reflect.defineProperty(platform, key, mirrored) : Reflect.deleteProperty(platform, key);
+			if (applied) {
+				write.last = Reflect.getOwnPropertyDescriptor(platform, key);
+				write.shutdown ||= shuttingDown;
+				writes.set(key, write);
+			}
 		}
 		const owned = new Proxy(target, {
 			defineProperty(target, key, descriptor) {
@@ -476,7 +494,21 @@ export default function uws(options = {}) {
 				return result;
 			}
 		});
-		return { platform: owned, retirePlatform() { retired = true; } };
+		return {
+			platform: owned,
+			beginShutdown() { shuttingDown = true; },
+			retirePlatform(preserveShutdown = false) {
+				if (retired) return;
+				retired = true;
+				for (const [key, write] of writes) {
+					if (preserveShutdown && write.shutdown) continue;
+					if (!sameDescriptor(Reflect.getOwnPropertyDescriptor(platform, key), write.last)) continue;
+					if (write.original) Reflect.defineProperty(platform, key, write.original);
+					else Reflect.deleteProperty(platform, key);
+				}
+				writes.clear();
+			}
+		};
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -675,8 +707,8 @@ export default function uws(options = {}) {
 			await Promise.race([running, new Promise((resolve, reject) => {
 				timer = setTimeout(() => {
 					const error = new Error(`WebSocket ${hook} hook did not finish within 30 seconds.`);
+					instance.retirePlatform();
 					if (hook === 'init') {
-						instance.retirePlatform();
 						console.error('[adapter-uws] ' + error.message + ' Its cleanup will run if initialization finishes later.');
 					}
 					reject(error);
@@ -689,10 +721,14 @@ export default function uws(options = {}) {
 	async function shutdownInstance(instance) {
 		if (!instance || instance.stopped) return;
 		instance.stopped = true;
-		instance.retirePlatform();
 		const cleanup = async () => {
-			try { await runLifecycleHook(instance, 'shutdown'); }
-			catch (error) { console.error('[ws] shutdown hook threw:', error); }
+			instance.beginShutdown();
+			let completed = false;
+			try {
+				await runLifecycleHook(instance, 'shutdown');
+				completed = true;
+			} catch (error) { console.error('[ws] shutdown hook threw:', error); }
+			finally { instance.retirePlatform(completed); }
 		};
 		if (instance.initializing && !instance.initSettled) {
 			// A timed-out init can still acquire resources when its await ends.
@@ -765,17 +801,16 @@ export default function uws(options = {}) {
 				console.error('[adapter-uws] ' + legacyImportMessage);
 				await enqueueLifecycle(state, () => retireHandlers(state));
 				void Promise.allSettled([...unfinished]).then(() => {
-					if (!isCurrent(state, generation)) return;
-					// A late rejection can cache an error after HMR invalidation.
-					// Clear it only after Vite has removed its pending import entry.
-					state.server.moduleGraph.invalidateAll();
-					void reloadHandlers(state);
+					// A late rejection can cache an error after HMR invalidation,
+					// even when a newer save has already superseded this waiter.
+					state.repairLegacyGraph = true;
+					settleLegacyLoad(state, null, generation);
 				});
 				return;
 			}
 			state.importPending = false;
 			const loading = state.load(state.path);
-			if (!useEnvironmentRunner && !state.vite5) {
+			if (!useEnvironmentRunner) {
 				state.currentLoad = loading;
 				void loading.then(
 					() => settleLegacyLoad(state, loading, generation),

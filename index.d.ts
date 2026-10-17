@@ -724,10 +724,13 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * The adapter awaits the old instance's `shutdown`, then the new
 	 * instance's `init`, before accepting upgrades or authentication
 	 * requests. Kit 3 server-route and page edits can replace the handler too.
-	 * On Vite 5, superseding a pending handler load temporarily returns 503
-	 * for upgrades and authentication. After it settles, the adapter discards
-	 * stale results and reloads the current source automatically. Kit 2 with
-	 * Vite 6 or newer can load replacements without waiting for earlier imports.
+	 * On Vite 5, superseding a pending handler load returns 503 for upgrades
+	 * and authentication until it settles, then discards stale results and
+	 * reloads the current source automatically. If the import never settles,
+	 * fix its module-scope initialization and restart the dev process; later
+	 * edits or same-process server recreation cannot clear the pending import.
+	 * Kit 2 with Vite 6 or newer can load replacements without waiting for
+	 * earlier imports.
 	 * Kit 3 follows its SSR runner's module evaluation and reload ordering.
 	 * Complete module-scope initialization; start background work in init.
 	 * Development init has a 30-second deadline. A timed-out instance never
