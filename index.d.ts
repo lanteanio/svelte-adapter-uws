@@ -738,8 +738,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * User promises are not canceled, so external I/O needs its own timeout.
 	 * Each development handler instance gets its own platform object: after
 	 * an instance retires, the next init receives fresh built-in methods plus
-	 * copies of the custom properties. Key once-only guards on the platform
-	 * object so they run again for each new platform.
+	 * copies of the custom properties; after a deadline it receives a fresh
+	 * platform without copies. Key once-only guards on the platform object so
+	 * they run again for each new platform.
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker fires `init`
 	 * independently. Acceptor workers await initialization before registering

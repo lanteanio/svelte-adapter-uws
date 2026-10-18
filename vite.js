@@ -467,6 +467,8 @@ export default function uws(options = {}) {
 	}
 
 	let platformEpoch = createPlatformEpoch();
+	// Deny until configureServer knows whether a handler file exists.
+	platformEpoch.handlers = retiredHandlers;
 	let platform = platformEpoch.platform;
 	const builtinKeys = new Set(Reflect.ownKeys(platform));
 
@@ -480,6 +482,9 @@ export default function uws(options = {}) {
 
 	function resetPlatform(instance) {
 		if (instance.epoch !== platformEpoch) return false;
+		// The abandoned platform denies too; a late shutdown restores its own
+		// hooks while it runs.
+		instance.epoch.handlers = retiredHandlers;
 		installEpoch(createPlatformEpoch());
 		return true;
 	}
@@ -776,7 +781,6 @@ export default function uws(options = {}) {
 
 	function reloadHandlers(state, gate = Promise.resolve()) {
 		const generation = advanceGeneration(state);
-		if (lifecycleState === state && !state.active) platformEpoch.handlers = retiredHandlers;
 		const work = (async () => {
 			await gate;
 			await state.listening;
@@ -855,8 +859,8 @@ export default function uws(options = {}) {
 				handlerFailed = true;
 				await retireHandlers(state);
 				console.error('[adapter-uws] Failed to load or initialize WebSocket handler:', error);
-				if (error instanceof TypeError && /redefine property|read[- ]only|cannot delete property/i.test(error.message)) {
-					console.error('[adapter-uws] If this error comes from a locked platform property: custom platform properties carry over to the next development platform with their descriptors, so keep them configurable and writable when init sets them again. Restart the dev process to clear a locked property.');
+				if (error instanceof TypeError && /redefine property|read[- ]only|cannot delete property|only a getter/i.test(error.message)) {
+					console.error('[adapter-uws] If this error comes from a locked platform property: custom platform properties carry over to the next development platform with their descriptors, so keep them configurable and writable, and give accessors a setter, when init sets them again. Restart the dev process to clear a locked property.');
 				}
 			});
 		});
@@ -1132,6 +1136,9 @@ export default function uws(options = {}) {
 
 			if (!useEnvironmentRunner) connectLegacyReload(server, state);
 			state.path = resolvedHandlerPath = discoverHandler(root);
+			// Without a handler file subscription checks allow, as in production
+			// without hooks; with one they deny until its instance is live.
+			platformEpoch.handlers = state.path ? retiredHandlers : {};
 
 			if (state.path) reloadHandlers(state);
 
@@ -1720,7 +1727,11 @@ export default function uws(options = {}) {
 			if (!discovered || path.resolve(file) !== path.resolve(discovered)) return;
 			const firstHandler = !state.path;
 			state.path = resolvedHandlerPath = discovered;
-			if (firstHandler) { void reloadHandlers(state); return []; }
+			if (firstHandler) {
+				if (!state.active) platformEpoch.handlers = retiredHandlers;
+				void reloadHandlers(state);
+				return [];
+			}
 			this.environment.moduleGraph.invalidateAll();
 			this.environment.hot.send({ type: 'full-reload' });
 			return [];

@@ -311,6 +311,8 @@ describe('development handler lifecycle', () => {
 		const server = viteServer(httpServer, 2, async () => ({}), path.join(process.cwd(), 'test'));
 		const plugin = uws();
 		try {
+			// Until the server is configured the plugin cannot know whether a handler exists.
+			expect(await globalThis.__uws_dev_platform.checkSubscribe({ getUserData: () => ({}) }, 'room')).toBe('INTERNAL_ERROR');
 			await plugin.configureServer(server);
 			await listen(httpServer);
 			expect(server.ssrLoadModule).not.toHaveBeenCalled();
@@ -642,6 +644,95 @@ describe('development handler lifecycle', () => {
 		} finally {
 			await closeLifecycle(plugin, server);
 			await close(httpServer, clients);
+		}
+	});
+
+	it('denies subscription checks through a platform abandoned after a development init deadline', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+		const httpServer = createServer();
+		let abandoned;
+		const handler = { subscribe: () => true, init: vi.fn(({ platform }) => { abandoned = platform; return new Promise(() => {}); }) };
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const server = viteServer(httpServer, 2, async () => handler);
+		const plugin = uws({ handler: './handler.js' });
+		const synthetic = { getUserData: () => ({}) };
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(await abandoned.checkSubscribe(synthetic, 'room')).toBeNull();
+			await vi.advanceTimersByTimeAsync(30000);
+			await vi.waitFor(() => expect(error).toHaveBeenCalledWith(expect.stringContaining('init hook did not finish')));
+			expect(current()).not.toBe(abandoned);
+			expect(await abandoned.checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+		} finally {
+			vi.useRealTimers();
+			error.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('keeps a retiring development instance on its own hooks while another reload starts', async () => {
+		const release = deferred();
+		const results = [];
+		const synthetic = { getUserData: () => ({}) };
+		const first = {
+			subscribe: () => true,
+			init: vi.fn(),
+			shutdown: vi.fn(async ({ platform }) => { await release.promise; results.push(await platform.checkSubscribe(synthetic, 'room')); })
+		};
+		const second = { subscribe: () => false, init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		const plugin = uws({ handler: './handler.js' });
+		const pending = [];
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(first.init).toHaveBeenCalledOnce());
+			server.ssrLoadModule.mockResolvedValue(second);
+			pending.push(hotUpdate(plugin, server));
+			await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
+			pending.push(hotUpdate(plugin, server));
+			await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledTimes(3));
+			release.resolve();
+			await Promise.all(pending);
+			await vi.waitFor(() => expect(second.init).toHaveBeenCalled());
+			expect(results).toEqual([null]);
+		} finally {
+			release.resolve();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('allows subscription checks after a reused development plugin restarts without a handler file', async () => {
+		const plugin = uws();
+		const synthetic = { getUserData: () => ({}) };
+		const firstHttp = createServer();
+		const handler = { subscribe: () => false, init: vi.fn() };
+		const first = viteServer(firstHttp, 2, async () => handler, path.resolve('test/fixture'));
+		const secondHttp = createServer();
+		const second = viteServer(secondHttp, 2, async () => ({}), path.join(process.cwd(), 'test'));
+		try {
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			await plugin.configureServer(first);
+			await listen(firstHttp);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN');
+			await closeLifecycle(plugin, first);
+			await close(firstHttp, []);
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			await plugin.configureServer(second);
+			await listen(secondHttp);
+			expect(second.ssrLoadModule).not.toHaveBeenCalled();
+			expect(await current().checkSubscribe(synthetic, 'room')).toBeNull();
+		} finally {
+			await closeLifecycle(plugin, second);
+			await close(firstHttp, []);
+			await close(secondHttp, []);
 		}
 	});
 

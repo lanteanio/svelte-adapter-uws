@@ -393,6 +393,7 @@ export function authenticate() { return Response.json(snapshot()); }
 		}
 		if (scenario === 'platform-init-timeout') {
 			await until(() => probe.releaseInit, 'Paused initialization');
+			const abandoned = probe.platform;
 			await save(hooks, platformHandler('second'));
 			await until(() => saw('init:end', 'second'), 'Replacement after init timeout', 38000);
 			const current = await platformState('second');
@@ -400,6 +401,8 @@ export function authenticate() { return Response.json(snapshot()); }
 			assert.equal(current.http.hits, 1);
 			assert.equal(probe.inherited[1].pool, undefined);
 			assert.ok(probe.diagnostics.some(message => message.includes('WebSocket init hook did not finish')));
+			assert.notEqual(globalThis.__uws_dev_platform, abandoned);
+			assert.equal(await abandoned.checkSubscribe({ getUserData: () => ({}) }, 'abandoned'), 'INTERNAL_ERROR', 'A platform abandoned after an init deadline must deny unowned sockets');
 			probe.releaseInit();
 			await until(() => saw('shutdown:end', 'first'), 'Late init cleanup');
 			assert.equal(probe.resources[0].closed, true);
