@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { packRelease, validatePackManifest } from '../scripts/pack-release.js';
+import { tarballFile } from '../scripts/prepare-release.js';
 
 const sourcePkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const npmCli = process.env.UWS_RELEASE_NPM_CLI || process.env.npm_execpath;
@@ -12,7 +13,7 @@ function cliVersion(cli) {
 	try { return JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8')).version; } catch { return undefined; }
 }
 // CI always runs these against the pinned npm; local runs without it skip them.
-const packingCli = Boolean(process.env.CI) || (npmCli && cliVersion(npmCli) === '11.5.1');
+const packingCli = process.env.CI === 'true' || (npmCli && cliVersion(npmCli) === '11.5.1');
 function fixture() {
 	const base = mkdtempSync(join(tmpdir(), 'uws-release-pack-'));
 	const source = join(base, 'source'); mkdirSync(source);
@@ -54,6 +55,9 @@ describe.skipIf(!packingCli)('immutable stable release packing (needs npm 11.5.1
 			expect(files.get('package/index.js')).toEqual(readFileSync(join(value.source, 'index.js')));
 			expect(files.get('package/README.md')).toEqual(readFileSync(join(value.source, 'README.md')));
 			expect(JSON.parse(files.get('package/package.json'))).toEqual({ ...value.pkg, gitHead: first.gitHead });
+			// The local tag check reads the manifest of a real npm tarball the same way.
+			expect(tarballFile(readFileSync(tarball), 'package/package.json')).toEqual(files.get('package/package.json'));
+			expect(tarballFile(readFileSync(tarball), 'package/missing.json')).toBeUndefined();
 			// This is the same full-metadata reader npm publish uses for a tarball.
 			const pacote = createRequire(npmCli)('pacote');
 			const metadata = await pacote.manifest(tarball, { fullmetadata: true, fullReadJson: true, cache: join(value.base, 'cache') });

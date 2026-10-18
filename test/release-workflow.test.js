@@ -60,6 +60,9 @@ describe('closed stable publication', () => {
 		mutant(w => { w.on.push['branches-ignore'] = ['unused']; });
 		mutant(w => { w.permissions['id-token'] = 'write'; });
 		mutant(w => { w.env = { NODE_OPTIONS: '--require ./wrong.js' }; });
+		mutant(w => { w.concurrency['cancel-in-progress'] = true; });
+		mutant(w => { w.concurrency.group = 'release'; });
+		mutant(w => { delete w.concurrency; });
 		for (const name of ['identity', 'tests', 'verify', 'publish']) {
 			for (const [key, value] of Object.entries({ if: false, 'continue-on-error': true, env: { NODE_OPTIONS: '--require ./wrong.js' }, container: 'wrong/image', defaults: { run: { shell: 'bash' } } })) {
 				mutant(w => { w.jobs[name][key] = value; });

@@ -6,12 +6,16 @@
 import { readFileSync, appendFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const expectedRepository = 'lanteanio/svelte-adapter-uws';
 const expectedRepositoryUrl = 'git+https://github.com/lanteanio/svelte-adapter-uws.git';
+const sourceBranch = 'origin/main';
+// The full ref, so a local branch named origin/main cannot stand in for it.
+const sourceRef = 'refs/remotes/' + sourceBranch;
 
 export function validateReleaseRequest(env, pkg) {
 	const errors = [];
@@ -35,7 +39,6 @@ export function validateReleaseRequest(env, pkg) {
 export function validateReleaseContext(env, pkg, git) {
 	const errors = validateReleaseRequest(env, pkg);
 	if (errors.length) return errors;
-	const sourceBranch = 'origin/main';
 	if (git.sourceBranch !== sourceBranch || !git.sourceContainsHead) {
 		errors.push('release commit is not contained in the required ' + sourceBranch + ' lineage');
 	}
@@ -96,7 +99,6 @@ export function main({ cwd = root, env = process.env } = {}) {
 	const requestErrors = validateReleaseRequest(env, pkg);
 	if (requestErrors.length) throw new Error(requestErrors.join('\n- '));
 	const ref = env.GITHUB_REF || '';
-	const sourceBranch = 'origin/main';
 	const tagContents = git(cwd, ['cat-file', 'tag', ref], false);
 	const details = {
 		artifactSha256: artifactDigest(tagContents, pkg.name + '@' + pkg.version),
@@ -106,7 +108,7 @@ export function main({ cwd = root, env = process.env } = {}) {
 		head: git(cwd, ['rev-parse', 'HEAD']),
 		clean: git(cwd, ['status', '--porcelain=v1']).length === 0,
 		sourceBranch,
-		sourceContainsHead: isAncestor(cwd, 'HEAD', sourceBranch)
+		sourceContainsHead: isAncestor(cwd, 'HEAD', sourceRef)
 	};
 	const errors = validateReleaseContext(env, pkg, details);
 	if (errors.length > 0) throw new Error(errors.join('\n- '));
@@ -115,11 +117,42 @@ export function main({ cwd = root, env = process.env } = {}) {
 }
 
 /**
+ * Return one regular file from a gzipped npm tarball, or undefined.
+ *
+ * @param {Buffer} archive
+ * @param {string} path
+ */
+export function tarballFile(archive, path) {
+	const data = gunzipSync(archive);
+	let extendedPath;
+	for (let offset = 0; offset + 512 <= data.length;) {
+		const header = data.subarray(offset, offset + 512);
+		if (header.every(byte => byte === 0)) break;
+		const field = (start, length) => header.subarray(start, start + length).toString('utf8').replace(/\0[\s\S]*$/, '');
+		const size = parseInt(field(124, 12).trim() || '0', 8);
+		const type = field(156, 1);
+		const prefix = field(345, 155);
+		const name = extendedPath ?? (prefix ? prefix + '/' : '') + field(0, 100);
+		const body = data.subarray(offset + 512, offset + 512 + size);
+		offset += 512 + Math.ceil(size / 512) * 512;
+		if (type === 'x') {
+			extendedPath = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(body.toString('utf8'))?.[1];
+			continue;
+		}
+		extendedPath = undefined;
+		if ((type === '0' || type === '') && name === path) return body;
+	}
+	return undefined;
+}
+
+/**
  * Check a local annotated tag before it is pushed. A pushed tag is never
- * retargeted, so a malformed annotation must be caught on the owner's machine.
+ * retargeted, so anything CI would reject must be caught on the owner's machine.
  */
 export function verifyLocalTag({ cwd = root, tag, artifact }) {
 	if (!tag) throw new Error('a tag name is required');
+	if (!artifact) throw new Error('the retained tarball is required');
+	const archive = readFileSync(artifact);
 	if (git(cwd, ['cat-file', '-t', tag]) !== 'tag') throw new Error('release version tag must be annotated');
 	const commit = git(cwd, ['rev-list', '-n', '1', tag]);
 	const pkg = JSON.parse(git(cwd, ['show', commit + ':package.json'], false));
@@ -128,24 +161,33 @@ export function verifyLocalTag({ cwd = root, tag, artifact }) {
 	if (tag !== expectedTag) errors.push('tag must be ' + expectedTag + ' for the package at the tagged commit');
 	const digest = artifactDigest(git(cwd, ['cat-file', 'tag', tag], false), expectedTag);
 	if (!digest) errors.push('annotation must contain exactly one "Artifact-SHA256: <64 lowercase hexadecimal characters>" line');
-	if (artifact && digest && createHash('sha256').update(readFileSync(artifact)).digest('hex') !== digest) {
+	if (digest && createHash('sha256').update(archive).digest('hex') !== digest) {
 		errors.push('annotation digest does not match ' + artifact);
 	}
-	if (!isAncestor(cwd, commit, 'origin/main')) errors.push('tagged commit is not contained in origin/main; push main first');
+	// CI repacks the tagged commit, so a tarball packed elsewhere would fail there.
+	let manifest;
+	try { manifest = JSON.parse(tarballFile(archive, 'package/package.json')?.toString('utf8') ?? ''); } catch { manifest = undefined; }
+	if (!manifest) errors.push(artifact + ' is not an npm tarball with package/package.json');
+	else {
+		if (manifest.name + '@' + manifest.version !== expectedTag) errors.push('tarball package is ' + manifest.name + '@' + manifest.version + ', not ' + expectedTag);
+		if (manifest.gitHead !== commit) errors.push('tarball gitHead ' + (manifest.gitHead ?? '(missing)') + ' is not the tagged commit ' + commit);
+	}
+	if (!isAncestor(cwd, commit, sourceRef)) errors.push('tagged commit is not contained in ' + sourceBranch + '; push main first');
 	if (errors.length > 0) throw new Error(errors.join('\n- '));
 	return { tag, commit, artifactSha256: digest };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const args = process.argv.slice(2);
-	const option = name => { const index = args.indexOf(name); return index === -1 ? undefined : args[index + 1]; };
 	try {
-		if (args.includes('--verify-tag')) {
-			const result = verifyLocalTag({ tag: option('--verify-tag'), artifact: option('--artifact') });
-			console.log('local tag ' + result.tag + ' binds ' + result.artifactSha256 + ' at ' + result.commit);
-		} else {
+		if (args.length === 0) {
 			const result = main();
 			console.log('release identity: ' + result.tag + ' at ' + result.head);
+		} else if (args.length === 4 && args[0] === '--verify-tag' && args[2] === '--artifact') {
+			const result = verifyLocalTag({ tag: args[1], artifact: args[3] });
+			console.log('local tag ' + result.tag + ' binds ' + result.artifactSha256 + ' at ' + result.commit);
+		} else {
+			throw new Error('usage: node scripts/prepare-release.js [--verify-tag <tag> --artifact <tarball>]');
 		}
 	} catch (error) {
 		console.error('release identity check failed:\n- ' + error.message);

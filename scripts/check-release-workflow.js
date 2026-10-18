@@ -172,6 +172,10 @@ export function validateReleaseWorkflow(source, pkg, policy, testSource) {
 		errors.push('release workflow must not have a branch or manual-dispatch path');
 	}
 	if (!same(workflow.permissions, { contents: 'read' })) errors.push('workflow default permission must be contents read');
+	// One run per tag, and a running publication is never cancelled midway.
+	if (!same(workflow.concurrency, { group: 'release-${{ github.ref }}', 'cancel-in-progress': false })) {
+		errors.push('release workflow must queue runs per tag without cancelling one in progress');
+	}
 	if (!same(Object.keys(workflow.jobs || {}), ['identity', 'tests', 'verify', 'publish'])) {
 		errors.push('release workflow must have exactly the identity, tests, verify and publish jobs, in that order');
 	}

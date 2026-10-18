@@ -42,10 +42,12 @@ or lane must update its pin in the same reviewed change.
    on `main`. Record its full SHA and require clean source.
 2. Confirm the npm version and annotated tag do not already exist locally or
    remotely. Record existing `latest`, `next` and `candidate` pointers.
-3. With Node 22.23.2 and npm 11.5.1, run in the clean source checkout:
+3. With Node 22.23.2 and npm 11.5.1, run in the clean source checkout. In
+   PowerShell call `npm.cmd`, so that the `--` separator reaches npm; a shell
+   uses `npm`:
 
    ```powershell
-   npm run --ignore-scripts --silent pack:release -- --destination ../release-artifacts/0.5.11
+   npm.cmd run --ignore-scripts --silent pack:release -- --destination ../release-artifacts/0.5.11
    ```
 
    Use a new directory per candidate. Retain its JSON output and tarball. The
@@ -76,29 +78,53 @@ Release 0.5.11
 Artifact-SHA256: <64 lowercase hexadecimal characters>
 ```
 
-Set `$source` and `$tarball` from the retained evidence. Write the annotation
-outside the repository as UTF-8 without a byte order mark; in Windows
-PowerShell 5.1, `Out-File` and `>` write UTF-16 and `Get-FileHash` returns
-uppercase hexadecimal, so use the commands below. After verifying account
-protection and complete preflight:
+Run these commands in the clean main source checkout, not in the `dev`
+bookkeeping worktree. Set `$source` to the frozen main SHA and `$tarball` to the
+retained archive. Write the annotation outside the repository as UTF-8 without
+a byte order mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16
+and `Get-FileHash` returns uppercase hexadecimal, so use the commands below.
+Windows PowerShell continues after a failed native command, so each line checks
+its exit code. After verifying account protection and complete preflight:
 
 ```powershell
 $tag = 'svelte-adapter-uws@0.5.11'
 $annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($annotation, "Release 0.5.11`n`nArtifact-SHA256: $sha256`n")
+git push origin main; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
+git fetch origin main; if ($LASTEXITCODE -ne 0) { throw 'fetching main failed' }
+git tag -a $tag $source -F $annotation; if ($LASTEXITCODE -ne 0) { throw 'tagging failed' }
+node scripts/prepare-release.js --verify-tag $tag --artifact $tarball; if ($LASTEXITCODE -ne 0) { throw 'the local tag check failed; do not push the tag' }
+```
+
+The same steps in a POSIX shell, with `source` and `tarball` set:
+
+```sh
+set -eu
+tag=svelte-adapter-uws@0.5.11
+annotation=$(mktemp)
+sha256=$(sha256sum -- "$tarball")
+sha256=${sha256%% *}
+printf 'Release 0.5.11\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
 git push origin main
 git fetch origin main
-git tag -a $tag $source -F $annotation
-node scripts/prepare-release.js --verify-tag $tag --artifact $tarball
-git push origin $tag
+git tag -a "$tag" "$source" -F "$annotation"
+node scripts/prepare-release.js --verify-tag "$tag" --artifact "$tarball"
 ```
 
 The local check requires an annotated tag named for the package version at the
 tagged commit, exactly one lowercase digest line equal to the retained tarball,
-and a tagged commit contained in `origin/main`. If it fails, delete the local
-tag with `git tag -d $tag`, correct the annotation and tag again. Never push a
-tag that has not passed it.
+a tarball whose package name, version and `gitHead` match the tagged commit,
+and a tagged commit contained in `refs/remotes/origin/main`. If it fails,
+delete the local tag with `git tag -d $tag`, correct the cause and tag again.
+Only after it prints `local tag ... binds ...`, push the tag as a separate
+command:
+
+```powershell
+git push origin $tag
+```
+
+Never push a tag that has not passed the check.
 
 Append `tagged` only after the remote tag is visible. The workflow reproduces
 and retains the frozen archive only if its digest matches the annotation.
