@@ -12,7 +12,7 @@ const scenarioIndex = process.argv.indexOf('--scenario');
 const scenario = scenarioIndex < 0 ? null : process.argv[scenarioIndex + 1];
 const kit3 = existsSync(resolve(fixture, 'src/socket.js'));
 const vite5 = JSON.parse(readFileSync(resolve(fixture, 'node_modules/vite/package.json'))).version.startsWith('5.');
-const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'platform-subscription-owner', 'platform-reset-guard', 'platform-reset-generation', 'platform-reset-global', 'platform-cleanup', 'platform-persistent', 'platform-persistent-shutdown', 'platform-persistent-current', 'platform-persistent-fixed', 'platform-persistent-nonextensible', 'platform-constrained-delete', 'platform-constrained-readonly', 'platform-constrained-cleanup', 'platform-constrained-setter', 'platform-constrained-fixed-setter', 'platform-constrained-add-setter', 'platform-constrained-remove-setter', 'platform-constrained-sealed-noop', 'platform-proto-resource', 'platform-foreign', 'platform-foreign-active', 'platform-init-throw', 'platform-throw', 'platform-timeout', 'platform-init-timeout', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : [])];
+const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'platform-subscription-owner', 'platform-reset-guard', 'platform-reset-generation', 'platform-reset-global', 'platform-cleanup', 'platform-persistent', 'platform-persistent-shutdown', 'platform-persistent-current', 'platform-persistent-fixed', 'platform-persistent-nonextensible', 'platform-constrained-delete', 'platform-constrained-readonly', 'platform-constrained-cleanup', 'platform-constrained-setter', 'platform-constrained-fixed-setter', 'platform-constrained-add-setter', 'platform-constrained-remove-setter', 'platform-constrained-sealed-noop', 'platform-proto-resource', 'platform-foreign', 'platform-foreign-active', 'platform-init-throw', 'platform-throw', 'platform-timeout', 'platform-init-timeout', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : ['handler-created'])];
 if (!scenario) {
 	for (const name of scenarios) {
 		const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--fixture', fixture, '--scenario', name], { stdio: 'inherit', timeout: name === 'platform-reset-generation' ? 100000 : 75000 });
@@ -738,7 +738,9 @@ export function authenticate() { return Response.json(snapshot()); }
 			}]
 		});
 		await server.listen();
-		await until(() => Object.entries(server.watcher.getWatched()).some(([directory, files]) => resolve(directory) === resolve(fixture, 'src') && files.includes(basename(hooks))), 'Handler watcher registration');
+		// Without a handler file yet, the watched source directory is what reports its creation.
+		const watchedHooks = existsSync(hooks) ? basename(hooks) : null;
+		await until(() => Object.entries(server.watcher.getWatched()).some(([directory, files]) => resolve(directory) === resolve(fixture, 'src') && (!watchedHooks || files.includes(watchedHooks))), 'Handler watcher registration');
 		await delay(150);
 		origin = 'http://127.0.0.1:' + server.httpServer.address().port;
 	}
@@ -793,6 +795,17 @@ export function authenticate() { return Response.json(snapshot()); }
 		mkdirSync(routeDir);
 		writeFileSync(route, "import { state } from '../../lifecycle-proof-state.js';\nexport function GET() { return Response.json(state); }\n");
 		writeFileSync(dependency, stateSource('shared'));
+		if (scenario === 'handler-created') {
+			unlinkSync(hooks);
+			await start();
+			const synthetic = { getUserData: () => ({}) };
+			assert.equal(await globalThis.__uws_dev_platform.checkSubscribe(synthetic, 'no-handler'), null, 'Without a handler file checks must allow');
+			await save(hooks, handler('first'), false);
+			await eventuallyHealthy('first');
+			assert.equal(probe.events.filter(event => event.name === 'init:end').length, 1, 'A created handler must initialize once');
+			console.log('Lifecycle recovery passed on Vite ' + version + ': ' + scenario);
+			return;
+		}
 		if (scenario.startsWith('platform-')) {
 			if (scenario === 'platform-subscription-owner') await checkSubscriptionOwners();
 			else if (scenario.startsWith('platform-reset-')) await checkResetPlatform();

@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { createServer, request } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import WebSocket from 'ws';
 import uws from '../vite.js';
 import { WS_SUBSCRIPTIONS, WS_PLATFORM } from '../files/utils.js';
@@ -650,12 +652,19 @@ describe('development handler lifecycle', () => {
 	it('denies subscription checks through a platform abandoned after a development init deadline', async () => {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 		const httpServer = createServer();
+		const synthetic = { getUserData: () => ({}) };
 		let abandoned;
-		const handler = { subscribe: () => true, init: vi.fn(({ platform }) => { abandoned = platform; return new Promise(() => {}); }) };
+		const initDone = deferred();
+		const shutdownGate = deferred();
+		const late = [];
+		const handler = {
+			subscribe: () => true,
+			init: vi.fn(({ platform }) => { abandoned = platform; return initDone.promise; }),
+			shutdown: vi.fn(async ({ platform }) => { late.push(await platform.checkSubscribe(synthetic, 'late')); await shutdownGate.promise; })
+		};
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const server = viteServer(httpServer, 2, async () => handler);
 		const plugin = uws({ handler: './handler.js' });
-		const synthetic = { getUserData: () => ({}) };
 		try {
 			await plugin.configureServer(server);
 			await listen(httpServer);
@@ -666,7 +675,14 @@ describe('development handler lifecycle', () => {
 			expect(current()).not.toBe(abandoned);
 			expect(await abandoned.checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
 			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			// The late shutdown of the expired instance does not reopen its platform.
+			initDone.resolve();
+			await vi.waitFor(() => expect(late).toEqual(['INTERNAL_ERROR']));
+			expect(await abandoned.checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			shutdownGate.resolve();
 		} finally {
+			initDone.resolve();
+			shutdownGate.resolve();
 			vi.useRealTimers();
 			error.mockRestore();
 			await closeLifecycle(plugin, server);
@@ -733,6 +749,46 @@ describe('development handler lifecycle', () => {
 			await closeLifecycle(plugin, second);
 			await close(firstHttp, []);
 			await close(secondHttp, []);
+		}
+	});
+
+	it('allows development subscription checks when the dev WebSocket server is disabled', async () => {
+		const server = viteServer(createServer(), 2, async () => ({ subscribe: () => false }));
+		server.httpServer = null;
+		const plugin = uws({ handler: './handler.js' });
+		await plugin.configureServer(server);
+		expect(server.config.logger.warn).toHaveBeenCalledWith(expect.stringContaining('middleware mode'));
+		expect(server.ssrLoadModule).not.toHaveBeenCalled();
+		expect(await current().checkSubscribe({ getUserData: () => ({}) }, 'room')).toBeNull();
+	});
+
+	it('loads a Kit 2 handler file created after the development server started', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-created-handler-'));
+		mkdirSync(path.join(root, 'src'));
+		const file = path.join(root, 'src', 'hooks.ws.js');
+		const handler = { subscribe: () => false, init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => handler, root);
+		const plugin = uws();
+		const synthetic = { getUserData: () => ({}) };
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			expect(await current().checkSubscribe(synthetic, 'room')).toBeNull();
+			writeFileSync(file, 'export const created = true;');
+			plugin.watchChange(path.join(root, 'src', 'other.js'), { event: 'create' });
+			plugin.watchChange(file, { event: 'update' });
+			expect(server.ssrLoadModule).not.toHaveBeenCalled();
+			// Vite reports watched ids with forward slashes.
+			plugin.watchChange(file.split(path.sep).join('/'), { event: 'create' });
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledWith(file);
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 

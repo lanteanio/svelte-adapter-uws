@@ -482,8 +482,8 @@ export default function uws(options = {}) {
 
 	function resetPlatform(instance) {
 		if (instance.epoch !== platformEpoch) return false;
-		// The abandoned platform denies too; a late shutdown restores its own
-		// hooks while it runs.
+		// The abandoned platform keeps denying, also while a late shutdown runs.
+		instance.epoch.abandoned = true;
 		instance.epoch.handlers = retiredHandlers;
 		installEpoch(createPlatformEpoch());
 		return true;
@@ -720,7 +720,7 @@ export default function uws(options = {}) {
 		if (!instance || instance.stopped) return;
 		instance.stopped = true;
 		const cleanup = async () => {
-			instance.epoch.handlers = instance.handlers;
+			if (!instance.epoch.abandoned) instance.epoch.handlers = instance.handlers;
 			try { await runLifecycleHook(instance, 'shutdown'); }
 			catch (error) { console.error('[ws] shutdown hook threw:', error); }
 			finally {
@@ -1062,6 +1062,8 @@ export default function uws(options = {}) {
 					'It is not available in middleware mode (server.httpServer is null). ' +
 					'WebSocket features will be disabled in dev.'
 				);
+				// No handler can run, so subscription checks behave as without one.
+				platformEpoch.handlers = {};
 				return;
 			}
 
@@ -1074,6 +1076,7 @@ export default function uws(options = {}) {
 					'[svelte-adapter-uws] The "ws" package is not installed. ' +
 					'WebSocket features are disabled in dev. Install with: npm i -D ws'
 				);
+				platformEpoch.handlers = {};
 				return;
 			}
 
@@ -1699,6 +1702,18 @@ export default function uws(options = {}) {
 			if (wsPath !== '/ws') {
 				console.log(`[adapter-uws] Client must match: connect({ path: '${wsPath}' })`);
 			}
+		},
+		watchChange(id, change) {
+			// Kit 3 discovers a new handler in its SSR hotUpdate. The legacy hooks
+			// only see updates, so a handler file created after startup is
+			// discovered here.
+			const state = lifecycleState;
+			if (change?.event !== 'create' || !state || state.closed || state.path || useEnvironmentRunner || !viteServer) return;
+			const discovered = discoverHandler(viteServer.config.root);
+			if (!discovered || path.resolve(id) !== path.resolve(discovered)) return;
+			state.path = resolvedHandlerPath = discovered;
+			if (!state.active) platformEpoch.handlers = retiredHandlers;
+			void reloadHandlers(state);
 		},
 		handleHotUpdate({ file }) {
 			const state = lifecycleState;
