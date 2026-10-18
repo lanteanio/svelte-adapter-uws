@@ -11,7 +11,8 @@ import { artifactDigest as parseArtifactDigest, validateReleaseContext } from '.
 import { validateReleaseEnvironment } from '../scripts/check-release-environment.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const read = path => readFileSync(join(root, path), 'utf8');
+// Committed bytes are LF; a Windows checkout may convert them to CRLF.
+const read = path => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n');
 const source = read('.github/workflows/release.yml');
 const testSource = read('.github/workflows/test.yml');
 const pkg = JSON.parse(read('package.json'));

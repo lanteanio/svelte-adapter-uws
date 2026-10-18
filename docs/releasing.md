@@ -43,8 +43,8 @@ or lane must update its pin in the same reviewed change.
 2. Confirm the npm version and annotated tag do not already exist locally or
    remotely. Record existing `latest`, `next` and `candidate` pointers.
 3. With Node 22.23.2 and npm 11.5.1, run in the clean source checkout. In
-   PowerShell call `npm.cmd`, so that the `--` separator reaches npm; a shell
-   uses `npm`:
+   PowerShell call `npm.cmd`: some PowerShell `npm` shims drop the `--`
+   separator. A shell uses `npm`:
 
    ```powershell
    npm.cmd run --ignore-scripts --silent pack:release -- --destination ../release-artifacts/0.5.11
@@ -84,9 +84,11 @@ retained archive. Write the annotation outside the repository as UTF-8 without
 a byte order mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16
 and `Get-FileHash` returns uppercase hexadecimal, so use the commands below.
 Windows PowerShell continues after a failed native command, so each line checks
-its exit code. After verifying account protection and complete preflight:
+its exit code, and the first line stops on any failed cmdlet. After verifying
+account protection and complete preflight:
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 $tag = 'svelte-adapter-uws@0.5.11'
 $annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
@@ -103,7 +105,7 @@ The same steps in a POSIX shell, with `source` and `tarball` set:
 set -eu
 tag=svelte-adapter-uws@0.5.11
 annotation=$(mktemp)
-sha256=$(sha256sum -- "$tarball")
+sha256=$(sha256sum < "$tarball")
 sha256=${sha256%% *}
 printf 'Release 0.5.11\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
 git push origin main
@@ -115,7 +117,10 @@ node scripts/prepare-release.js --verify-tag "$tag" --artifact "$tarball"
 The local check requires an annotated tag named for the package version at the
 tagged commit, exactly one lowercase digest line equal to the retained tarball,
 a tarball whose package name, version and `gitHead` match the tagged commit,
-and a tagged commit contained in `refs/remotes/origin/main`. If it fails,
+and a tagged commit contained in `refs/remotes/origin/main`. It also runs the
+package and workflow checks that CI applies to the tagged commit. Only CI
+repacks that commit and compares the bytes, which is why step 4 reproduces the
+archive before tagging. If it fails,
 delete the local tag with `git tag -d $tag`, correct the cause and tag again.
 Only after it prints `local tag ... binds ...`, push the tag as a separate
 command:

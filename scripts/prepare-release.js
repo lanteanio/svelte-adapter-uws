@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Fail closed unless the release job is running from the package's exact,
  * annotated version tag and a clean checkout of the commit that tag names.
@@ -94,6 +93,14 @@ function isAncestor(cwd, commit, branch) {
 	return result.status === 0;
 }
 
+// Resolve the exact remote-tracking ref; a bare name would fall back to a
+// local branch spelled the same when the remote ref is missing.
+function sourceCommit(cwd) {
+	const result = spawnSync('git', ['show-ref', '--verify', '--hash', sourceRef], { cwd, encoding: 'utf8', windowsHide: true });
+	if (result.error || result.status !== 0) throw new Error(sourceRef + ' is missing; fetch ' + sourceBranch + ' first');
+	return result.stdout.trim();
+}
+
 export function main({ cwd = root, env = process.env } = {}) {
 	const pkg = JSON.parse(readFileSync(resolve(cwd, 'package.json'), 'utf8'));
 	const requestErrors = validateReleaseRequest(env, pkg);
@@ -108,7 +115,7 @@ export function main({ cwd = root, env = process.env } = {}) {
 		head: git(cwd, ['rev-parse', 'HEAD']),
 		clean: git(cwd, ['status', '--porcelain=v1']).length === 0,
 		sourceBranch,
-		sourceContainsHead: isAncestor(cwd, 'HEAD', sourceRef)
+		sourceContainsHead: isAncestor(cwd, 'HEAD', sourceCommit(cwd))
 	};
 	const errors = validateReleaseContext(env, pkg, details);
 	if (errors.length > 0) throw new Error(errors.join('\n- '));
@@ -117,7 +124,8 @@ export function main({ cwd = root, env = process.env } = {}) {
 }
 
 /**
- * Return one regular file from a gzipped npm tarball, or undefined.
+ * Return the one regular file at `path` in a gzipped npm tarball, or
+ * undefined when it is absent, duplicated or the archive is malformed.
  *
  * @param {Buffer} archive
  * @param {string} path
@@ -125,11 +133,15 @@ export function main({ cwd = root, env = process.env } = {}) {
 export function tarballFile(archive, path) {
 	const data = gunzipSync(archive);
 	let extendedPath;
+	let found;
 	for (let offset = 0; offset + 512 <= data.length;) {
 		const header = data.subarray(offset, offset + 512);
 		if (header.every(byte => byte === 0)) break;
 		const field = (start, length) => header.subarray(start, start + length).toString('utf8').replace(/\0[\s\S]*$/, '');
-		const size = parseInt(field(124, 12).trim() || '0', 8);
+		const sizeField = field(124, 12).trim();
+		if (!/^[0-7]*$/.test(sizeField)) return undefined;
+		const size = parseInt(sizeField || '0', 8);
+		if (offset + 512 + size > data.length) return undefined;
 		const type = field(156, 1);
 		const prefix = field(345, 155);
 		const name = extendedPath ?? (prefix ? prefix + '/' : '') + field(0, 100);
@@ -140,16 +152,21 @@ export function tarballFile(archive, path) {
 			continue;
 		}
 		extendedPath = undefined;
-		if ((type === '0' || type === '') && name === path) return body;
+		if ((type === '0' || type === '') && name === path) {
+			if (found) return undefined;
+			found = body;
+		}
 	}
-	return undefined;
+	return found;
 }
 
 /**
  * Check a local annotated tag before it is pushed. A pushed tag is never
- * retargeted, so anything CI would reject must be caught on the owner's machine.
+ * retargeted, so the tag, package and workflow checks CI applies to the
+ * tagged commit run here too. CI additionally repacks that commit and
+ * compares the bytes with the bound digest.
  */
-export function verifyLocalTag({ cwd = root, tag, artifact }) {
+export async function verifyLocalTag({ cwd = root, tag, artifact }) {
 	if (!tag) throw new Error('a tag name is required');
 	if (!artifact) throw new Error('the retained tarball is required');
 	const archive = readFileSync(artifact);
@@ -172,7 +189,18 @@ export function verifyLocalTag({ cwd = root, tag, artifact }) {
 		if (manifest.name + '@' + manifest.version !== expectedTag) errors.push('tarball package is ' + manifest.name + '@' + manifest.version + ', not ' + expectedTag);
 		if (manifest.gitHead !== commit) errors.push('tarball gitHead ' + (manifest.gitHead ?? '(missing)') + ' is not the tagged commit ' + commit);
 	}
-	if (!isAncestor(cwd, commit, sourceRef)) errors.push('tagged commit is not contained in ' + sourceBranch + '; push main first');
+	if (tag === expectedTag) {
+		const env = {
+			GITHUB_EVENT_NAME: 'push', GITHUB_REF_TYPE: 'tag', GITHUB_REF_NAME: tag, GITHUB_REF: 'refs/tags/' + tag,
+			GITHUB_REPOSITORY: expectedRepository, GITHUB_SHA: git(cwd, ['rev-parse', tag])
+		};
+		errors.push(...validateReleaseRequest(env, pkg));
+	}
+	// Loaded here only: the CI identity job runs this file before installing dependencies.
+	const { validateReleaseWorkflow } = await import('./check-release-workflow.js');
+	const blob = file => git(cwd, ['show', commit + ':' + file], false);
+	errors.push(...validateReleaseWorkflow(blob('.github/workflows/release.yml'), pkg, blob('docs/releasing.md'), blob('.github/workflows/test.yml')));
+	if (!isAncestor(cwd, commit, sourceCommit(cwd))) errors.push('tagged commit is not contained in ' + sourceBranch + '; push main first');
 	if (errors.length > 0) throw new Error(errors.join('\n- '));
 	return { tag, commit, artifactSha256: digest };
 }
@@ -184,7 +212,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 			const result = main();
 			console.log('release identity: ' + result.tag + ' at ' + result.head);
 		} else if (args.length === 4 && args[0] === '--verify-tag' && args[2] === '--artifact') {
-			const result = verifyLocalTag({ tag: args[1], artifact: args[3] });
+			const result = await verifyLocalTag({ tag: args[1], artifact: args[3] });
 			console.log('local tag ' + result.tag + ' binds ' + result.artifactSha256 + ' at ' + result.commit);
 		} else {
 			throw new Error('usage: node scripts/prepare-release.js [--verify-tag <tag> --artifact <tarball>]');

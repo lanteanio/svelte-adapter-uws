@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

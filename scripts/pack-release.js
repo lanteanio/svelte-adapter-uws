@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync, existsSync, realpathSync, lstatSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
