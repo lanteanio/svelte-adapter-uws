@@ -148,9 +148,11 @@ During development, a handler replacement awaits the old module's `shutdown` and
 
 On Vite 5, replacing a handler while an earlier handler load is pending returns 503 for WebSocket upgrades and authentication requests until that load settles. The adapter then discards stale results and reloads the current source automatically, including after later edits or server recreation. If the earlier import never settles, fix its module-scope initialization and restart the dev process; saving again or recreating the server in the same process cannot clear the pending import. Kit 2 with Vite 6 or newer can load the replacement without waiting for the earlier import. Kit 3 follows the SvelteKit SSR runner's module evaluation and reload ordering. Complete module-scope initialization; start background work in `init` and release it in `shutdown`.
 
-Development `init` and `shutdown` hooks each have a 30-second deadline. A timed-out `init` never becomes active; its `shutdown` runs once if the original initialization later settles. A timed-out `shutdown` is logged and releases the wait for replacement or server closure. The adapter cannot cancel work inside a user promise, so hooks should use their own I/O timeouts and keep resources owned by each handler instance.
+Development `init` and `shutdown` hooks each have a 30-second deadline. A timed-out `init` never becomes active; its `shutdown` runs once if initialization later settles. A timed-out `shutdown` is logged and releases the wait for replacement or server closure.
 
-Custom platform properties assigned by a development handler are visible to HTTP routes. Normal `shutdown` can restore or delete its shared properties without overwriting a newer owner. When an instance retires, its remaining owned changes revert to their previous values; deliberate changes from a successful `shutdown` remain. A failed `shutdown` or timed-out hook rolls back its remaining owned changes, and later cleanup writes stay with the retired instance.
+During ordinary development reloads, handlers share the same mutable platform with HTTP routes. Values left by a completed or absent `shutdown` remain shared, including decorations installed once behind a module-level guard. Retained methods continue to read and write shared platform values. Writes made before a hook throws also remain. Release resources and restore or delete their properties explicitly in `shutdown`.
+
+If either hook exceeds its deadline, the adapter replaces the development platform with fresh built-in state. Custom properties, descriptors, prototypes and closures are not copied. The expired invocation and its later cleanup retain the abandoned platform, so their property writes cannot overwrite the replacement. New requests use the current platform; existing requests and connections keep their captured references. State outside the platform, including module-level initialization guards, is unchanged and may require restarting the dev process to initialize custom state again. The adapter cannot cancel promises, external resource operations or previously captured transport methods; use I/O timeouts and keep resources owned by each handler instance.
 
 The configuration and `$lib/...` imports in the examples below use SvelteKit 2 syntax. On Kit 3, pass the same adapter options to `sveltekit({ adapter: adapter(options) })` in the Vite configuration above. Kit 3 no longer creates the `$lib` alias automatically. Merge this mapping into `package.json`:
 
@@ -874,7 +876,7 @@ export async function subscribeBatch(ws, topics, { platform }) {
 }
 ```
 
-If you only export `subscribe`, the framework still loops it per topic for batch-subscribes (no behaviour change). Export `subscribeBatch` only when you need the single-query optimization. The hook is sync in this version; for async lookups, pre-cache user grants on `userData` during `upgrade`.
+If you only export `subscribe`, the framework still loops it per topic for batch-subscribes (no behaviour change). Export `subscribeBatch` only when you need the single-query optimization. Both hooks may return promises; subscription decisions wait for them to settle.
 
 ### Message protocol
 

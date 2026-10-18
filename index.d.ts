@@ -839,8 +839,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	/**
 	 * Called when a client tries to subscribe to a topic.
 	 *
-	 * **Wire-level scope only.** This hook fires when a client sends a
-	 * `{type:'subscribe'}` (or `{type:'subscribe-batch'}`) wire frame.
+	 * This hook gates client subscription frames and calls to
+	 * `platform.subscribe` or `platform.checkSubscribe`.
 	 * Server-side code that calls `ws.subscribe(topic)` directly bypasses
 	 * this hook - the uWS C++ subscribe is not intercepted. Frameworks
 	 * and plugins that subscribe a connection on the user's behalf
@@ -873,7 +873,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * ```
 	 */
 	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) =>
-		| boolean | void | SubscribeDenialReason | string;
+		| boolean | void | SubscribeDenialReason | string
+		| Promise<boolean | void | SubscribeDenialReason | string>;
 
 	/**
 	 * Optional batch variant of `subscribe`. Called once when a client
@@ -882,12 +883,10 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * message). Use this to authorise N topics with one DB query
 	 * instead of N.
 	 *
-	 * **Wire-level scope only.** Same caveat as `subscribe`: server-side
-	 * code that calls `ws.subscribe(topic)` directly does not pass through
-	 * this hook. Frameworks subscribing on the user's behalf must route
-	 * through `platform.subscribe(ws, topic)` - one call per topic, the
-	 * per-topic `subscribe` hook fires for each. This hook is exclusively
-	 * the optimization point for client-initiated bulk authorization.
+	 * This hook takes precedence over `subscribe`, including calls to
+	 * `platform.subscribe` and `platform.checkSubscribe`, which pass a
+	 * single-topic array. Calling `ws.subscribe(topic)` directly bypasses
+	 * authorization hooks.
 	 *
 	 * Receives the set of pre-validated topics (already filtered for
 	 * `INVALID_TOPIC`) and returns a record mapping the topics you
@@ -901,7 +900,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * - Omit a topic, return `true`, or return `undefined` for it -> allow.
 	 *
 	 * Returning `undefined` or `{}` from the hook means "allow
-	 * everything". Sync only in v1.
+	 * everything". The hook may return a promise; subscription decisions
+	 * wait for it to settle.
 	 *
 	 * If you do not export this hook, the per-topic `subscribe` hook
 	 * is called once per topic in the batch (unchanged behaviour).
@@ -924,7 +924,10 @@ export interface WebSocketHandler<UserData = unknown> {
 		ws: WebSocket<UserData>,
 		topics: string[],
 		ctx: SubscribeContext
-	) => Record<string, boolean | SubscribeDenialReason | string> | void;
+	) =>
+		| Record<string, boolean | SubscribeDenialReason | string | undefined>
+		| void
+		| Promise<Record<string, boolean | SubscribeDenialReason | string | undefined> | void>;
 
 	/**
 	 * Called when a client unsubscribes from a topic (ref count reached zero).

@@ -10,6 +10,7 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 	const adapter = { name: 'adapter-uws' };
 	return {
 		httpServer,
+		close: vi.fn(async () => {}),
 		middlewares: { use: vi.fn((route, middleware) => {
 			httpServer.on('request', (req, res) => middleware(req, res, () => { res.statusCode = 404; res.end(); }));
 		}) },
@@ -28,6 +29,11 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 async function hotUpdate(plugin, server) {
 	await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'update', file: server.ssrLoadModule.mock.calls[0][0], server });
 	await server.config.server.hotUpdateEnvironments(server, async () => {});
+}
+
+async function closeLifecycle(plugin, server) {
+	if (server.environments) await plugin.closeBundle.call({ environment: server.environments.ssr });
+	else await server.close();
 }
 
 async function listen(server) {
@@ -194,12 +200,49 @@ describe('development handler lifecycle', () => {
 			expect(handler.subscribe).toHaveBeenCalledTimes(2);
 			expect(socket.subscribe).not.toHaveBeenCalled();
 		} finally {
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 		expect(handler.shutdown).toHaveBeenCalledOnce();
 		expect(handler.unsubscribe).toHaveBeenCalledExactlyOnceWith(socket, 'retiring', { platform: ownerPlatform });
 		expect(socket.unsubscribe).toHaveBeenCalledExactlyOnceWith('retiring');
+	});
+
+	it.each([
+		['subscribe only', { subscribe: vi.fn(() => false) }, 'FORBIDDEN'],
+		['subscribeBatch only', { subscribeBatch: vi.fn((ws, topics) => ({ [topics[0]]: 'UNAUTHENTICATED' })) }, 'UNAUTHENTICATED'],
+		['both, batch wins', { subscribe: vi.fn(() => true), subscribeBatch: vi.fn((ws, topics) => ({ [topics[0]]: false })) }, 'FORBIDDEN'],
+		['batch allows by omission', { subscribe: vi.fn(() => false), subscribeBatch: vi.fn(() => ({})) }, null]
+	])('applies development subscription hook precedence: %s', async (_name, hooks, expected) => {
+		const httpServer = createServer();
+		const data = { [WS_SUBSCRIPTIONS]: new Set() };
+		const socket = { getUserData: () => data, subscribe: vi.fn(), unsubscribe: vi.fn() };
+		let results;
+		const handler = {
+			...hooks,
+			async init({ platform }) {
+				data[WS_PLATFORM] = platform;
+				results = [await platform.checkSubscribe(socket, 'room'), await platform.subscribe(socket, 'room')];
+			}
+		};
+		const server = viteServer(httpServer, 2, async () => handler);
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(results).toEqual([expected, expected]));
+			if (hooks.subscribeBatch) {
+				expect(hooks.subscribeBatch).toHaveBeenCalledTimes(2);
+				expect(hooks.subscribeBatch).toHaveBeenLastCalledWith(socket, ['room'], { platform: data[WS_PLATFORM] });
+				if (hooks.subscribe) expect(hooks.subscribe).not.toHaveBeenCalled();
+			} else {
+				expect(hooks.subscribe).toHaveBeenCalledTimes(2);
+			}
+			expect(socket.subscribe).toHaveBeenCalledTimes(expected === null ? 1 : 0);
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
 	});
 
 	it('discards a stale Kit 2 initial import after a reload', async () => {
@@ -225,7 +268,7 @@ describe('development handler lifecycle', () => {
 			expect(newest.init).toHaveBeenCalledOnce();
 		} finally {
 			pending.resolve(initial);
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, clients);
 		}
 		expect(newest.shutdown).toHaveBeenCalledOnce();
@@ -271,7 +314,7 @@ describe('development handler lifecycle', () => {
 			expect(await (await authenticated).json()).toEqual({ version: 'newest' });
 		} finally {
 			pending.resolve({});
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, clients);
 		}
 	});
@@ -294,7 +337,7 @@ describe('development handler lifecycle', () => {
 			expect(routePlatform.initValue).toBe(42);
 			expect(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'initValue')).toEqual({ value: 42, enumerable: true, configurable: true, writable: false });
 		} finally {
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 	});
@@ -325,7 +368,7 @@ describe('development handler lifecycle', () => {
 		} finally {
 			abandoned?.destroy();
 			initialized.resolve();
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 	});
@@ -383,7 +426,7 @@ describe('development handler lifecycle', () => {
 		} finally {
 			finishSecond.resolve();
 			finishThird.resolve();
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, clients);
 		}
 		for (const handler of handlers) expect(handler.shutdown).toHaveBeenCalledOnce();
@@ -415,7 +458,7 @@ describe('development handler lifecycle', () => {
 			await vi.waitFor(() => expect(next.init).toHaveBeenCalledOnce());
 		} finally {
 			finishedUpdates.resolve();
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 		expect(server.config.server.hotUpdateEnvironments).toBe(coordinate);
@@ -447,7 +490,7 @@ describe('development handler lifecycle', () => {
 			expect(server.ssrLoadModule).toHaveBeenCalledTimes(2);
 		} finally {
 			for (const update of updates) update.resolve();
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 	});
@@ -472,7 +515,7 @@ describe('development handler lifecycle', () => {
 			await vi.waitFor(() => expect(newest.init).toHaveBeenCalledOnce());
 			expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'full-reload' });
 		} finally {
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 		expect(server[channel].send).toBe(send);
@@ -491,18 +534,18 @@ describe('development handler lifecycle', () => {
 			await listen(httpServer);
 			if (stage === 'init') await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
 			const stopped = vi.fn();
-			const closing = plugin.closeBundle().then(stopped);
+			const closing = closeLifecycle(plugin, server).then(stopped);
 			await Promise.resolve();
 			if (stage === 'init') expect(stopped).not.toHaveBeenCalled();
 			pending.resolve(handler);
 			await closing;
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			expect(handler.open).not.toHaveBeenCalled();
 			expect(handler.init).toHaveBeenCalledTimes(stage === 'init' ? 1 : 0);
 			expect(handler.shutdown).toHaveBeenCalledTimes(stage === 'init' ? 1 : 0);
 		} finally {
 			pending.resolve(handler);
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 		}
 	});
@@ -539,7 +582,7 @@ describe('development handler lifecycle', () => {
 			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledTimes(2));
 		} finally {
 			vi.useRealTimers();
-			await plugin.closeBundle();
+			await closeLifecycle(plugin, server);
 			await close(httpServer, clients);
 			errorLog.mockRestore();
 		}

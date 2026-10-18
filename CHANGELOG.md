@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.11] - 2026-10-17
+## [0.5.11] - 2026-10-18
 
 ### Added
 
@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bundle SvelteKit 3 instrumentation environment initialization for the single-process production entrypoint.
 - Initialize each acceptor-mode cluster worker before registering it to receive connections.
 - Await WebSocket handler shutdown and initialization during development reloads, keep pending requests attached to the newest available handler, and discard stale module loads before they can replace it. Vite 5 returns 503 while a superseded load is pending, then reloads the current source after it settles. An import that never settles requires restarting the dev process. Preserve the shared HTTP/WebSocket module graph on Kit 2 and platform properties assigned during initialization.
-- Apply normal development shutdown property restores and deletions to HTTP routes and replacement handlers. Roll back abandoned platform changes without overwriting newer owners, and isolate cleanup that finishes after a lifecycle deadline.
+- Preserve development platform decorations across normal handler replacements, including initialization guarded outside the platform. Apply explicit shutdown restores and deletions to shared state. Reset the development platform after a lifecycle deadline so late property writes stay with the expired instance.
 - Select the SvelteKit 3 development module graph independently of the configured adapter. Provide configuration instructions when handler builds lack esbuild on either Kit version or use unsupported Kit 3 fallback virtual imports.
-- Preserve shutdown-before-init ordering during in-process development server restarts, bound development lifecycle hooks to 30 seconds, and reject upgrades or streamed authentication responses from superseded handlers. Reload Kit 3 handlers when a missing dependency is created, and support handler reloads on Vite 5.0.
+- Preserve shutdown-before-init ordering during in-process development server restarts, including reused plugin instances, bound development lifecycle hooks to 30 seconds, and reject upgrades or streamed authentication responses from superseded handlers. Reload Kit 3 handlers when a missing dependency is created, and support handler reloads on Vite 5.0.
+- Allow promises in the TypeScript declarations for subscription hooks and document asynchronous authorization.
 
 ## [0.5.10] - 2026-10-09
 

@@ -50,6 +50,8 @@ export default function uws(options = {}) {
 
 	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
 	let userHandlers = {};
+	const subscriptionOwners = new WeakMap();
+	const platformOwners = new WeakMap();
 	let sendToAsyncWarnedV = false;
 
 	/**
@@ -314,6 +316,10 @@ export default function uws(options = {}) {
 		});
 	}
 
+	function subscriptionOwner(ws, receiver, fallback) {
+		return subscriptionOwners.get(ws) ?? platformOwners.get(receiver) ?? fallback();
+	}
+
 	function createSubscriptionMethods(getHandlers) {
 		return {
 			async subscribe(ws, topic) {
@@ -328,7 +334,7 @@ export default function uws(options = {}) {
 				if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 				if (subs.has(topic)) return null;
 				if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-				const denial = await runUserSubscribeGateV(ws, topic, getHandlers());
+				const denial = await runUserSubscribeGateV(ws, topic, subscriptionOwner(ws, this, getHandlers));
 				if (denial !== null) return denial;
 				// Post-await re-check: a concurrent subscribe may have raced
 				// through and already added the topic during the gate await.
@@ -343,7 +349,7 @@ export default function uws(options = {}) {
 				// Same precedence as production (subscribeBatch first, falls
 				// back to subscribe). No state mutation, no cap check.
 				if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-				return await runUserSubscribeGateV(ws, topic, getHandlers());
+				return await runUserSubscribeGateV(ws, topic, subscriptionOwner(ws, this, getHandlers));
 			},
 			unsubscribe(ws, topic) {
 				const ud = ws.getUserData();
@@ -351,7 +357,7 @@ export default function uws(options = {}) {
 				if (!(subs instanceof Set) || !subs.has(topic)) return false;
 				ws.unsubscribe(topic);
 				subs.delete(topic);
-				runUnsubscribeHook(getHandlers(), ws, topic, { platform: ud[WS_PLATFORM] });
+				runUnsubscribeHook(subscriptionOwner(ws, this, getHandlers), ws, topic, { platform: ud[WS_PLATFORM] });
 				return true;
 			}
 		};
@@ -365,150 +371,98 @@ export default function uws(options = {}) {
 	// silently-undefined properties become "Cannot read properties of
 	// undefined (reading 'bind')" on the first message. Missing surface in
 	// dev defeats the dev/prod parity contract.
-	const platform = {
-		publish,
-		publishBatched,
-		batch(messages) {
-			const results = [];
-			for (let i = 0; i < messages.length; i++) {
-				const { topic, event, data } = messages[i];
-				results.push(publish(topic, event, data));
-			}
-			return results;
-		},
-		send,
-		sendTo,
-		sendCoalesced(ws, { topic, event, data }) {
-			// dev runs over the `ws` library; there is no real C++ outbound
-			// queue, so no backpressure to coalesce against. Immediate-send
-			// matches the production happy-path observable behavior (entry
-			// flushes on the first attempt with result === 0).
-			send(ws, topic, event, data);
-		},
-		request,
-		get connections() { return connections.size; },
-		get pressure() {
-			// Zero-valued snapshot rather than null so downstream code that
-			// destructures `pressure.active` / `.reason` / `.topPublishers`
-			// does not crash on field access.
-			return {
-				active: false,
-				subscriberRatio: 0,
-				publishRate: 0,
-				memoryMB: 0,
-				reason: 'NONE',
-				topPublishers: []
-			};
-		},
-		onPressure(_cb) { return () => {}; },
-		onPublishRate(_cb) { return () => {}; },
-		...createSubscriptionMethods(() => userHandlers),
-		get assertions() {
-			// Dev never tracks invariant violations; production exposes a
-			// live shared Map of category counts. Return a fresh empty Map
-			// per read so downstream diagnostics that iterate or check size
-			// see the documented "no violations" state.
-			return new Map();
-		},
-		get closedWsAborts() {
-			// Dev uses Node's `ws` library, not uWS - sockets do not
-			// throw "Invalid access" when written to after close, so
-			// the closed-WS abort path doesn't exist here. Mirror the
-			// prod surface as a constant zero.
-			return 0;
-		},
-		subscribers(topic) {
-			let count = 0;
-			for (const [, topics] of subscriptions) {
-				if (topics.has(topic)) count++;
-			}
-			return count;
-		},
-		// Dev mode runs over the `ws` library which does not enforce a
-		// per-frame cap; report the production default (1 MB) so app code
-		// that branches on `platform.maxPayloadLength` sees a consistent
-		// number across dev / prod.
-		get maxPayloadLength() { return 1024 * 1024; },
-		// `ws` library exposes `bufferedAmount` as a property, not a method.
-		// Wrap so the surface matches production exactly.
-		bufferedAmount(ws) {
-			try {
-				const raw = /** @type {any} */ (ws);
-				if (typeof raw.getBufferedAmount === 'function') return raw.getBufferedAmount();
-				return typeof raw.bufferedAmount === 'number' ? raw.bufferedAmount : 0;
-			} catch { return 0; }
-		},
-		topic(name) {
-			return createScopedTopic(publish, name);
-		}
-	};
-
-	function createHandlerPlatform(handlers) {
-		// Each lifecycle owns its properties and descriptors. Active writes are
-		// visible to HTTP routes; retired writes stay with that instance's cleanup.
-		let retired = false;
-		let shuttingDown = false;
-		const writes = new Map();
-		const methods = createSubscriptionMethods(() => handlers);
-		const initial = Object.getOwnPropertyDescriptors(platform);
-		const target = Object.create(Object.getPrototypeOf(platform), {
-			...initial,
-			...Object.getOwnPropertyDescriptors(methods)
-		});
-		function sameDescriptor(left, right) {
-			if (!left || !right) return left === right;
-			return ['value', 'writable', 'get', 'set', 'enumerable', 'configurable'].every(key =>
-				Object.hasOwn(left, key) === Object.hasOwn(right, key) && Object.is(left[key], right[key]));
-		}
-		function mirror(key) {
-			if (retired || Object.hasOwn(methods, key)) return;
-			const current = Reflect.getOwnPropertyDescriptor(platform, key);
-			let write = writes.get(key);
-			// A different owner may update the shared platform while shutdown waits.
-			// Its descriptor must survive both cleanup writes and retirement.
-			if (write ? !sameDescriptor(current, write.last) :
-				shuttingDown && !sameDescriptor(current, Object.hasOwn(initial, key) ? initial[key] : undefined)) return;
-			if (!write) write = { original: current, last: current, shutdown: false };
-			const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
-			const mirrored = descriptor && {
-				// An immutable owner property must not lock the shared HTTP platform.
-				...descriptor, configurable: true,
-				...(!descriptor.configurable && 'value' in descriptor ? { writable: true } : {})
-			};
-			const applied = mirrored ? Reflect.defineProperty(platform, key, mirrored) : Reflect.deleteProperty(platform, key);
-			if (applied) {
-				write.last = Reflect.getOwnPropertyDescriptor(platform, key);
-				write.shutdown ||= shuttingDown;
-				writes.set(key, write);
-			}
-		}
-		const owned = new Proxy(target, {
-			defineProperty(target, key, descriptor) {
-				const result = Reflect.defineProperty(target, key, descriptor);
-				if (result) mirror(key);
-				return result;
-			},
-			deleteProperty(target, key) {
-				const result = Reflect.deleteProperty(target, key);
-				if (result) mirror(key);
-				return result;
-			}
-		});
-		return {
-			platform: owned,
-			beginShutdown() { shuttingDown = true; },
-			retirePlatform(preserveShutdown = false) {
-				if (retired) return;
-				retired = true;
-				for (const [key, write] of writes) {
-					if (preserveShutdown && write.shutdown) continue;
-					if (!sameDescriptor(Reflect.getOwnPropertyDescriptor(platform, key), write.last)) continue;
-					if (write.original) Reflect.defineProperty(platform, key, write.original);
-					else Reflect.deleteProperty(platform, key);
+	function createPlatformEpoch() {
+		const epoch = { handlers: {}, platform: null };
+		epoch.platform = {
+			publish,
+			publishBatched,
+			batch(messages) {
+				const results = [];
+				for (let i = 0; i < messages.length; i++) {
+					const { topic, event, data } = messages[i];
+					results.push(publish(topic, event, data));
 				}
-				writes.clear();
+				return results;
+			},
+			send,
+			sendTo,
+			sendCoalesced(ws, { topic, event, data }) {
+				// dev runs over the `ws` library; there is no real C++ outbound
+				// queue, so no backpressure to coalesce against. Immediate-send
+				// matches the production happy-path observable behavior (entry
+				// flushes on the first attempt with result === 0).
+				send(ws, topic, event, data);
+			},
+			request,
+			get connections() { return connections.size; },
+			get pressure() {
+				// Zero-valued snapshot rather than null so downstream code that
+				// destructures `pressure.active` / `.reason` / `.topPublishers`
+				// does not crash on field access.
+				return {
+					active: false,
+					subscriberRatio: 0,
+					publishRate: 0,
+					memoryMB: 0,
+					reason: 'NONE',
+					topPublishers: []
+				};
+			},
+			onPressure(_cb) { return () => {}; },
+			onPublishRate(_cb) { return () => {}; },
+			...createSubscriptionMethods(() => epoch.handlers),
+			get assertions() {
+				// Dev never tracks invariant violations; production exposes a
+				// live shared Map of category counts. Return a fresh empty Map
+				// per read so downstream diagnostics that iterate or check size
+				// see the documented "no violations" state.
+				return new Map();
+			},
+			get closedWsAborts() {
+				// Dev uses Node's `ws` library, not uWS - sockets do not
+				// throw "Invalid access" when written to after close, so
+				// the closed-WS abort path doesn't exist here. Mirror the
+				// prod surface as a constant zero.
+				return 0;
+			},
+			subscribers(topic) {
+				let count = 0;
+				for (const [, topics] of subscriptions) {
+					if (topics.has(topic)) count++;
+				}
+				return count;
+			},
+			// Dev mode runs over the `ws` library which does not enforce a
+			// per-frame cap; report the production default (1 MB) so app code
+			// that branches on `platform.maxPayloadLength` sees a consistent
+			// number across dev / prod.
+			get maxPayloadLength() { return 1024 * 1024; },
+			// `ws` library exposes `bufferedAmount` as a property, not a method.
+			// Wrap so the surface matches production exactly.
+			bufferedAmount(ws) {
+				try {
+					const raw = /** @type {any} */ (ws);
+					if (typeof raw.getBufferedAmount === 'function') return raw.getBufferedAmount();
+					return typeof raw.bufferedAmount === 'number' ? raw.bufferedAmount : 0;
+				} catch { return 0; }
+			},
+			topic(name) {
+				return createScopedTopic(publish, name);
 			}
 		};
+		return epoch;
+	}
+
+	let platformEpoch = createPlatformEpoch();
+	let platform = platformEpoch.platform;
+
+	function resetPlatform(instance) {
+		if (instance.epoch !== platformEpoch) return false;
+		const previous = platform;
+		platformEpoch = createPlatformEpoch();
+		platform = platformEpoch.platform;
+		if (globalThis.__uws_dev_platform === previous) globalThis.__uws_dev_platform = platform;
+		return true;
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -598,9 +552,12 @@ export default function uws(options = {}) {
 	 * @returns {Promise<string | null>}
 	 */
 	async function runUserSubscribeGateV(wrapped, topic, handlers = userHandlers) {
-		const batchDenials = await runSubscribeBatchHookV(wrapped, [topic], handlers);
-		if (batchDenials !== null) {
-			return batchDenials[topic] ?? null;
+		// Without a batch hook, skip its async frame and topic array.
+		if (handlers.subscribeBatch) {
+			const batchDenials = await runSubscribeBatchHookV(wrapped, [topic], handlers);
+			if (batchDenials !== null) {
+				return batchDenials[topic] ?? null;
+			}
 		}
 		return await runSubscribeHookV(wrapped, topic, handlers);
 	}
@@ -706,8 +663,8 @@ export default function uws(options = {}) {
 		try {
 			await Promise.race([running, new Promise((resolve, reject) => {
 				timer = setTimeout(() => {
-					const error = new Error(`WebSocket ${hook} hook did not finish within 30 seconds.`);
-					instance.retirePlatform();
+					const reset = resetPlatform(instance);
+					const error = new Error(`WebSocket ${hook} hook did not finish within 30 seconds.` + (reset ? ' Dev platform state was reset. Restart the dev process if initialization relies on state outside the platform.' : ''));
 					if (hook === 'init') {
 						console.error('[adapter-uws] ' + error.message + ' Its cleanup will run if initialization finishes later.');
 					}
@@ -722,13 +679,9 @@ export default function uws(options = {}) {
 		if (!instance || instance.stopped) return;
 		instance.stopped = true;
 		const cleanup = async () => {
-			instance.beginShutdown();
-			let completed = false;
-			try {
-				await runLifecycleHook(instance, 'shutdown');
-				completed = true;
-			} catch (error) { console.error('[ws] shutdown hook threw:', error); }
-			finally { instance.retirePlatform(completed); }
+			instance.epoch.handlers = instance.handlers;
+			try { await runLifecycleHook(instance, 'shutdown'); }
+			catch (error) { console.error('[ws] shutdown hook threw:', error); }
 		};
 		if (instance.initializing && !instance.initSettled) {
 			// A timed-out init can still acquire resources when its await ends.
@@ -837,7 +790,8 @@ export default function uws(options = {}) {
 				}
 				await retireHandlers(state);
 				if (!isCurrent(state, generation)) return;
-				const instance = { handlers, stopped: false, ...createHandlerPlatform(handlers) };
+				platformEpoch.handlers = handlers;
+				const instance = { handlers, stopped: false, epoch: platformEpoch, platform };
 				state.active = instance;
 				try { await runLifecycleHook(instance, 'init'); }
 				catch (error) {
@@ -1093,6 +1047,15 @@ export default function uws(options = {}) {
 			};
 			lifecycleState = state;
 			for (const environment of Object.values(server.environments ?? {})) environmentStates.set(environment, state);
+			if (!server.environments) {
+				// Inline plugins can be reused while Vite creates the replacement
+				// server. Closing the old server must retire only its own handler.
+				const close = server.close;
+				server.close = async () => {
+					await stopLifecycle(state);
+					await close.call(server);
+				};
+			}
 			handlerFailed = false;
 			setHandlerReady(Promise.resolve());
 			server.httpServer.once('close', () => { void stopLifecycle(state); });
@@ -1226,6 +1189,7 @@ export default function uws(options = {}) {
 				const clientIp = req.socket?.remoteAddress || '';
 				const authRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
 				const authPlatform = Object.create(state.active?.platform ?? platform);
+				platformOwners.set(authPlatform, authHandlers.handlers);
 				authPlatform.requestId = authRequestId;
 				const event = {
 					request,
@@ -1425,6 +1389,7 @@ export default function uws(options = {}) {
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
 				const wsPlatform = Object.create(state.active?.platform ?? platform);
+				platformOwners.set(wsPlatform, connectionHandlers);
 				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 				userData[WS_PLATFORM] = wsPlatform;
 				delete userData[WS_REQUEST_ID_KEY];
@@ -1438,6 +1403,7 @@ export default function uws(options = {}) {
 					bytesOut: 0
 				};
 				const wrapped = wrapWebSocket(ws, userData);
+				subscriptionOwners.set(wrapped, connectionHandlers);
 				wsWrappers.set(ws, wrapped);
 
 				const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
@@ -1715,7 +1681,7 @@ export default function uws(options = {}) {
 			return [];
 		},
 		closeBundle() {
-			return stopLifecycle(this.environment ? environmentStates.get(this.environment) : lifecycleState);
+			if (this.environment) return stopLifecycle(environmentStates.get(this.environment));
 		}
 	};
 }
