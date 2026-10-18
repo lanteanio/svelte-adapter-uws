@@ -736,9 +736,10 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * Development init has a 30-second deadline. A timed-out instance never
 	 * becomes active; its shutdown runs once if initialization later settles.
 	 * User promises are not canceled, so external I/O needs its own timeout.
-	 * Platform properties init adds or changes are reverted when the instance
-	 * retires, unless shutdown changed them; the next init starts from the
-	 * same platform, and reverted changes it does not repeat are put back.
+	 * Each development handler instance gets its own platform object: after
+	 * an instance retires, the next init receives fresh built-in methods plus
+	 * copies of the custom properties. Key once-only guards on the platform
+	 * object so they run again for each new platform.
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker fires `init`
 	 * independently. Acceptor workers await initialization before registering

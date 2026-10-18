@@ -188,19 +188,18 @@ export function authenticate() { return Response.json(snapshot()); }
 }
 `);
 		let counter = 0;
-		const nonextensible = scenario === 'platform-persistent-nonextensible';
 		const checkHttp = async value => {
 			const response = await fetch(origin + '/lifecycle-proof', { signal: AbortSignal.timeout(5000) });
 			assert.equal(response.status, 200, await response.clone().text());
 			assert.deepEqual(await response.json(), { hits: 1, marker: 'installed once', counter: ++counter, current: value, reflection: { has: true, current: value, keys: true } }, 'Timely init writes and retained functions must share current platform values');
 		};
-		// While a replacement init runs, routes see the platform without the
-		// retired instance's init changes; a key the platform could not take
-		// back stays.
-		const checkReinitializing = async value => {
+		// The guard lives outside the platform, so the wrapper stays on the
+		// platform it decorated. The next platform starts with fresh built-ins
+		// and copies of the custom properties, during and after its init.
+		const checkReplaced = async value => {
 			const response = await fetch(origin + '/lifecycle-proof', { signal: AbortSignal.timeout(5000) });
 			assert.equal(response.status, 200, await response.clone().text());
-			assert.deepEqual(await response.json(), { hits: 0, counter, current: value, reflection: null, ...(nonextensible ? { marker: 'installed once' } : {}) }, 'A replacement init must start from the platform without the retired init changes');
+			assert.deepEqual(await response.json(), { hits: 0, marker: 'installed once', counter, current: value, reflection: null }, 'A replacement platform must have fresh built-ins and the copied custom properties');
 		};
 		const checkWebSocket = async value => {
 			const { ws, body } = await connect();
@@ -222,10 +221,10 @@ export function authenticate() { return Response.json(snapshot()); }
 			await save(hooks, persistentPlatformHandler(value));
 			await until(() => probe.releaseInit, 'Paused replacement initialization');
 			if (['platform-persistent-current', 'platform-persistent-fixed', 'platform-persistent-nonextensible'].includes(scenario)) counter = ['first', 'second', 'third', 'fourth'].indexOf(value) * 100;
-			await checkReinitializing(value);
+			await checkReplaced(value);
 			probe.releaseInit();
 			await until(() => saw('init:end', value), 'Replacement initialization');
-			await checkHttp(value);
+			await checkReplaced(value);
 			await checkWebSocket(value);
 		}
 	}
@@ -325,13 +324,16 @@ export function authenticate() { return Response.json(snapshot()); }
 			await save(hooks, source('second'));
 			await until(() => saw('init:end', 'second'), 'Replacement constrained platform setup');
 		}
+		// Except in the cleanup case, the route runs after a reload: the platform
+		// kept by the first init is retired and stays separate from the current
+		// platform, which received copies of its custom properties.
 		const response = await fetch(origin + '/lifecycle-proof', { signal: AbortSignal.timeout(5000) });
 		assert.equal(response.status, 200, await response.clone().text());
 		assert.deepEqual(await response.json(), scenario === 'platform-constrained-fixed-setter'
 			? { threw: true, value: 1, descriptor: { value: 1, writable: true, enumerable: true, configurable: false } } : setter
-			? { before: 100, value: setterRemoved ? 100 : 200, shared: setterRemoved ? 100 : 200, receiver: !setterRemoved, old: 1, threw: setterRemoved } : readonly
-			? { before: 100, value: 100, shared: 100, descriptor: 100, writable: false, noops: [100, 100] }
-			: { has: false, extraKeys: false, keys: false, own: false });
+			? { before: 1, value: setterAdded ? 1 : 200, shared: 100, receiver: false, old: setterAdded ? 1 : 200, threw: setterAdded } : readonly
+			? { before: 1, value: 1, shared: 100, descriptor: 1, writable: false, noops: [1, 1] }
+			: { has: !cleanup, extraKeys: !cleanup, keys: !cleanup, own: !cleanup }, 'A retired platform must stay separate from the current platform');
 		if (cleanup) {
 			assert.equal(probe.readded, false, 'Deleted keys cannot be re-added to the shared nonextensible platform');
 			await save(hooks, source('second'));
@@ -339,7 +341,7 @@ export function authenticate() { return Response.json(snapshot()); }
 			assert.equal(probe.pool.closed, true, 'Cleanup can retain its resource explicitly after a shared deletion');
 			assert.equal(probe.cleanupDeleted, true, 'Explicit cleanup deletion must preserve the absent shared property');
 		}
-		const expected = scenario === 'platform-constrained-fixed-setter' ? { value: 1 } : setter ? { value: setterRemoved ? 100 : 200 } : readonly ? { value: 100 } : { has: false, extraKeys: false, keys: false, own: false };
+		const expected = scenario === 'platform-constrained-fixed-setter' ? { value: 1 } : setter ? { value: setterAdded ? 1 : 200 } : readonly ? { value: 1 } : { has: !cleanup, extraKeys: !cleanup, keys: !cleanup, own: !cleanup };
 		const { ws, body } = await connect();
 		assert.deepEqual(body, expected);
 		ws.terminate();
@@ -384,7 +386,7 @@ export function authenticate() { return Response.json(snapshot()); }
 			assert.equal(current.http.depth, 1);
 			assert.equal(current.http.hits, 1);
 			assert.equal(probe.inherited[1].pool, undefined);
-			assert.equal(probe.inherited[1].marker, undefined, 'A failed init must not leave the properties its cleanup did not remove');
+			assert.equal(probe.inherited[1].marker, probe.resources[0].owner, 'Custom properties a failed init and its cleanup leave must carry over');
 			assert.equal(current.http.handoff, 'first', 'Successful cleanup writes must survive failed initialization');
 			assert.ok(probe.diagnostics.some(message => message.includes('Platform initialization failed')));
 			return;
@@ -421,7 +423,7 @@ export function authenticate() { return Response.json(snapshot()); }
 				assert.equal(current.http.handoff, previous, 'Successful shutdown writes must survive retirement');
 				const inherited = probe.inherited.find(entry => entry.value === value);
 				assert.equal(inherited.pool, undefined, 'The next init must not inherit a closed pool deleted by shutdown');
-				assert.equal(inherited.marker, undefined, 'The next init must not inherit init changes that shutdown left in place');
+				assert.equal(inherited.marker, probe.resources.at(-2).owner, 'Custom properties that shutdown leaves must carry over');
 				assert.equal(probe.resources.at(-2).closed, true);
 			}
 		} else {
@@ -452,10 +454,10 @@ export function authenticate() { return Response.json(snapshot()); }
 			}
 			await until(() => saw('init:end', 'second'), 'Replacement platform initialization', 38000);
 			const current = await platformState('second');
-			assert.equal(current.http.depth, foreign ? 40 : 1);
-			assert.equal(current.http.hits, foreign ? 0 : 1, 'Retirement reverts init changes that cleanup did not undo');
+			assert.equal(current.http.depth, foreign ? 40 : scenario === 'platform-throw' ? 2 : 1, 'Custom properties a failed cleanup leaves must carry over');
+			assert.equal(current.http.hits, foreign ? 0 : 1, 'Built-in methods must start fresh on the next platform');
 			if (foreign) {
-				assert.equal(current.http.foreignHits, 1);
+				assert.equal(current.http.foreignHits, 0, 'A built-in replaced by other code must not carry over');
 				assert.equal(current.http.poolOwner, undefined, 'Cleanup deletes the actual shared pool');
 				assert.equal(probe.foreignPool.closed, true, 'Ordinary cleanup sees the actual shared resource');
 				assert.equal(probe.resources[0].closed, false, 'Application cleanup must retain a resource explicitly if another writer replaces it');
@@ -466,8 +468,9 @@ export function authenticate() { return Response.json(snapshot()); }
 				assert.deepEqual(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'platformInitOnly'), { value: 'foreign', writable: false, enumerable: false, configurable: false });
 				assert.equal(Object.getOwnPropertyDescriptor(globalThis.__uws_dev_platform, 'platformAccessor').enumerable, false);
 			} else {
-				assert.equal(probe.inherited[1].pool, undefined, 'A failed cleanup is reverted; a deadline starts a fresh platform');
-				assert.equal(probe.inherited[1].marker, undefined);
+				const failedCleanup = scenario === 'platform-throw';
+				assert.equal(probe.inherited[1].pool, failedCleanup ? probe.resources[0] : undefined, 'A failed cleanup leaves custom properties to carry over; a deadline starts a fresh platform');
+				assert.equal(probe.inherited[1].marker, failedCleanup ? probe.resources[0].owner : undefined);
 				if (scenario === 'platform-throw') assert.equal(probe.resources[0].closed, false);
 				assert.ok(probe.diagnostics.some(message => message.includes(scenario === 'platform-timeout' ? 'WebSocket shutdown hook did not finish' : 'Platform cleanup failed')));
 			}
@@ -544,7 +547,7 @@ export function authenticate({ platform }) {
 		newSynthetic: await second.auth.checkSubscribe(synthetic, 'synthetic-new'),
 		httpCurrent: await platform.checkSubscribe(synthetic, 'http-current'),
 		newSocketSubscribed: second.ws.isSubscribed('denied-topic'),
-		shared: first.platform === second.platform && Object.getPrototypeOf(platform) === second.platform
+		separate: first.platform !== second.platform && Object.getPrototypeOf(platform) === second.platform
 	});
 }
 `);
@@ -578,9 +581,11 @@ export function authenticate({ platform }) {
 		assert.equal(probe.records.second.initGate, 'FORBIDDEN');
 		const response = await fetch(origin + '/lifecycle-proof', { signal: AbortSignal.timeout(5000) });
 		assert.equal(response.status, 200, await response.clone().text());
-		assert.deepEqual(await response.json(), { staleReceiverNewSocket: 'FORBIDDEN', staleSubscribeNewSocket: 'FORBIDDEN', detachedNewSocket: 'FORBIDDEN', newReceiverOldSocket: null, oldSynthetic: null, newSynthetic: 'FORBIDDEN', httpCurrent: 'FORBIDDEN', newSocketSubscribed: false, shared: true });
-		for (const name of Object.keys(probe.decorations)) assert.ok(probe.decorations[name] > 0, name + ' decoration must remain visible');
-		assert.equal(probe.records.first.auth.subscribe, probe.records.second.wsPlatform.subscribe);
+		// Sockets stay with the hooks of the instance that accepted them; any other
+		// socket checked through a retired instance's platform is denied.
+		assert.deepEqual(await response.json(), { staleReceiverNewSocket: 'FORBIDDEN', staleSubscribeNewSocket: 'FORBIDDEN', detachedNewSocket: 'FORBIDDEN', newReceiverOldSocket: null, oldSynthetic: 'INTERNAL_ERROR', newSynthetic: 'FORBIDDEN', httpCurrent: 'FORBIDDEN', newSocketSubscribed: false, separate: true });
+		for (const name of Object.keys(probe.decorations)) assert.ok(probe.decorations[name] > 0, name + ' decoration must remain visible on its own platform');
+		assert.notEqual(probe.records.first.auth.subscribe, probe.records.second.wsPlatform.subscribe, 'A decoration the next init does not install must not reach the next platform');
 		second.ws.terminate();
 	}
 
@@ -679,16 +684,17 @@ export function authenticate() { return Response.json(snapshot()); }
 			await save(hooks, source('third'));
 			await until(() => saw('init:end', 'third'), 'Ordinary replacement during old cleanup');
 			await until(() => probe.diagnostics.some(message => message.includes('WebSocket shutdown hook did not finish')), 'Late old cleanup deadline', 38000);
-			assert.equal(probe.records.third.platform, current, 'A retired epoch deadline must not reset the newer epoch');
-			assert.equal(globalThis.__uws_dev_platform, current);
+			assert.notEqual(probe.records.third.platform, current, 'Each handler instance must get its own platform');
+			assert.equal(globalThis.__uws_dev_platform, probe.records.third.platform, 'A retired epoch deadline must not reset the newer epoch');
 			await check('third');
 		}
 		if (otherPlugin) assert.equal(globalThis.__uws_dev_platform, foreignPlatform, 'An older plugin deadline must not replace another plugin platform');
 		probe.releaseShutdown();
 		await until(() => saw('shutdown:end', 'first'), 'Late cleanup completion');
 		assert.equal(probe.records.first.resource.closed, true);
-		assert.equal(current.currentMarker, generation ? 'third' : 'second');
-		assert.equal(current.lateOnly, undefined);
+		const live = generation ? probe.records.third.platform : current;
+		assert.equal(live.currentMarker, generation ? 'third' : 'second');
+		assert.equal(live.lateOnly, undefined);
 		await check(generation ? 'third' : 'second');
 	}
 

@@ -9,34 +9,9 @@ import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnv
 const legacyImports = new Map();
 const lifecycleTimeout = 30000;
 const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish. If it never settles, fix its module-scope initialization and restart the dev process.';
-// Shared-platform subscription checks while no handler instance is live deny
-// instead of reaching retired hooks or allowing every topic.
+// Subscription checks deny while a handler file exists but no handler instance
+// is live, and for everything a retired instance owned.
 const retiredHandlers = Object.freeze({ subscribe: () => 'INTERNAL_ERROR' });
-
-function sameDescriptor(left, right) {
-	if (!left || !right) return left === right;
-	return Object.is(left.value, right.value) && left.get === right.get && left.set === right.set &&
-		left.writable === right.writable && left.enumerable === right.enumerable && left.configurable === right.configurable;
-}
-
-function ownDescriptors(target) {
-	const descriptors = new Map();
-	for (const key of Reflect.ownKeys(target)) descriptors.set(key, Reflect.getOwnPropertyDescriptor(target, key));
-	return descriptors;
-}
-
-function descriptorChanges(before, target) {
-	const after = ownDescriptors(target);
-	const changes = new Map();
-	for (const key of new Set([...before.keys(), ...after.keys()])) {
-		if (!sameDescriptor(before.get(key), after.get(key))) changes.set(key, { before: before.get(key), after: after.get(key) });
-	}
-	return changes;
-}
-
-function applyDescriptor(target, key, descriptor) {
-	return descriptor ? Reflect.defineProperty(target, key, descriptor) : Reflect.deleteProperty(target, key);
-}
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -344,13 +319,16 @@ export default function uws(options = {}) {
 		});
 	}
 
+	// A socket is judged by the hooks of the instance that accepted it. Other
+	// sockets go through the receiver's platform epoch, which denies once its
+	// instance retires.
 	function subscriptionOwner(ws, receiver, fallback) {
 		const owner = subscriptionOwners.get(ws);
 		if (owner) return owner;
 		// Request code often derives its own object from a platform clone.
 		for (let target = receiver; target && typeof target === 'object'; target = Object.getPrototypeOf(target)) {
-			const handlers = platformOwners.get(target);
-			if (handlers) return handlers;
+			const epoch = platformOwners.get(target);
+			if (epoch) return epoch.handlers;
 		}
 		return fallback();
 	}
@@ -407,7 +385,7 @@ export default function uws(options = {}) {
 	// undefined (reading 'bind')" on the first message. Missing surface in
 	// dev defeats the dev/prod parity contract.
 	function createPlatformEpoch() {
-		const epoch = { handlers: {}, platform: null, retired: new Map() };
+		const epoch = { handlers: {}, platform: null };
 		epoch.platform = {
 			publish,
 			publishBatched,
@@ -490,55 +468,34 @@ export default function uws(options = {}) {
 
 	let platformEpoch = createPlatformEpoch();
 	let platform = platformEpoch.platform;
+	const builtinKeys = new Set(Reflect.ownKeys(platform));
+
+	function installEpoch(epoch) {
+		const previous = platform;
+		epoch.handlers = retiredHandlers;
+		platformEpoch = epoch;
+		platform = epoch.platform;
+		if (globalThis.__uws_dev_platform === previous) globalThis.__uws_dev_platform = platform;
+	}
 
 	function resetPlatform(instance) {
 		if (instance.epoch !== platformEpoch) return false;
-		const previous = platform;
-		platformEpoch = createPlatformEpoch();
-		platformEpoch.handlers = retiredHandlers;
-		platform = platformEpoch.platform;
-		if (globalThis.__uws_dev_platform === previous) globalThis.__uws_dev_platform = platform;
+		installEpoch(createPlatformEpoch());
 		return true;
 	}
 
-	// The platform keeps its identity across reloads. What each init changes is
-	// recorded so that retiring the instance reverts it: the next init then
-	// wraps the original methods instead of stacking on the retired wrappers.
-	function recordInitChanges(instance, before) {
+	// Each handler instance gets its own platform object. A retired instance's
+	// platform is replaced with fresh built-ins, so wrappers installed on them
+	// at any time never stack across reloads, while custom properties carry
+	// over as shared state.
+	function replacePlatform(instance) {
 		if (instance.epoch !== platformEpoch) return;
-		instance.writes = descriptorChanges(before, instance.platform);
-		for (const [key, change] of instance.writes) {
-			if (change.after && !change.after.configurable) {
-				console.warn('[adapter-uws] WebSocket init made platform property ' + String(key) + ' non-configurable. A development reload cannot replace it; restart the dev process after changing it.');
-			}
+		const epoch = createPlatformEpoch();
+		const previous = instance.epoch.platform;
+		for (const key of Reflect.ownKeys(previous)) {
+			if (!builtinKeys.has(key)) Reflect.defineProperty(epoch.platform, key, Reflect.getOwnPropertyDescriptor(previous, key));
 		}
-	}
-
-	// A retired change the new init did not make again comes back, so a
-	// decoration installed once behind a guard outside the platform survives.
-	function restoreRetiredChanges(instance) {
-		const { epoch } = instance;
-		if (epoch !== platformEpoch) return;
-		for (const [key, change] of epoch.retired) {
-			if (instance.writes.has(key) || !sameDescriptor(Reflect.getOwnPropertyDescriptor(epoch.platform, key), change.before)) continue;
-			if (applyDescriptor(epoch.platform, key, change.after)) instance.writes.set(key, change);
-		}
-		epoch.retired.clear();
-	}
-
-	function rollBackInitChanges(instance, beforeShutdown) {
-		const { epoch, writes } = instance;
-		instance.writes = null;
-		if (!writes || epoch !== platformEpoch) return;
-		// Shutdown's own restores, deletions and writes are final.
-		const settled = beforeShutdown ? descriptorChanges(beforeShutdown, epoch.platform) : new Map();
-		const extensible = Object.isExtensible(epoch.platform);
-		for (const [key, change] of writes) {
-			if (settled.has(key) || !sameDescriptor(Reflect.getOwnPropertyDescriptor(epoch.platform, key), change.after)) continue;
-			// A deleted key could not be added back to a non-extensible platform.
-			if (!change.before && !extensible) continue;
-			if (applyDescriptor(epoch.platform, key, change.before) && instance.initialized) epoch.retired.set(key, change);
-		}
+		installEpoch(epoch);
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -759,12 +716,11 @@ export default function uws(options = {}) {
 		instance.stopped = true;
 		const cleanup = async () => {
 			instance.epoch.handlers = instance.handlers;
-			const beforeShutdown = instance.writes && instance.epoch === platformEpoch ? ownDescriptors(instance.epoch.platform) : null;
 			try { await runLifecycleHook(instance, 'shutdown'); }
 			catch (error) { console.error('[ws] shutdown hook threw:', error); }
 			finally {
 				if (instance.epoch.handlers === instance.handlers) instance.epoch.handlers = retiredHandlers;
-				rollBackInitChanges(instance, beforeShutdown);
+				replacePlatform(instance);
 			}
 		};
 		if (instance.initializing && !instance.initSettled) {
@@ -820,6 +776,7 @@ export default function uws(options = {}) {
 
 	function reloadHandlers(state, gate = Promise.resolve()) {
 		const generation = advanceGeneration(state);
+		if (lifecycleState === state && !state.active) platformEpoch.handlers = retiredHandlers;
 		const work = (async () => {
 			await gate;
 			await state.listening;
@@ -877,17 +834,12 @@ export default function uws(options = {}) {
 				platformEpoch.handlers = handlers;
 				const instance = { handlers, stopped: false, epoch: platformEpoch, platform };
 				state.active = instance;
-				const initial = ownDescriptors(platform);
 				try { await runLifecycleHook(instance, 'init'); }
 				catch (error) {
-					recordInitChanges(instance, initial);
 					state.active = null;
 					await shutdownInstance(instance);
 					throw error;
 				}
-				recordInitChanges(instance, initial);
-				instance.initialized = true;
-				restoreRetiredChanges(instance);
 				if (!isCurrent(state, generation)) {
 					state.active = null;
 					await shutdownInstance(instance);
@@ -903,8 +855,8 @@ export default function uws(options = {}) {
 				handlerFailed = true;
 				await retireHandlers(state);
 				console.error('[adapter-uws] Failed to load or initialize WebSocket handler:', error);
-				if (error instanceof TypeError && /redefine property|read[- ]only|not extensible/i.test(error.message)) {
-					console.error('[adapter-uws] Each development reload runs init again on the same platform. Keep custom platform properties configurable and writable, and do not freeze or seal the platform. Restart the dev process to clear a locked property.');
+				if (error instanceof TypeError && /redefine property|read[- ]only|cannot delete property/i.test(error.message)) {
+					console.error('[adapter-uws] If this error comes from a locked platform property: custom platform properties carry over to the next development platform with their descriptors, so keep them configurable and writable when init sets them again. Restart the dev process to clear a locked property.');
 				}
 			});
 		});
@@ -1281,7 +1233,7 @@ export default function uws(options = {}) {
 				const clientIp = req.socket?.remoteAddress || '';
 				const authRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
 				const authPlatform = Object.create(state.active?.platform ?? platform);
-				platformOwners.set(authPlatform, authHandlers.handlers);
+				platformOwners.set(authPlatform, authHandlers.instance?.epoch ?? platformEpoch);
 				authPlatform.requestId = authRequestId;
 				const event = {
 					request,
@@ -1473,6 +1425,7 @@ export default function uws(options = {}) {
 
 			wss.on('connection', (ws) => {
 				const connectionHandlers = userHandlers;
+				const connectionOwner = state.active?.epoch ?? platformEpoch;
 				connections.add(ws);
 				subscriptions.set(ws, new Set());
 
@@ -1481,7 +1434,7 @@ export default function uws(options = {}) {
 				// Promote the upgrade-time requestId into a per-connection
 				// platform clone (parity with the production handler).
 				const wsPlatform = Object.create(state.active?.platform ?? platform);
-				platformOwners.set(wsPlatform, connectionHandlers);
+				platformOwners.set(wsPlatform, connectionOwner);
 				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 				userData[WS_PLATFORM] = wsPlatform;
 				delete userData[WS_REQUEST_ID_KEY];
