@@ -127,7 +127,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
-    "test:coverage": "node scripts/coverage.js"
+    "test:coverage": "node scripts/coverage.js",
+    "pack:release": "node scripts/pack-release.js"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -169,7 +170,8 @@
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
     "vitest": "^4.0.18",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "yaml": "2.9.0"
   },
   "optionalDependencies": {
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"

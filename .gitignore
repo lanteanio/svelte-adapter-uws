@@ -13,3 +13,4 @@ test/fixture/build
 test/e2e/.svelte-kit
 test-results
 playwright-report
+/release-artifacts/

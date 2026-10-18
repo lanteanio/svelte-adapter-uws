@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - SvelteKit 3 support on the stable 0.5 line, including projects configured entirely in `vite.config.js`. SvelteKit 2 and Svelte 4 remain supported.
+- Reproducible release archives with source identity checks and trusted npm publication.
 
 ### Fixed
 
