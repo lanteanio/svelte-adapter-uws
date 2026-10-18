@@ -12,8 +12,9 @@ work in the stable source.
 
 Configure an npm trusted publisher for `lanteanio/svelte-adapter-uws`, workflow
 `release.yml`, environment `npm-release`, with permission for `npm publish`.
-Configure that GitHub environment with required reviewers and exactly one custom
-deployment rule: tag `svelte-adapter-uws@*`. Protect creation of that tag pattern.
+Configure that GitHub environment with required reviewers, administrator bypass
+turned off, and exactly one custom deployment rule: tag `svelte-adapter-uws@*`.
+Protect creation of that tag pattern.
 Verify these account settings before creating a tag. The workflow refuses a
 missing, unreadable, unprotected or broadly routable environment through the
 read-only GitHub API. npm rejects an absent or mismatched trusted publisher.
@@ -66,8 +67,8 @@ or lane must update its pin in the same reviewed change.
 
 ## Tag and publish
 
-Only the owner pushes, creates the tag and authorizes publication. Write an
-annotation file outside the repository with exactly one digest field:
+Only the owner pushes, creates the tag and authorizes publication. The
+annotation holds exactly one digest field:
 
 ```text
 Release 0.5.11
@@ -75,19 +76,37 @@ Release 0.5.11
 Artifact-SHA256: <64 lowercase hexadecimal characters>
 ```
 
-Set `$source`, `$tag` and `$annotation` from the retained evidence. After
-verifying account protection and complete preflight:
+Set `$source` and `$tarball` from the retained evidence. Write the annotation
+outside the repository as UTF-8 without a byte order mark; in Windows
+PowerShell 5.1, `Out-File` and `>` write UTF-16 and `Get-FileHash` returns
+uppercase hexadecimal, so use the commands below. After verifying account
+protection and complete preflight:
 
 ```powershell
+$tag = 'svelte-adapter-uws@0.5.11'
+$annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
+$sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
+[IO.File]::WriteAllText($annotation, "Release 0.5.11`n`nArtifact-SHA256: $sha256`n")
 git push origin main
+git fetch origin main
 git tag -a $tag $source -F $annotation
+node scripts/prepare-release.js --verify-tag $tag --artifact $tarball
 git push origin $tag
 ```
+
+The local check requires an annotated tag named for the package version at the
+tagged commit, exactly one lowercase digest line equal to the retained tarball,
+and a tagged commit contained in `origin/main`. If it fails, delete the local
+tag with `git tag -d $tag`, correct the annotation and tag again. Never push a
+tag that has not passed it.
 
 Append `tagged` only after the remote tag is visible. The workflow reproduces
 and retains the frozen archive only if its digest matches the annotation.
 Before approving the protected environment, check the successful complete test
 run, source SHA and retained digest. The publish job only uses those bytes.
+Retry a failed run with "Re-run all jobs": the retained artifact is named for
+the run attempt, so re-running only the publish job cannot find it and fails
+closed.
 
 After publication query the immutable version and the current pointer map:
 

@@ -63,7 +63,7 @@ const PACK_RUN = [
 const DIGEST_RUN = [
 	"$ErrorActionPreference = 'Stop'",
 	"$expected = '${{ needs.identity.outputs.sha256 }}'",
-	"if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the verify job produced no usable digest' }",
+	"if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the identity job produced no usable digest' }",
 	"$filename = '${{ needs.identity.outputs.filename }}'",
 	"if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'refusing an unsafe artifact name' }",
 	"$tarball = 'release-artifacts/' + $filename",
@@ -205,9 +205,9 @@ export function validateReleaseWorkflow(source, pkg, policy, testSource) {
 	if (!same(verify.permissions, { contents: 'read' })) {
 		errors.push('verify job permissions must be exactly contents read - it must never hold a publication identity');
 	}
-	// The digest is an output, not a file beside the tarball: an output is
-	// written by the verify job and read by the publish job through the run
-	// context, so it does not travel inside the artifact it authenticates.
+	// The verify job reports the filename and digest it checked against the
+	// identity job's tag-bound digest. Publication reads only the identity
+	// outputs, which never travel inside the artifact they authenticate.
 	if (!same(verify.outputs, {
 		filename: '${{ steps.pack.outputs.filename }}',
 		sha256: '${{ steps.pack.outputs.sha256 }}'

@@ -3999,7 +3999,7 @@ npm run test:e2e      # 25 e2e tests (playwright, ~13s)
 npm run test:coverage # both + coverage reports (~30s)
 ```
 
-Unit tests cover store patterns, adapter options, plugin logic, client behavior, and the WebSocket test harness. They run in vitest with the `vmForks` pool.
+Unit tests cover store patterns, adapter options, plugin logic, client behavior, and the WebSocket test harness. They run in vitest with the `vmForks` pool. The release packing tests need npm 11.5.1, either as the npm running `npm test` or through `UWS_RELEASE_NPM_CLI` pointing at its `bin/npm-cli.js`; without it they are skipped locally and always run in CI.
 
 E2e tests start a real SvelteKit app (`test/fixture/`) with the adapter installed via `file:../..`. Playwright runs two projects:
 

@@ -1,7 +1,7 @@
 name: release
 
 # Tests and packing cannot mint publication identity. The publish job only
-# receives the digest-bound artifact and has no dependency installation.
+# receives the digest-bound artifact and installs nothing but the pinned npm CLI.
 
 on:
   push:
@@ -138,17 +138,14 @@ jobs:
           name: npm-candidate-${{ github.run_attempt }}
           path: release-artifacts
 
-      # download-artifact checks the artifact digest itself, but a mismatch is
-      # only a warning in the run log - the job keeps going and publishes. The
-      # two-job split moved the publication identity away from the test suite;
-      # without this, the artifact handed between the jobs reopens the same hole
-      # from the other side. Nothing but a byte comparison closes it.
+      # download-artifact only warns when the artifact digest differs, so compare
+      # the downloaded bytes with the digest the identity job read from the tag.
       - name: Refuse to publish anything but the verified bytes
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $expected = '${{ needs.identity.outputs.sha256 }}'
-          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the verify job produced no usable digest' }
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the identity job produced no usable digest' }
           $filename = '${{ needs.identity.outputs.filename }}'
           if ($filename -notmatch '^[a-z0-9._-]+\.tgz$') { throw 'refusing an unsafe artifact name' }
           $tarball = 'release-artifacts/' + $filename

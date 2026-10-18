@@ -156,10 +156,10 @@ describe('stable identity and account protection', () => {
 	});
 
 	it('refuses absent reviewers, missing environments and widened deployment policies', () => {
-		const environment = { name: 'npm-release', protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { id: 1 } }] }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
+		const environment = { name: 'npm-release', can_admins_bypass: false, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { id: 1 } }] }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
 		const policies = { total_count: 1, branch_policies: [{ name: 'svelte-adapter-uws@*', type: 'tag' }] };
 		expect(() => validateReleaseEnvironment(environment, policies)).not.toThrow();
-		for (const change of [e => { e.name = 'other'; }, e => { e.protection_rules = []; }, e => { e.protection_rules[0].reviewers = []; }, e => { e.deployment_branch_policy = null; }]) {
+		for (const change of [e => { e.name = 'other'; }, e => { e.protection_rules = []; }, e => { e.protection_rules[0].reviewers = []; }, e => { e.deployment_branch_policy = null; }, e => { e.can_admins_bypass = true; }, e => { delete e.can_admins_bypass; }]) {
 			const value = structuredClone(environment); change(value); expect(() => validateReleaseEnvironment(value, policies)).toThrow();
 		}
 		for (const value of [{ total_count: 0, branch_policies: [] }, { ...policies, total_count: 2 }, { total_count: 1, branch_policies: [{ name: '*', type: 'tag' }] }, { total_count: 1, branch_policies: [{ name: 'svelte-adapter-uws@*', type: 'branch' }] }]) expect(() => validateReleaseEnvironment(environment, value)).toThrow();

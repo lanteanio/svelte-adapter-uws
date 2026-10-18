@@ -2,12 +2,17 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { packRelease, validatePackManifest } from '../scripts/pack-release.js';
 
 const sourcePkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const npmCli = process.env.UWS_RELEASE_NPM_CLI || process.env.npm_execpath;
+function cliVersion(cli) {
+	try { return JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8')).version; } catch { return undefined; }
+}
+// CI always runs these against the pinned npm; local runs without it skip them.
+const packingCli = Boolean(process.env.CI) || (npmCli && cliVersion(npmCli) === '11.5.1');
 function fixture() {
 	const base = mkdtempSync(join(tmpdir(), 'uws-release-pack-'));
 	const source = join(base, 'source'); mkdirSync(source);
@@ -35,7 +40,7 @@ async function archiveContents(tarball) {
 	await Promise.all(reads); return files;
 }
 
-describe('immutable stable release packing', () => {
+describe.skipIf(!packingCli)('immutable stable release packing (needs npm 11.5.1 as npm_execpath or UWS_RELEASE_NPM_CLI)', () => {
 	it('packs real Git bytes reproducibly and preserves explicit gitHead through npm tarball metadata', async () => {
 		const value = fixture();
 		try {

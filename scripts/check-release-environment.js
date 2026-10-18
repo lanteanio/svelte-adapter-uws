@@ -6,6 +6,7 @@ export function validateReleaseEnvironment(environment, policies) {
 	if (environment.name !== 'npm-release' || !Array.isArray(reviewers?.reviewers) || reviewers.reviewers.length === 0) {
 		throw new Error('npm-release must exist and require human review');
 	}
+	if (environment.can_admins_bypass !== false) throw new Error('npm-release must not let administrators bypass required review');
 	if (environment.deployment_branch_policy?.custom_branch_policies !== true ||
 		environment.deployment_branch_policy?.protected_branches !== false || policies.total_count !== 1 ||
 		policies.branch_policies?.length !== 1 || policies.branch_policies[0].name !== 'svelte-adapter-uws@*' ||
