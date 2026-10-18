@@ -9,6 +9,34 @@ import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnv
 const legacyImports = new Map();
 const lifecycleTimeout = 30000;
 const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish. If it never settles, fix its module-scope initialization and restart the dev process.';
+// Shared-platform subscription checks while no handler instance is live deny
+// instead of reaching retired hooks or allowing every topic.
+const retiredHandlers = Object.freeze({ subscribe: () => 'INTERNAL_ERROR' });
+
+function sameDescriptor(left, right) {
+	if (!left || !right) return left === right;
+	return Object.is(left.value, right.value) && left.get === right.get && left.set === right.set &&
+		left.writable === right.writable && left.enumerable === right.enumerable && left.configurable === right.configurable;
+}
+
+function ownDescriptors(target) {
+	const descriptors = new Map();
+	for (const key of Reflect.ownKeys(target)) descriptors.set(key, Reflect.getOwnPropertyDescriptor(target, key));
+	return descriptors;
+}
+
+function descriptorChanges(before, target) {
+	const after = ownDescriptors(target);
+	const changes = new Map();
+	for (const key of new Set([...before.keys(), ...after.keys()])) {
+		if (!sameDescriptor(before.get(key), after.get(key))) changes.set(key, { before: before.get(key), after: after.get(key) });
+	}
+	return changes;
+}
+
+function applyDescriptor(target, key, descriptor) {
+	return descriptor ? Reflect.defineProperty(target, key, descriptor) : Reflect.deleteProperty(target, key);
+}
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -317,7 +345,14 @@ export default function uws(options = {}) {
 	}
 
 	function subscriptionOwner(ws, receiver, fallback) {
-		return subscriptionOwners.get(ws) ?? platformOwners.get(receiver) ?? fallback();
+		const owner = subscriptionOwners.get(ws);
+		if (owner) return owner;
+		// Request code often derives its own object from a platform clone.
+		for (let target = receiver; target && typeof target === 'object'; target = Object.getPrototypeOf(target)) {
+			const handlers = platformOwners.get(target);
+			if (handlers) return handlers;
+		}
+		return fallback();
 	}
 
 	function createSubscriptionMethods(getHandlers) {
@@ -372,7 +407,7 @@ export default function uws(options = {}) {
 	// undefined (reading 'bind')" on the first message. Missing surface in
 	// dev defeats the dev/prod parity contract.
 	function createPlatformEpoch() {
-		const epoch = { handlers: {}, platform: null };
+		const epoch = { handlers: {}, platform: null, retired: new Map() };
 		epoch.platform = {
 			publish,
 			publishBatched,
@@ -460,9 +495,50 @@ export default function uws(options = {}) {
 		if (instance.epoch !== platformEpoch) return false;
 		const previous = platform;
 		platformEpoch = createPlatformEpoch();
+		platformEpoch.handlers = retiredHandlers;
 		platform = platformEpoch.platform;
 		if (globalThis.__uws_dev_platform === previous) globalThis.__uws_dev_platform = platform;
 		return true;
+	}
+
+	// The platform keeps its identity across reloads. What each init changes is
+	// recorded so that retiring the instance reverts it: the next init then
+	// wraps the original methods instead of stacking on the retired wrappers.
+	function recordInitChanges(instance, before) {
+		if (instance.epoch !== platformEpoch) return;
+		instance.writes = descriptorChanges(before, instance.platform);
+		for (const [key, change] of instance.writes) {
+			if (change.after && !change.after.configurable) {
+				console.warn('[adapter-uws] WebSocket init made platform property ' + String(key) + ' non-configurable. A development reload cannot replace it; restart the dev process after changing it.');
+			}
+		}
+	}
+
+	// A retired change the new init did not make again comes back, so a
+	// decoration installed once behind a guard outside the platform survives.
+	function restoreRetiredChanges(instance) {
+		const { epoch } = instance;
+		if (epoch !== platformEpoch) return;
+		for (const [key, change] of epoch.retired) {
+			if (instance.writes.has(key) || !sameDescriptor(Reflect.getOwnPropertyDescriptor(epoch.platform, key), change.before)) continue;
+			if (applyDescriptor(epoch.platform, key, change.after)) instance.writes.set(key, change);
+		}
+		epoch.retired.clear();
+	}
+
+	function rollBackInitChanges(instance, beforeShutdown) {
+		const { epoch, writes } = instance;
+		instance.writes = null;
+		if (!writes || epoch !== platformEpoch) return;
+		// Shutdown's own restores, deletions and writes are final.
+		const settled = beforeShutdown ? descriptorChanges(beforeShutdown, epoch.platform) : new Map();
+		const extensible = Object.isExtensible(epoch.platform);
+		for (const [key, change] of writes) {
+			if (settled.has(key) || !sameDescriptor(Reflect.getOwnPropertyDescriptor(epoch.platform, key), change.after)) continue;
+			// A deleted key could not be added back to a non-extensible platform.
+			if (!change.before && !extensible) continue;
+			if (applyDescriptor(epoch.platform, key, change.before) && instance.initialized) epoch.retired.set(key, change);
+		}
 	}
 
 	// Expose platform globally so hooks/load functions can access it in dev
@@ -552,12 +628,15 @@ export default function uws(options = {}) {
 	 * @returns {Promise<string | null>}
 	 */
 	async function runUserSubscribeGateV(wrapped, topic, handlers = userHandlers) {
-		// Without a batch hook, skip its async frame and topic array.
 		if (handlers.subscribeBatch) {
 			const batchDenials = await runSubscribeBatchHookV(wrapped, [topic], handlers);
 			if (batchDenials !== null) {
 				return batchDenials[topic] ?? null;
 			}
+		} else {
+			// Skip the batch probe's async frame and topic array, but keep its
+			// await so the subscribe hook runs on the same tick as in production.
+			await undefined;
 		}
 		return await runSubscribeHookV(wrapped, topic, handlers);
 	}
@@ -680,8 +759,13 @@ export default function uws(options = {}) {
 		instance.stopped = true;
 		const cleanup = async () => {
 			instance.epoch.handlers = instance.handlers;
+			const beforeShutdown = instance.writes && instance.epoch === platformEpoch ? ownDescriptors(instance.epoch.platform) : null;
 			try { await runLifecycleHook(instance, 'shutdown'); }
 			catch (error) { console.error('[ws] shutdown hook threw:', error); }
+			finally {
+				if (instance.epoch.handlers === instance.handlers) instance.epoch.handlers = retiredHandlers;
+				rollBackInitChanges(instance, beforeShutdown);
+			}
 		};
 		if (instance.initializing && !instance.initSettled) {
 			// A timed-out init can still acquire resources when its await ends.
@@ -793,12 +877,17 @@ export default function uws(options = {}) {
 				platformEpoch.handlers = handlers;
 				const instance = { handlers, stopped: false, epoch: platformEpoch, platform };
 				state.active = instance;
+				const initial = ownDescriptors(platform);
 				try { await runLifecycleHook(instance, 'init'); }
 				catch (error) {
+					recordInitChanges(instance, initial);
 					state.active = null;
 					await shutdownInstance(instance);
 					throw error;
 				}
+				recordInitChanges(instance, initial);
+				instance.initialized = true;
+				restoreRetiredChanges(instance);
 				if (!isCurrent(state, generation)) {
 					state.active = null;
 					await shutdownInstance(instance);
@@ -814,6 +903,9 @@ export default function uws(options = {}) {
 				handlerFailed = true;
 				await retireHandlers(state);
 				console.error('[adapter-uws] Failed to load or initialize WebSocket handler:', error);
+				if (error instanceof TypeError && /redefine property|read[- ]only|not extensible/i.test(error.message)) {
+					console.error('[adapter-uws] Each development reload runs init again on the same platform. Keep custom platform properties configurable and writable, and do not freeze or seal the platform. Restart the dev process to clear a locked property.');
+				}
 			});
 		});
 		state.ready = work;
@@ -1052,8 +1144,8 @@ export default function uws(options = {}) {
 				// server. Closing the old server must retire only its own handler.
 				const close = server.close;
 				server.close = async () => {
-					await stopLifecycle(state);
-					await close.call(server);
+					try { await stopLifecycle(state); }
+					finally { await close.call(server); }
 				};
 			}
 			handlerFailed = false;

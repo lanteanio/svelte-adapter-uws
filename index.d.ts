@@ -736,6 +736,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * Development init has a 30-second deadline. A timed-out instance never
 	 * becomes active; its shutdown runs once if initialization later settles.
 	 * User promises are not canceled, so external I/O needs its own timeout.
+	 * Platform properties init adds or changes are reverted when the instance
+	 * retires, unless shutdown changed them; the next init starts from the
+	 * same platform, and reverted changes it does not repeat are put back.
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker fires `init`
 	 * independently. Acceptor workers await initialization before registering
@@ -840,7 +843,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * Called when a client tries to subscribe to a topic.
 	 *
 	 * This hook gates client subscription frames and calls to
-	 * `platform.subscribe` or `platform.checkSubscribe`.
+	 * `platform.subscribe` or `platform.checkSubscribe`. When `subscribeBatch`
+	 * is exported it decides single subscriptions too, and this hook is not
+	 * called.
 	 * Server-side code that calls `ws.subscribe(topic)` directly bypasses
 	 * this hook - the uWS C++ subscribe is not intercepted. Frameworks
 	 * and plugins that subscribe a connection on the user's behalf

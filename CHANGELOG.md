@@ -21,10 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bundle SvelteKit 3 instrumentation environment initialization for the single-process production entrypoint.
 - Initialize each acceptor-mode cluster worker before registering it to receive connections.
 - Await WebSocket handler shutdown and initialization during development reloads, keep pending requests attached to the newest available handler, and discard stale module loads before they can replace it. Vite 5 returns 503 while a superseded load is pending, then reloads the current source after it settles. An import that never settles requires restarting the dev process. Preserve the shared HTTP/WebSocket module graph on Kit 2 and platform properties assigned during initialization.
-- Preserve development platform decorations across normal handler replacements, including initialization guarded outside the platform. Apply explicit shutdown restores and deletions to shared state. Reset the development platform after a lifecycle deadline so late property writes stay with the expired instance.
+- Revert the platform changes a development `init` made when its handler instance retires, so wrappers installed on every `init` do not stack across reloads, and put back those the next `init` does not repeat, so decorations installed once behind a guard survive. Apply explicit shutdown restores and deletions to shared state. Reset the development platform after a lifecycle deadline so late property writes stay with the expired instance.
 - Select the SvelteKit 3 development module graph independently of the configured adapter. Provide configuration instructions when handler builds lack esbuild on either Kit version or use unsupported Kit 3 fallback virtual imports.
 - Preserve shutdown-before-init ordering during in-process development server restarts, including reused plugin instances, bound development lifecycle hooks to 30 seconds, and reject upgrades or streamed authentication responses from superseded handlers. Reload Kit 3 handlers when a missing dependency is created, and support handler reloads on Vite 5.0.
 - Allow promises in the TypeScript declarations for subscription hooks and document asynchronous authorization.
+- Deny development `platform.subscribe` and `platform.checkSubscribe` calls for sockets no handler owns while no handler instance is live, and explain platform properties locked by an earlier `init`.
 
 ## [0.5.10] - 2026-10-09
 

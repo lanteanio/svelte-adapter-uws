@@ -245,6 +245,180 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
+	it('runs the development subscribe hook on the same tick as production', async () => {
+		const httpServer = createServer();
+		const data = { [WS_SUBSCRIPTIONS]: new Set() };
+		const socket = { getUserData: () => data, subscribe: vi.fn(), unsubscribe: vi.fn() };
+		let results;
+		const handler = {
+			subscribe: ws => ws.getUserData().joined === true,
+			async init({ platform }) {
+				data[WS_PLATFORM] = platform;
+				const checked = platform.checkSubscribe(socket, 'room');
+				const subscribed = platform.subscribe(socket, 'room');
+				data.joined = true;
+				results = [await checked, await subscribed];
+			}
+		};
+		const server = viteServer(httpServer, 2, async () => handler);
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(results).toEqual([null, null]));
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('denies shared-platform subscription checks after a failed development init', async () => {
+		const httpServer = createServer();
+		const handler = { subscribe: vi.fn(() => true), shutdown: vi.fn(), init: () => { throw new Error('init failed'); } };
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const server = viteServer(httpServer, 2, async () => handler);
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(error).toHaveBeenCalledWith('[adapter-uws] Failed to load or initialize WebSocket handler:', expect.any(Error)));
+			expect(handler.shutdown).toHaveBeenCalledOnce();
+			const synthetic = { getUserData: () => ({}) };
+			expect(await globalThis.__uws_dev_platform.checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			expect(handler.subscribe).not.toHaveBeenCalled();
+		} finally {
+			error.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it.each(['unguarded', 'external guard', 'restored in shutdown'])('keeps one development publish wrapper across reloads: %s', async (mode) => {
+		const guard = Symbol.for('adapter-uws.test.publish-guard');
+		delete globalThis[guard];
+		let hits = 0;
+		const version = () => {
+			let previous;
+			return {
+				init: vi.fn(({ platform }) => {
+					if (mode === 'external guard') {
+						if (globalThis[guard]) return;
+						globalThis[guard] = true;
+					}
+					previous = platform.publish;
+					platform.publish = (...args) => { hits++; return previous(...args); };
+				}),
+				shutdown: mode === 'restored in shutdown' ? ({ platform }) => { platform.publish = previous; } : undefined
+			};
+		};
+		const versions = [version(), version(), version(), version()];
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => versions[0]);
+		const plugin = uws({ handler: './handler.js' });
+		const shared = globalThis.__uws_dev_platform;
+		const publishHits = () => { hits = 0; shared.publish('wrapped', 'event', 1); return hits; };
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(publishHits()).toBe(1));
+			for (const next of versions.slice(1)) {
+				server.ssrLoadModule.mockResolvedValue(next);
+				await hotUpdate(plugin, server);
+				await vi.waitFor(() => expect(next.init).toHaveBeenCalledOnce());
+				await vi.waitFor(() => expect(publishHits()).toBe(1));
+			}
+		} finally {
+			delete globalThis[guard];
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('reverts a failed development init and restores the last retired decorations', async () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const first = { init: ({ platform }) => { platform.decorated = 'first'; } };
+		const failed = { init: ({ platform }) => { platform.partial = true; throw new Error('second failed'); } };
+		const third = { init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		const plugin = uws({ handler: './handler.js' });
+		const shared = globalThis.__uws_dev_platform;
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(shared.decorated).toBe('first'));
+			server.ssrLoadModule.mockResolvedValue(failed);
+			await hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(error).toHaveBeenCalledWith('[adapter-uws] Failed to load or initialize WebSocket handler:', expect.any(Error)));
+			expect(Object.hasOwn(shared, 'partial')).toBe(false);
+			expect(Object.hasOwn(shared, 'decorated')).toBe(false);
+			server.ssrLoadModule.mockResolvedValue(third);
+			await hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(shared.decorated).toBe('first'));
+			expect(third.init).toHaveBeenCalledOnce();
+			expect(Object.hasOwn(shared, 'partial')).toBe(false);
+		} finally {
+			error.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('keeps development shutdown deletions and writes final', async () => {
+		let seen;
+		const pool = { closed: false };
+		const first = {
+			init: ({ platform }) => { platform.pool = pool; },
+			shutdown: ({ platform }) => { platform.pool.closed = true; delete platform.pool; platform.handoff = 'first'; }
+		};
+		const second = { init: vi.fn(({ platform }) => { seen = { pool: platform.pool, handoff: platform.handoff }; }) };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		const plugin = uws({ handler: './handler.js' });
+		const shared = globalThis.__uws_dev_platform;
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(shared.pool).toBe(pool));
+			server.ssrLoadModule.mockResolvedValue(second);
+			await hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(second.init).toHaveBeenCalledOnce());
+			expect(seen).toEqual({ pool: undefined, handoff: 'first' });
+			await vi.waitFor(() => expect(shared.handoff).toBe('first'));
+			expect(Object.hasOwn(shared, 'pool')).toBe(false);
+			expect(pool.closed).toBe(true);
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('explains a platform property locked by an earlier development init', async () => {
+		const httpServer = createServer();
+		const define = ({ platform }) => { Object.defineProperty(platform, 'locked', { value: {} }); };
+		const first = { init: vi.fn(define) };
+		const second = { init: vi.fn(define) };
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const server = viteServer(httpServer, 2, async () => first);
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(first.init).toHaveBeenCalledOnce());
+			await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('platform property locked non-configurable')));
+			server.ssrLoadModule.mockResolvedValue(second);
+			await hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(error).toHaveBeenCalledWith(expect.stringContaining('runs init again on the same platform')));
+			expect(second.init).toHaveBeenCalledOnce();
+		} finally {
+			error.mockRestore();
+			warn.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
 	it('discards a stale Kit 2 initial import after a reload', async () => {
 		const pending = deferred();
 		const initial = { init: vi.fn(), shutdown: vi.fn() };
