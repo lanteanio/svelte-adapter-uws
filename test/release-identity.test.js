@@ -174,6 +174,7 @@ describe('release identity against real tags', () => {
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '77777777777\0' }])).toBeUndefined();
 		// parseInt would read a signed size; tar size fields are octal digits only.
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '+' + manifest.length.toString(8) + '\0' }])).toBeUndefined();
+		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '99999999999\0' }])).toBeUndefined();
 	});
 
 	it('refuses a tagged package or workflow that CI would refuse', async () => {
@@ -188,21 +189,25 @@ describe('release identity against real tags', () => {
 		await expect(drifted.verify()).rejects.toThrow(/without cancelling/);
 	});
 
-	it('checks the workflow of the tagged commit, not the working tree', async () => {
-		const workflow = rootFile('.github/workflows/release.yml');
-		const drift = workflow.replace('cancel-in-progress: false', 'cancel-in-progress: true');
+	it.each([
+		['.github/workflows/release.yml', text => text.replace('cancel-in-progress: false', 'cancel-in-progress: true'), /without cancelling/],
+		['.github/workflows/test.yml', text => text + '\n# drift\n', /complete test workflow differs/],
+		['docs/releasing.md', text => text.replaceAll('no token fallback', ''), /release policy is missing/],
+		['package.json', text => JSON.stringify({ ...JSON.parse(text), private: true }, null, 2) + '\n', /private package/]
+	])('checks %s of the tagged commit, not the working tree or HEAD', async (file, drift, refusal) => {
 		const edited = repository();
 		edited.annotate(annotation(edited.digest));
-		writeFileSync(join(edited.source, '.github/workflows/release.yml'), drift);
+		const original = readFileSync(join(edited.source, file), 'utf8');
+		writeFileSync(join(edited.source, file), drift(original));
 		expect((await edited.verify()).artifactSha256).toBe(edited.digest);
 		const restored = repository();
-		writeFileSync(join(restored.source, '.github/workflows/release.yml'), drift);
+		writeFileSync(join(restored.source, file), drift(original));
 		restored.run('commit', '-qam', 'Drift');
 		restored.annotate(annotation(restored.pack()));
-		writeFileSync(join(restored.source, '.github/workflows/release.yml'), workflow);
+		writeFileSync(join(restored.source, file), original);
 		restored.run('commit', '-qam', 'Restore');
 		restored.run('update-ref', 'refs/remotes/origin/main', 'HEAD');
-		await expect(restored.verify()).rejects.toThrow(/without cancelling/);
+		await expect(restored.verify()).rejects.toThrow(refusal);
 	});
 
 	it('runs the CI identity check with Node builtins only', () => {
@@ -314,11 +319,12 @@ function releaseClone() {
 	return { base, work, git, source, artifact, sha256, remote };
 }
 
-function runBlock(language, clone, { artifact = clone.artifact, prelude = '' } = {}) {
+function runBlock(language, clone, { artifact = clone.artifact, prelude = '', temp = clone.base } = {}) {
 	// The annotation file goes to the clone, not the shared temporary directory.
-	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', TEMP: clone.base, TMP: clone.base, TMPDIR: clone.base };
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', TEMP: temp, TMP: temp, TMPDIR: temp };
 	const options = { cwd: clone.work, encoding: 'utf8', windowsHide: true, env };
 	if (language === 'powershell') {
+		expect(powershell, 'PowerShell is required for the documented tag block tests').toBeTruthy();
 		const script = `${prelude}$source = '${clone.source}'\n$tarball = '${artifact}'\n` + docBlock('powershell');
 		return spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], options);
 	}
@@ -332,14 +338,16 @@ describe('documented release tag commands', () => {
 	it('documents the version this commit releases', () => {
 		expect(docBlock('powershell')).toContain("'" + tag + "'");
 		expect(docBlock('sh')).toContain('tag=' + tag + '\n');
-		// One script block stops at the first error even when pasted line by line.
+		// One script block stops at the first error even when pasted line by line;
+		// the POSIX subshell keeps set -e and exit from closing an interactive shell.
 		expect(docBlock('powershell')).toMatch(/^\. \{\ntrap \{ break \}\n[\s\S]*\n\}\n$/);
+		expect(docBlock('sh')).toMatch(/^\(\nset -eu\n[\s\S]*\n\)\n$/);
 	});
 
 	for (const language of ['powershell', 'sh']) {
-		const available = language === 'powershell' ? !!powershell : posixShell;
-		// PowerShell runs on every CI lane; a POSIX shell is required off Windows.
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`tags only after the checks pass in ${language}`, () => {
+		// PowerShell is required everywhere; only a Windows host may lack a POSIX shell.
+		const skip = language === 'sh' && !posixShell && process.platform === 'win32';
+		it.skipIf(skip)(`tags only after the checks pass in ${language}`, () => {
 			const clone = releaseClone();
 			const result = runBlock(language, clone);
 			expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -348,9 +356,11 @@ describe('documented release tag commands', () => {
 			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
 			const body = clone.git(clone.work, 'cat-file', 'tag', tag);
 			expect(body.slice(body.indexOf('\n\n') + 2)).toBe('Release ' + sourcePkg.version + '\n\nArtifact-SHA256: ' + clone.sha256);
+			// The annotation is written outside the repository.
+			expect(clone.git(clone.work, 'status', '--porcelain')).toBe('');
 		}, 60_000);
 
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`refuses to run outside the clean checkout at the source commit in ${language}`, () => {
+		it.skipIf(skip)(`refuses to run outside the clean checkout at the source commit in ${language}`, () => {
 			const moved = releaseClone();
 			moved.git(moved.work, 'commit', '-q', '--allow-empty', '-m', 'Later work');
 			const elsewhere = runBlock(language, moved);
@@ -367,7 +377,7 @@ describe('documented release tag commands', () => {
 			}
 		}, 60_000);
 
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before pushing when the tarball cannot be hashed in ${language}`, () => {
+		it.skipIf(skip)(`stops before pushing when the tarball cannot be hashed in ${language}`, () => {
 			// A digest left over from an earlier run in the same session must not be reused.
 			const stale = language === 'powershell' ? `$sha256 = '${'a'.repeat(64)}'\n` : `sha256=${'a'.repeat(64)}\n`;
 			for (const artifact of [clone => join(clone.base, 'missing.tgz'), () => '', clone => clone.base]) {
@@ -380,7 +390,7 @@ describe('documented release tag commands', () => {
 			}
 		}, 90_000);
 
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`refuses a tag left by an earlier run in ${language}`, () => {
+		it.skipIf(skip)(`refuses a tag left by an earlier run in ${language}`, () => {
 			const clone = releaseClone();
 			clone.git(clone.work, 'tag', '-a', tag, clone.source, '-m', 'Unchecked');
 			const result = runBlock(language, clone);
@@ -389,7 +399,7 @@ describe('documented release tag commands', () => {
 			expect(clone.remote()).toEqual({ heads: '', tags: '' });
 		}, 60_000);
 
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`pushes exactly the source commit and no tags in ${language}`, () => {
+		it.skipIf(skip)(`pushes exactly the source commit and no tags in ${language}`, () => {
 			const clone = releaseClone();
 			clone.git(clone.work, 'config', 'push.followTags', 'true');
 			clone.git(clone.work, 'tag', '-a', 'unrelated-annotated', clone.source, '-m', 'Not for the remote');
@@ -400,7 +410,7 @@ describe('documented release tag commands', () => {
 			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
 		}, 60_000);
 
-		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before tagging when main cannot be pushed in ${language}`, () => {
+		it.skipIf(skip)(`stops before tagging when main cannot be pushed in ${language}`, () => {
 			const clone = releaseClone();
 			const unrelated = clone.git(clone.work, 'commit-tree', 'HEAD^{tree}', '-m', 'Unrelated main');
 			clone.git(clone.work, 'push', '-q', join(clone.base, 'origin.git'), unrelated + ':refs/heads/main');
@@ -408,6 +418,29 @@ describe('documented release tag commands', () => {
 			expect(result.status).not.toBe(0);
 			expect(clone.remote()).toEqual({ heads: unrelated + '\trefs/heads/main', tags: '' });
 			expect(hasLocalTag(clone)).toBe(false);
+		}, 60_000);
+
+		it.skipIf(skip)(`stops before pushing when the annotation cannot be written in ${language}`, () => {
+			const clone = releaseClone();
+			// Windows PowerShell recreates a missing temporary directory, so occupy the annotation path.
+			const temp = join(clone.base, language === 'powershell' ? 'temp' : 'missing-temp');
+			if (language === 'powershell') mkdirSync(join(temp, 'svelte-adapter-uws-' + sourcePkg.version + '.tag.txt'), { recursive: true });
+			const result = runBlock(language, clone, { temp });
+			expect(result.status, result.stdout + result.stderr).not.toBe(0);
+			expect(clone.remote()).toEqual({ heads: '', tags: '' });
+			expect(hasLocalTag(clone)).toBe(false);
+		}, 60_000);
+
+		it.skipIf(skip)(`fails and keeps the tag local when the tag check refuses in ${language}`, () => {
+			const clone = releaseClone();
+			// An archive packed from another commit passes every step before the check.
+			writeFileSync(clone.artifact, tarball([manifestEntry({ name: sourcePkg.name, version: sourcePkg.version, gitHead: 'f'.repeat(40) })]));
+			const result = runBlock(language, clone);
+			expect(result.status).not.toBe(0);
+			expect(result.stderr).toMatch(/gitHead/);
+			if (language === 'powershell') expect(result.stderr).toContain('do not push the tag');
+			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
+			expect(hasLocalTag(clone)).toBe(true);
 		}, 60_000);
 	}
 });

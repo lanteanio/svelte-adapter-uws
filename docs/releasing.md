@@ -88,9 +88,9 @@ Write the annotation outside the repository as UTF-8 without a byte order
 mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16 and
 `Get-FileHash` returns uppercase hexadecimal, so use the commands below.
 Windows PowerShell continues after a failed native command, so each command
-checks its exit code. The block runs as one script block that stops at the
-first error however it is pasted. Some hosts turn native stderr into errors,
-so it does not set `$ErrorActionPreference`. After verifying account
+checks its exit code. The block runs as one script block whose trap stops it
+at the first error, however it is pasted. Some hosts turn native stderr into
+errors, so it does not set `$ErrorActionPreference`. After verifying account
 protection and complete preflight:
 
 ```powershell
@@ -102,9 +102,7 @@ git rev-parse -q --verify "refs/tags/$tag" | Out-Null; if ($LASTEXITCODE -eq 0) 
 if (-not $tarball -or -not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'set $tarball to the retained archive' }
 $annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball -ErrorAction Stop).Hash.ToLowerInvariant()
-if ($sha256 -notmatch '^[0-9a-f]{64}$') { throw 'hashing the retained tarball failed' }
-$text = "Release 0.5.11`n`nArtifact-SHA256: $sha256`n"
-[IO.File]::WriteAllText($annotation, $text); if ([IO.File]::ReadAllText($annotation) -cne $text) { throw 'writing the annotation failed' }
+[IO.File]::WriteAllText($annotation, "Release 0.5.11`n`nArtifact-SHA256: $sha256`n")
 git push --no-follow-tags origin "${source}:refs/heads/main"; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
 git fetch origin main; if ($LASTEXITCODE -ne 0) { throw 'fetching main failed' }
 git tag -a $tag $source -F $annotation; if ($LASTEXITCODE -ne 0) { throw 'tagging failed' }
@@ -112,9 +110,11 @@ node scripts/prepare-release.js --verify-tag $tag --artifact $tarball; if ($LAST
 }
 ```
 
-The same steps in a POSIX shell, with `source` and `tarball` set:
+The same steps in a POSIX shell, with `source` and `tarball` set. The subshell
+keeps a failure from closing an interactive shell:
 
 ```sh
+(
 set -eu
 [ "$(git rev-parse HEAD)" = "$source" ] && [ -z "$(git status --porcelain)" ] || { echo 'run this in the clean main checkout at the source commit' >&2; exit 1; }
 tag=svelte-adapter-uws@0.5.11
@@ -128,6 +128,7 @@ git push --no-follow-tags origin "$source:refs/heads/main"
 git fetch origin main
 git tag -a "$tag" "$source" -F "$annotation"
 node scripts/prepare-release.js --verify-tag "$tag" --artifact "$tarball"
+)
 ```
 
 The local check requires an annotated tag named for the package version at the
@@ -139,7 +140,7 @@ repacks that commit and compares the bytes, which is why step 4 reproduces the
 archive before tagging. If it fails,
 delete the local tag with `git tag -d $tag`, correct the cause and run the
 block again. Only after it prints `local tag ... binds ...`, push the tag as a
-separate command (`git push origin "$tag"` in a POSIX shell):
+separate command (`git push origin svelte-adapter-uws@0.5.11` in a POSIX shell):
 
 ```powershell
 git push origin $tag
