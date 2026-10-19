@@ -267,7 +267,7 @@ That's it. This gives you a pub/sub WebSocket server at `/ws` with no authentica
 
 ### Step 2: Add the Vite plugin (required)
 
-Use the Vite plugin with WebSockets. It does two things:
+The Vite plugin is required for WebSockets in development. It does two things:
 
 1. **Dev mode** - spins up a WebSocket server so `event.platform` works during `npm run dev`
 2. **Production builds** - runs your `hooks.ws` file through SvelteKit's Vite pipeline, including `#lib` imports on Kit 3, `$lib` on Kit 2, and the virtual modules supported by that Kit version
@@ -358,7 +358,7 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 ### `npm run dev` - works (with the Vite plugin)
 
-The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
+The Vite plugin is required for WebSocket support in dev, and production builds use it to bundle your `hooks.ws` file (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
 Changes to your `hooks.ws` file are picked up automatically - the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
 
