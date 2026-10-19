@@ -80,8 +80,7 @@ describe('Vite server module loading', () => {
 		const otherLoader = kitVersion === 3 ? server.ssrLoadModule : server.environments.ssr.runner.import;
 		const handler = discovery === 'explicit' ? './custom-handler.ts' : undefined;
 		const handlerPath = path.resolve(root, handler || 'src/hooks.ws.js');
-		// The Kit 3 runner takes the path as resolved; ssrLoadModule gets Vite's spelling.
-		const loadedPath = kitVersion === 3 ? handlerPath : viteId(handlerPath);
+		const loadedPath = viteId(handlerPath);
 		const plugin = uws({ handler, allowedOrigins: '*' });
 		const init = vi.fn();
 
@@ -787,14 +786,19 @@ describe('development handler lifecycle', () => {
 			const id = file.split(path.sep).join('/');
 			plugin.watchChange(id, { event: 'create' });
 			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
-			// Vite 6+ follows with hotUpdate, which starts the only reload.
-			await new Promise(resolve => setTimeout(resolve, 20));
-			expect(server.ssrLoadModule).not.toHaveBeenCalled();
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			// Vite 6+ then reports the same creation to hotUpdate; it must not load again.
 			await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'create', file: id, server });
 			await server.config.server.hotUpdateEnvironments(server, async () => {});
-			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			await new Promise(resolve => setTimeout(resolve, 20));
 			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
 			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
+			// Later edits, deletions and re-creations of the handler still reload.
+			for (const [type, loads] of [['update', 2], ['delete', 3], ['create', 4]]) {
+				await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type, file: id, server });
+				await server.config.server.hotUpdateEnvironments(server, async () => {});
+				await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledTimes(loads));
+			}
 		} finally {
 			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
@@ -877,7 +881,9 @@ describe('development handler lifecycle', () => {
 		const server = viteServer(httpServer, 2, async () => first);
 		delete server.environments;
 		server.hot = { send: vi.fn() };
-		server.moduleGraph.getModulesByFile = vi.fn(() => new Set([{}]));
+		// The handler's graph node holds the cached module until Vite invalidates it.
+		const node = { ssrModule: {}, ssrTransformResult: {} };
+		server.moduleGraph.getModulesByFile = vi.fn(() => new Set([node]));
 		const plugin = uws({ handler: './handler.js' });
 		const id = path.resolve(server.config.root, 'handler.js').split(path.sep).join('/');
 		const synthetic = { getUserData: () => ({}) };
@@ -889,6 +895,11 @@ describe('development handler lifecycle', () => {
 			expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN');
 			server.ssrLoadModule.mockRejectedValue(missing);
 			plugin.watchChange(id, { event: 'delete' });
+			// A broadcast for another file before the invalidation must not reload.
+			server.hot.send({ type: 'update', updates: [] });
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(server.ssrLoadModule).toHaveBeenCalledOnce();
+			Object.assign(node, { ssrModule: null, ssrTransformResult: null });
 			server.hot.send({ type: 'full-reload' });
 			await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
 			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR'));

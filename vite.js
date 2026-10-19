@@ -936,10 +936,16 @@ export default function uws(options = {}) {
 		const hot = server.hot ?? server.ws;
 		if (!hot) return;
 		const send = hot.send;
+		// A created or deleted handler file reloads only once Vite has invalidated
+		// its graph node: a broadcast for another file can come first, and an
+		// import then would return the cached module.
+		const fileEventSettled = () => state.legacyFileEvent &&
+			[...(server.moduleGraph.getModulesByFile(viteFile(state.path)) ?? [])].every(node => !node.ssrModule && !node.ssrTransformResult);
 		function sendWithReload(...args) {
 			const result = send.apply(this, args);
-			if (!state.closed && state.legacyDirty && (args[0]?.type === 'full-reload' || args[0]?.type === 'update')) {
+			if (!state.closed && (state.legacyDirty || fileEventSettled()) && (args[0]?.type === 'full-reload' || args[0]?.type === 'update')) {
 				state.legacyDirty = false;
+				state.legacyFileEvent = false;
 				void reloadHandlers(state);
 			}
 			return result;
@@ -1135,7 +1141,7 @@ export default function uws(options = {}) {
 			state.load = loadDevModule = async (id) => {
 				if (useEnvironmentRunner) {
 					await (runnerReloadReady ??= connectRunnerReload(server, state));
-					return server.environments.ssr.runner.import(id);
+					return server.environments.ssr.runner.import(viteFile(id));
 				}
 				return server.ssrLoadModule(viteFile(id));
 			};
@@ -1719,17 +1725,16 @@ export default function uws(options = {}) {
 				if (!discovered || path.resolve(id) !== path.resolve(discovered)) return;
 				state.path = resolvedHandlerPath = discovered;
 				if (!state.active) platformEpoch.handlers = retiredHandlers;
-				// Vite 6+ reports the creation to hotUpdate next, which reloads
-				// after the SSR graph update. Without HMR nothing follows.
-				if (!state.vite5 && viteServer.config.server?.hmr !== false) return;
+				// Vite 6+ reports this creation to hotUpdate next; this reload covers it.
+				state.createdHandler = !state.vite5;
 				void reloadHandlers(state);
 				return;
 			}
 			if (!state.vite5 || path.resolve(id) !== path.resolve(state.path)) return;
 			// Vite 5 invalidates the file's graph node after this hook and then
-			// broadcasts; reload on that broadcast. Without a node it sends
-			// nothing, and there is no stale module to import.
-			if (viteServer.moduleGraph?.getModulesByFile(viteFile(state.path))?.size) state.legacyDirty = true;
+			// broadcasts; reload on that broadcast. With no node there is no
+			// cached module to go stale, so reload now.
+			if (viteServer.moduleGraph?.getModulesByFile(viteFile(state.path))?.size) state.legacyFileEvent = true;
 			else void reloadHandlers(state);
 		},
 		handleHotUpdate({ file }) {
@@ -1743,7 +1748,10 @@ export default function uws(options = {}) {
 			if (!useEnvironmentRunner) {
 				if (this.environment.name === 'client') {
 					state.legacyUpdates++;
-					if (state.path) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
+					// The creation watchChange just discovered is already reloading.
+					const created = state.createdHandler && type === 'create' && path.resolve(file) === path.resolve(state.path);
+					state.createdHandler = false;
+					if (state.path && !created) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
 				}
 				return;
 			}
