@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { main, tarballFile, verifyLocalTag } from '../scripts/prepare-release.js';
 
 const rootFile = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
@@ -22,6 +22,12 @@ const links = [];
 for (const key of Object.keys(process.env)) {
 	if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_NOSYSTEM)$/.test(key)) delete process.env[key];
 }
+// Nor do the user's or the machine's git settings (signing, hooks, templates) apply.
+const gitHome = mkdtempSync(join(tmpdir(), 'uws-release-git-'));
+writeFileSync(join(gitHome, 'config'), '');
+process.env.GIT_CONFIG_GLOBAL = join(gitHome, 'config');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+afterAll(() => rmSync(gitHome, { recursive: true, force: true }));
 
 afterEach(() => {
 	// Remove dependency links first so cleanup never walks into the real tree;
@@ -96,7 +102,8 @@ function repository({ pkg = sourcePkg } = {}) {
 
 const annotation = digest => 'Release ' + sourcePkg.version + '\n\nArtifact-SHA256: ' + digest + '\n';
 
-describe('release identity against real tags', () => {
+// Each case runs a dozen git processes, which takes seconds on a loaded Windows host.
+describe('release identity against real tags', { timeout: 30_000 }, () => {
 	it('binds an annotated tag on main to its artifact digest', async () => {
 		const repo = repository();
 		repo.annotate(annotation(repo.digest));
