@@ -17,12 +17,18 @@ const releaseFiles = ['package.json', '.github/workflows/release.yml', '.github/
 const bases = [];
 const links = [];
 
+// Variables a git hook or wrapper exports would point these commands at another repository.
+for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE']) delete process.env[key];
+
 afterEach(() => {
-	// Remove dependency links first so cleanup never walks into the real tree.
-	for (const link of links.splice(0)) {
-		try { unlinkSync(link); } catch { rmdirSync(link); }
+	// Remove dependency links first so cleanup never walks into the real tree;
+	// a base whose link cannot be removed is left in place.
+	const kept = new Set();
+	for (const { link, base } of links.splice(0)) {
+		try { unlinkSync(link); } catch { try { rmdirSync(link); } catch { kept.add(base); } }
 	}
-	for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true });
+	for (const base of bases.splice(0)) if (!kept.has(base)) rmSync(base, { recursive: true, force: true });
+	if (kept.size) throw new Error('could not remove the dependency link in ' + [...kept].join(', '));
 });
 
 function header(name, size, { type = '0', prefix = '', sizeField } = {}) {
@@ -297,7 +303,7 @@ function releaseClone() {
 	// Stands in for npm ci: the local check loads yaml.
 	const modules = join(work, 'node_modules');
 	symlinkSync(realpathSync(fileURLToPath(new URL('../node_modules', import.meta.url))), modules, 'junction');
-	links.push(modules);
+	links.push({ link: modules, base });
 	const source = git(work, 'rev-parse', 'HEAD');
 	const artifact = join(base, 'artifact.tgz');
 	writeFileSync(artifact, tarball([manifestEntry({ name: sourcePkg.name, version: sourcePkg.version, gitHead: source })]));
@@ -309,7 +315,8 @@ function releaseClone() {
 }
 
 function runBlock(language, clone, { artifact = clone.artifact, prelude = '' } = {}) {
-	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+	// The annotation file goes to the clone, not the shared temporary directory.
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', TEMP: clone.base, TMP: clone.base, TMPDIR: clone.base };
 	const options = { cwd: clone.work, encoding: 'utf8', windowsHide: true, env };
 	if (language === 'powershell') {
 		const script = `${prelude}$source = '${clone.source}'\n$tarball = '${artifact}'\n` + docBlock('powershell');
@@ -325,6 +332,8 @@ describe('documented release tag commands', () => {
 	it('documents the version this commit releases', () => {
 		expect(docBlock('powershell')).toContain("'" + tag + "'");
 		expect(docBlock('sh')).toContain('tag=' + tag + '\n');
+		// One script block stops at the first error even when pasted line by line.
+		expect(docBlock('powershell')).toMatch(/^\. \{\ntrap \{ break \}\n[\s\S]*\n\}\n$/);
 	});
 
 	for (const language of ['powershell', 'sh']) {
@@ -359,13 +368,36 @@ describe('documented release tag commands', () => {
 		}, 60_000);
 
 		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before pushing when the tarball cannot be hashed in ${language}`, () => {
-			const clone = releaseClone();
 			// A digest left over from an earlier run in the same session must not be reused.
 			const stale = language === 'powershell' ? `$sha256 = '${'a'.repeat(64)}'\n` : `sha256=${'a'.repeat(64)}\n`;
-			const result = runBlock(language, clone, { artifact: join(clone.base, 'missing.tgz'), prelude: stale });
+			for (const artifact of [clone => join(clone.base, 'missing.tgz'), () => '', clone => clone.base]) {
+				const clone = releaseClone();
+				const result = runBlock(language, clone, { artifact: artifact(clone), prelude: stale });
+				expect(result.status).not.toBe(0);
+				expect(result.stderr).toContain('to the retained archive');
+				expect(clone.remote()).toEqual({ heads: '', tags: '' });
+				expect(hasLocalTag(clone)).toBe(false);
+			}
+		}, 90_000);
+
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`refuses a tag left by an earlier run in ${language}`, () => {
+			const clone = releaseClone();
+			clone.git(clone.work, 'tag', '-a', tag, clone.source, '-m', 'Unchecked');
+			const result = runBlock(language, clone);
 			expect(result.status).not.toBe(0);
+			expect(result.stderr).toContain(tag + ' already exists locally');
 			expect(clone.remote()).toEqual({ heads: '', tags: '' });
-			expect(hasLocalTag(clone)).toBe(false);
+		}, 60_000);
+
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`pushes exactly the source commit and no tags in ${language}`, () => {
+			const clone = releaseClone();
+			clone.git(clone.work, 'config', 'push.followTags', 'true');
+			clone.git(clone.work, 'tag', '-a', 'unrelated-annotated', clone.source, '-m', 'Not for the remote');
+			clone.git(clone.work, 'commit', '-q', '--allow-empty', '-m', 'Later main commit');
+			clone.git(clone.work, 'checkout', '-q', '--detach', clone.source);
+			const result = runBlock(language, clone);
+			expect(result.status, result.stdout + result.stderr).toBe(0);
+			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
 		}, 60_000);
 
 		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before tagging when main cannot be pushed in ${language}`, () => {

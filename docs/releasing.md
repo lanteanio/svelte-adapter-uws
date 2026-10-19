@@ -82,40 +82,49 @@ Run these commands in the clean main source checkout at the frozen SHA, not in
 the `dev` bookkeeping worktree. Install its locked dependencies first with
 `npm ci --ignore-scripts`: the local check loads the workflow checker, which
 needs `yaml`. Set `$source` to the frozen main SHA and `$tarball` to the
-retained archive. The first line refuses any other checkout. Write the
-annotation outside the repository as UTF-8 without a byte order mark; in
-Windows PowerShell 5.1, `Out-File` and `>` write UTF-16 and `Get-FileHash`
-returns uppercase hexadecimal, so use the commands below. Windows PowerShell
-continues after a failed native command, so each line checks its exit code or
-its result. Some hosts turn native stderr into errors, so the block does not
-set `$ErrorActionPreference`. After verifying account protection and complete
-preflight:
+retained archive. The block refuses any other checkout, an existing local tag
+and a missing archive, then pushes exactly `$source` to `main` and no tags.
+Write the annotation outside the repository as UTF-8 without a byte order
+mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16 and
+`Get-FileHash` returns uppercase hexadecimal, so use the commands below.
+Windows PowerShell continues after a failed native command, so each command
+checks its exit code. The block runs as one script block that stops at the
+first error however it is pasted. Some hosts turn native stderr into errors,
+so it does not set `$ErrorActionPreference`. After verifying account
+protection and complete preflight:
 
 ```powershell
-if ((git rev-parse HEAD) -ne $source -or (git status --porcelain)) { throw 'run this in the clean main checkout at $source' }
+. {
+trap { break }
+if ((git rev-parse HEAD) -ne $source -or (git status --porcelain)) { throw 'run this in the clean main checkout at the source commit' }
 $tag = 'svelte-adapter-uws@0.5.11'
+git rev-parse -q --verify "refs/tags/$tag" | Out-Null; if ($LASTEXITCODE -eq 0) { throw "$tag already exists locally; check it, then delete it with git tag -d $tag" }
+if (-not $tarball -or -not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'set $tarball to the retained archive' }
 $annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball -ErrorAction Stop).Hash.ToLowerInvariant()
 if ($sha256 -notmatch '^[0-9a-f]{64}$') { throw 'hashing the retained tarball failed' }
 $text = "Release 0.5.11`n`nArtifact-SHA256: $sha256`n"
 [IO.File]::WriteAllText($annotation, $text); if ([IO.File]::ReadAllText($annotation) -cne $text) { throw 'writing the annotation failed' }
-git push origin main; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
+git push --no-follow-tags origin "${source}:refs/heads/main"; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
 git fetch origin main; if ($LASTEXITCODE -ne 0) { throw 'fetching main failed' }
 git tag -a $tag $source -F $annotation; if ($LASTEXITCODE -ne 0) { throw 'tagging failed' }
 node scripts/prepare-release.js --verify-tag $tag --artifact $tarball; if ($LASTEXITCODE -ne 0) { throw 'the local tag check failed; do not push the tag' }
+}
 ```
 
 The same steps in a POSIX shell, with `source` and `tarball` set:
 
 ```sh
 set -eu
-[ "$(git rev-parse HEAD)" = "$source" ] && [ -z "$(git status --porcelain)" ] || { echo "run this in the clean main checkout at $source" >&2; exit 1; }
+[ "$(git rev-parse HEAD)" = "$source" ] && [ -z "$(git status --porcelain)" ] || { echo 'run this in the clean main checkout at the source commit' >&2; exit 1; }
 tag=svelte-adapter-uws@0.5.11
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "$tag already exists locally; check it, then delete it with git tag -d $tag" >&2; exit 1; fi
+[ -f "$tarball" ] || { echo 'set tarball to the retained archive' >&2; exit 1; }
 annotation=$(mktemp)
 sha256=$(sha256sum < "$tarball")
 sha256=${sha256%% *}
 printf 'Release 0.5.11\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
-git push origin main
+git push --no-follow-tags origin "$source:refs/heads/main"
 git fetch origin main
 git tag -a "$tag" "$source" -F "$annotation"
 node scripts/prepare-release.js --verify-tag "$tag" --artifact "$tarball"
@@ -128,9 +137,9 @@ and a tagged commit contained in `refs/remotes/origin/main`. It also runs the
 package and workflow checks that CI applies to the tagged commit. Only CI
 repacks that commit and compares the bytes, which is why step 4 reproduces the
 archive before tagging. If it fails,
-delete the local tag with `git tag -d $tag`, correct the cause and tag again.
-Only after it prints `local tag ... binds ...`, push the tag as a separate
-command:
+delete the local tag with `git tag -d $tag`, correct the cause and run the
+block again. Only after it prints `local tag ... binds ...`, push the tag as a
+separate command (`git push origin "$tag"` in a POSIX shell):
 
 ```powershell
 git push origin $tag
