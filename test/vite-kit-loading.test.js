@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { createServer, request } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, rmdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, rmdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import WebSocket from 'ws';
 import uws from '../vite.js';
@@ -1008,11 +1008,12 @@ describe('development handler lifecycle', () => {
 		writeFileSync(dependency, 'export {};');
 		const loaded = Array.from({ length: 4 }, () => ({ init: vi.fn(), shutdown: vi.fn() }));
 		const httpServer = createServer();
-		// SvelteKit keeps the junction; Vite resolved its root and keys the handler under the target.
-		const server = viteServer(httpServer, 2, async () => loaded[0], real);
+		// Both roots keep the junction; Vite's resolver keyed the handler under the target's disk spelling.
+		const server = viteServer(httpServer, 2, async () => loaded[0], link);
 		delete server.environments;
 		server.hot = { send: vi.fn() };
-		server.moduleGraph.getModulesByFile = vi.fn(key => key === viteId(file) ? new Set([{ file: viteId(file), ssrImportedModules: [{ file: viteId(dependency) }] }]) : undefined);
+		const disk = name => viteId(realpathSync.native(path.join(real, name)));
+		server.moduleGraph.getModulesByFile = vi.fn(key => key === disk('handler.js') ? new Set([{ file: disk('handler.js'), ssrImportedModules: [{ file: disk('shared.js') }] }]) : undefined);
 		const plugin = uws({ handler: './handler.js' });
 		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
@@ -1047,6 +1048,36 @@ describe('development handler lifecycle', () => {
 			await close(httpServer, []);
 			rmdirSync(link);
 			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it.runIf(process.platform === 'win32')('matches a Windows handler keyed under Vite\'s own root spelling', async () => {
+		const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'uws-vite-root-')));
+		writeFileSync(path.join(root, 'handler.js'), 'export {};');
+		writeFileSync(path.join(root, 'shared.js'), 'export {};');
+		// Until its startup probe ends Vite keeps its root as given; another letter case stands in for an 8.3 name.
+		const viteRoot = path.join(path.dirname(root), path.basename(root).toUpperCase());
+		const loaded = [{ init: vi.fn() }, { init: vi.fn() }];
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => loaded[0], viteRoot);
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		const keyed = name => viteId(path.join(viteRoot, name));
+		server.moduleGraph.getModulesByFile = vi.fn(key => key === keyed('handler.js') ? new Set([{ file: keyed('handler.js'), ssrImportedModules: [{ file: keyed('shared.js') }] }]) : undefined);
+		const plugin = uws({ handler: './handler.js' });
+		try {
+			plugin.config({ root });
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(loaded[0].init).toHaveBeenCalledOnce());
+			server.ssrLoadModule.mockResolvedValue(loaded[1]);
+			await plugin.handleHotUpdate({ file: viteId(path.join(root, 'shared.js')), server });
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(loaded[1].init).toHaveBeenCalledOnce());
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
