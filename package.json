@@ -163,17 +163,26 @@
   ],
   "devDependencies": {
     "@playwright/test": "^1.59.1",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@sveltejs/kit": "^2.70.3",
+    "@vitest/coverage-v8": "^4.1.11",
     "autocannon": "^8.0.0",
     "c8": "^11.0.0",
     "polka": "^0.5.2",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
-    "vitest": "^4.0.18",
-    "ws": "^8.19.0",
+    "vitest": "^4.1.11",
+    "ws": "^8.21.0",
     "yaml": "2.9.0"
   },
   "optionalDependencies": {
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"
+  },
+  "overrides": {
+    "@sveltejs/kit": {
+      "cookie": "^0.7.2"
+    },
+    "autocannon": {
+      "hyperid": "^4.0.0"
+    }
   }
 }

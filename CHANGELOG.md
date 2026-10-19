@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SvelteKit 3 support on the stable 0.5 line, including projects configured entirely in `vite.config.js`. SvelteKit 2 and Svelte 4 remain supported.
 - Reproducible release archives with source identity checks and trusted npm publication.
 
+### Changed
+
+- Update the development and test dependencies past their published security advisories, apart from the last Svelte 4 and Vite 5 releases, and the esbuild release Vite 5 requires, that the Svelte 4 compatibility fixture tests against. The dependencies installed with the package are unchanged.
+
 ### Fixed
 
 - Initialize SvelteKit before evaluating the WebSocket handler and, on SvelteKit 3, generated server entries, so module-scope environment reads receive initialized values.
