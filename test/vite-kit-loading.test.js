@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, onTestFinished } from 'vitest';
 import { createServer, request } from 'node:http';
+import { connect } from 'node:net';
 import { once } from 'node:events';
 import path from 'node:path';
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, rmdirSync, symlinkSync } from 'node:fs';
@@ -1499,5 +1500,116 @@ describe('development handler lifecycle', () => {
 			errorLog.mockRestore();
 		}
 		expect(disconnect).toHaveBeenCalledOnce();
+	});
+});
+
+describe('development WebSocket upgrades', () => {
+	const upgradeRequest = (target) => `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\n` +
+		'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n';
+
+	// Records what the upgrade path leaves unhandled. Vitest does not report
+	// these itself while another listener is installed, so the listeners also
+	// come off when a test times out before its finally block runs.
+	function trapUnhandled() {
+		const seen = [];
+		const record = (error) => { seen.push(String(error)); };
+		const release = () => {
+			process.removeListener('uncaughtException', record);
+			process.removeListener('unhandledRejection', record);
+		};
+		process.prependListener('uncaughtException', record);
+		process.prependListener('unhandledRejection', record);
+		onTestFinished(release);
+		return { seen, release };
+	}
+
+	async function rawClient(httpServer) {
+		const client = connect(httpServer.address().port, '127.0.0.1');
+		client.on('error', () => {});
+		await once(client, 'connect');
+		return client;
+	}
+
+	// Not events.once: it would attach the error listener under test.
+	const closeOrTimeout = (socket) => Promise.race([
+		new Promise((resolve) => socket.once('close', () => resolve('closed'))),
+		new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000))
+	]);
+
+	it.each(['loads', 'runs its upgrade hook'])('survives a client that resets while the handler %s', async (phase) => {
+		const loading = deferred();
+		const entered = deferred();
+		const release = deferred();
+		const handler = { upgrade: vi.fn(async () => { entered.resolve(); await release.promise; return false; }) };
+		if (phase !== 'loads') loading.resolve(handler);
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, () => loading.promise);
+		const plugin = uws({ handler: './handler.js', allowedOrigins: '*' });
+		const trap = trapUnhandled();
+		let serverSocket;
+		let client;
+		httpServer.on('upgrade', (req, socket) => { serverSocket = socket; });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			client = await rawClient(httpServer);
+			client.write(upgradeRequest('/ws'));
+			if (phase === 'loads') await vi.waitFor(() => expect(serverSocket).toBeDefined());
+			else await entered.promise;
+			const outcome = closeOrTimeout(serverSocket);
+			client.resetAndDestroy();
+			expect({ outcome: await outcome, unhandled: trap.seen }).toEqual({ outcome: 'closed', unhandled: [] });
+			expect(serverSocket.destroyed).toBe(true);
+			loading.resolve(handler);
+			release.resolve();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(trap.seen).toEqual([]);
+		} finally {
+			trap.release();
+			serverSocket?.destroy();
+			client?.destroy();
+			loading.resolve(handler);
+			release.resolve();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('survives a client that resets after a superseded upgrade is refused', async () => {
+		const entered = deferred();
+		const release = deferred();
+		const first = { upgrade: vi.fn(async () => { entered.resolve(); await release.promise; return {}; }) };
+		const next = { init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		const plugin = uws({ handler: './handler.js', allowedOrigins: '*' });
+		const trap = trapUnhandled();
+		let serverSocket;
+		let client;
+		httpServer.on('upgrade', (req, socket) => { serverSocket = socket; });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			client = await rawClient(httpServer);
+			client.write(upgradeRequest('/ws'));
+			await entered.promise;
+			server.ssrLoadModule.mockResolvedValue(next);
+			await hotUpdate(plugin, server);
+			await vi.waitFor(() => expect(next.init).toHaveBeenCalledOnce());
+			const refusal = new Promise((resolve) => client.once('data', (data) => resolve(data.toString())));
+			release.resolve();
+			// The 503 ends the socket, which stays half open until the reset.
+			expect(await refusal).toMatch(/^HTTP\/1\.1 503 /);
+			const outcome = closeOrTimeout(serverSocket);
+			client.resetAndDestroy();
+			expect({ outcome: await outcome, unhandled: trap.seen }).toEqual({ outcome: 'closed', unhandled: [] });
+		} finally {
+			trap.release();
+			serverSocket?.destroy();
+			client?.destroy();
+			release.resolve();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
 	});
 });

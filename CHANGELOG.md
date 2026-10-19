@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve shutdown-before-init ordering during in-process development server restarts, including reused plugin instances, bound development lifecycle hooks to 30 seconds, and reject upgrades or streamed authentication responses from superseded handlers. Reload Kit 3 handlers when a missing dependency is created, and support handler reloads on Vite 5.0. With HMR, load a WebSocket handler file created while the dev server runs, also at a configured `handler` path, and retire the handler when its file is deleted, which Vite 5 kept live.
 - Allow promises in the TypeScript declarations for subscription hooks and document asynchronous authorization.
 - Deny development `platform.subscribe` and `platform.checkSubscribe` calls for sockets no handler owns when they go through a retired handler's platform, connections or authentication requests, or once a handler file has been found or configured but no handler instance is live, including before the first handler loads and after the file is deleted. Explain locked platform property errors on the next reload.
+- Keep the development server running when a client resets its connection during a WebSocket upgrade, whether the upgrade is waiting for the handler or its `upgrade` hook or has just been refused.
 
 ## [0.5.10] - 2026-10-09
 

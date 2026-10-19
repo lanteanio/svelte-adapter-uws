@@ -1387,6 +1387,13 @@ export default function uws(options = {}) {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
 
+				// Node removes its own socket error listener when it hands over an
+				// upgrade, and this handler awaits before ws owns the socket. A
+				// client that resets in that window, or while one of the refusals
+				// below is written, must not crash the dev server.
+				const onSocketError = () => socket.destroy();
+				socket.on('error', onSocketError);
+
 				const upgradeHandlers = await waitForHandlers();
 				if (!currentHandlers(state, upgradeHandlers)) {
 					socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nWebSocket handler reloading');
@@ -1497,6 +1504,7 @@ export default function uws(options = {}) {
 					return;
 				}
 
+				socket.removeListener('error', onSocketError);
 				wss.handleUpgrade(req, socket, head, (ws) => {
 					// Ensure remoteAddress is always present in userData, matching
 					// what the production handler injects. Plugins like ratelimit
