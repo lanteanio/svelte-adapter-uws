@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,8 +15,13 @@ const script = fileURLToPath(new URL('../scripts/prepare-release.js', import.met
 // The tagged commit carries the release route the local check validates.
 const releaseFiles = ['package.json', '.github/workflows/release.yml', '.github/workflows/test.yml', 'docs/releasing.md'];
 const bases = [];
+const links = [];
 
 afterEach(() => {
+	// Remove dependency links first so cleanup never walks into the real tree.
+	for (const link of links.splice(0)) {
+		try { unlinkSync(link); } catch { rmdirSync(link); }
+	}
 	for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true });
 });
 
@@ -161,6 +166,8 @@ describe('release identity against real tags', () => {
 		expect(read([{ name: 'package/package.json', body: manifest }, { name: 'package/package.json', body: manifest }])).toBeUndefined();
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '-1000\0' }])).toBeUndefined();
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '77777777777\0' }])).toBeUndefined();
+		// parseInt would read a signed size; tar size fields are octal digits only.
+		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '+' + manifest.length.toString(8) + '\0' }])).toBeUndefined();
 	});
 
 	it('refuses a tagged package or workflow that CI would refuse', async () => {
@@ -173,6 +180,45 @@ describe('release identity against real tags', () => {
 		drifted.run('update-ref', 'refs/remotes/origin/main', 'HEAD');
 		drifted.annotate(annotation(drifted.pack()));
 		await expect(drifted.verify()).rejects.toThrow(/without cancelling/);
+	});
+
+	it('checks the workflow of the tagged commit, not the working tree', async () => {
+		const workflow = rootFile('.github/workflows/release.yml');
+		const drift = workflow.replace('cancel-in-progress: false', 'cancel-in-progress: true');
+		const edited = repository();
+		edited.annotate(annotation(edited.digest));
+		writeFileSync(join(edited.source, '.github/workflows/release.yml'), drift);
+		expect((await edited.verify()).artifactSha256).toBe(edited.digest);
+		const restored = repository();
+		writeFileSync(join(restored.source, '.github/workflows/release.yml'), drift);
+		restored.run('commit', '-qam', 'Drift');
+		restored.annotate(annotation(restored.pack()));
+		writeFileSync(join(restored.source, '.github/workflows/release.yml'), workflow);
+		restored.run('commit', '-qam', 'Restore');
+		restored.run('update-ref', 'refs/remotes/origin/main', 'HEAD');
+		await expect(restored.verify()).rejects.toThrow(/without cancelling/);
+	});
+
+	it('runs the CI identity check with Node builtins only', () => {
+		// The identity job runs this script before installing any dependency.
+		const text = rootFile('scripts/prepare-release.js');
+		const imports = [...text.matchAll(/^\s*(?:import|export)\s[^'";]*?from\s*(['"])([^'"]+)\1|^\s*import\s*(['"])([^'"]+)\3/gm)].map(match => match[2] ?? match[4]);
+		expect(imports.length).toBeGreaterThan(0);
+		for (const specifier of imports) expect(specifier).toMatch(/^node:/);
+		const repo = repository();
+		mkdirSync(join(repo.source, 'scripts'));
+		writeFileSync(join(repo.source, 'scripts/prepare-release.js'), text);
+		repo.run('add', 'scripts/prepare-release.js');
+		repo.run('commit', '-qm', 'Release script');
+		repo.run('update-ref', 'refs/remotes/origin/main', 'HEAD');
+		const digest = repo.pack();
+		repo.annotate(annotation(digest));
+		const output = join(repo.base, 'github-output.txt');
+		const result = spawnSync(process.execPath, ['scripts/prepare-release.js'], {
+			cwd: repo.source, encoding: 'utf8', windowsHide: true, env: { ...process.env, ...repo.env(), GITHUB_OUTPUT: output }
+		});
+		expect(result.status, result.stderr).toBe(0);
+		expect(readFileSync(output, 'utf8')).toBe('sha256=' + digest + '\nfilename=' + sourcePkg.name + '-' + sourcePkg.version + '.tgz\n');
 	});
 
 	it('requires the retained tarball and exact arguments', async () => {
@@ -214,4 +260,122 @@ describe('release identity against real tags', () => {
 			expect(rootFile(file).startsWith('#!'), file).toBe(false);
 		}
 	});
+});
+
+// The commands in docs/releasing.md, run as written in a clone whose origin is
+// a local bare repository.
+const releasingDoc = rootFile('docs/releasing.md').replace(/\r\n/g, '\n');
+function docBlock(language) {
+	const blocks = [...releasingDoc.matchAll(/```(\w+)\n([\s\S]*?)```/g)].filter(([, lang, body]) => lang === language && body.includes('git tag -a'));
+	expect(blocks).toHaveLength(1);
+	return blocks[0][2];
+}
+const powershell = ['pwsh', 'powershell'].find(bin => spawnSync(bin, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', windowsHide: true }).status === 0);
+const posixShell = spawnSync('sh', ['-c', 'exit 0'], { stdio: 'ignore', windowsHide: true }).status === 0;
+
+function releaseClone() {
+	const base = mkdtempSync(join(tmpdir(), 'uws-release-docs-'));
+	bases.push(base);
+	const origin = join(base, 'origin.git');
+	const work = join(base, 'work');
+	const git = (cwd, ...args) => {
+		const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+		expect(result.status, result.stderr).toBe(0);
+		return result.stdout.trim();
+	};
+	git(base, 'init', '-q', '--bare', '-b', 'main', origin);
+	git(base, 'init', '-q', '-b', 'main', work);
+	for (const [key, value] of [['core.autocrlf', 'false'], ['user.name', 'Test'], ['user.email', 'test@example.test'], ['tag.gpgSign', 'false'], ['commit.gpgSign', 'false']]) git(work, 'config', key, value);
+	git(work, 'remote', 'add', 'origin', origin);
+	for (const file of [...releaseFiles, 'scripts/prepare-release.js', 'scripts/check-release-workflow.js']) {
+		mkdirSync(dirname(join(work, file)), { recursive: true });
+		writeFileSync(join(work, file), rootFile(file));
+	}
+	writeFileSync(join(work, '.gitignore'), 'node_modules\n');
+	git(work, 'add', '-A');
+	git(work, 'commit', '-qm', 'Release source');
+	// Stands in for npm ci: the local check loads yaml.
+	const modules = join(work, 'node_modules');
+	symlinkSync(realpathSync(fileURLToPath(new URL('../node_modules', import.meta.url))), modules, 'junction');
+	links.push(modules);
+	const source = git(work, 'rev-parse', 'HEAD');
+	const artifact = join(base, 'artifact.tgz');
+	writeFileSync(artifact, tarball([manifestEntry({ name: sourcePkg.name, version: sourcePkg.version, gitHead: source })]));
+	const sha256 = createHash('sha256').update(readFileSync(artifact)).digest('hex');
+	// Every push in these tests must land in the local bare repository.
+	expect(realpathSync(git(work, 'remote', 'get-url', 'origin'))).toBe(realpathSync(origin));
+	const remote = () => ({ heads: git(work, 'ls-remote', '--heads', origin), tags: git(work, 'ls-remote', '--tags', origin) });
+	return { base, work, git, source, artifact, sha256, remote };
+}
+
+function runBlock(language, clone, { artifact = clone.artifact, prelude = '' } = {}) {
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+	const options = { cwd: clone.work, encoding: 'utf8', windowsHide: true, env };
+	if (language === 'powershell') {
+		const script = `${prelude}$source = '${clone.source}'\n$tarball = '${artifact}'\n` + docBlock('powershell');
+		return spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], options);
+	}
+	const script = `${prelude}source='${clone.source}'\ntarball='${artifact.replaceAll('\\', '/')}'\n` + docBlock('sh');
+	return spawnSync('sh', ['-c', script], options);
+}
+
+const hasLocalTag = clone => spawnSync('git', ['rev-parse', '-q', '--verify', 'refs/tags/' + tag], { cwd: clone.work, windowsHide: true }).status === 0;
+
+describe('documented release tag commands', () => {
+	it('documents the version this commit releases', () => {
+		expect(docBlock('powershell')).toContain("'" + tag + "'");
+		expect(docBlock('sh')).toContain('tag=' + tag + '\n');
+	});
+
+	for (const language of ['powershell', 'sh']) {
+		const available = language === 'powershell' ? !!powershell : posixShell;
+		// PowerShell runs on every CI lane; a POSIX shell is required off Windows.
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`tags only after the checks pass in ${language}`, () => {
+			const clone = releaseClone();
+			const result = runBlock(language, clone);
+			expect(result.status, result.stdout + result.stderr).toBe(0);
+			expect(result.stdout).toContain('local tag ' + tag + ' binds ' + clone.sha256 + ' at ' + clone.source);
+			// main is pushed, the tag is created locally and left for a separate push.
+			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
+			const body = clone.git(clone.work, 'cat-file', 'tag', tag);
+			expect(body.slice(body.indexOf('\n\n') + 2)).toBe('Release ' + sourcePkg.version + '\n\nArtifact-SHA256: ' + clone.sha256);
+		}, 60_000);
+
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`refuses to run outside the clean checkout at the source commit in ${language}`, () => {
+			const moved = releaseClone();
+			moved.git(moved.work, 'commit', '-q', '--allow-empty', '-m', 'Later work');
+			const elsewhere = runBlock(language, moved);
+			expect(elsewhere.status).not.toBe(0);
+			expect(elsewhere.stderr).toContain('run this in the clean main checkout');
+			const dirty = releaseClone();
+			writeFileSync(join(dirty.work, 'stray.txt'), 'untracked');
+			const unclean = runBlock(language, dirty);
+			expect(unclean.status).not.toBe(0);
+			expect(unclean.stderr).toContain('run this in the clean main checkout');
+			for (const clone of [moved, dirty]) {
+				expect(clone.remote()).toEqual({ heads: '', tags: '' });
+				expect(hasLocalTag(clone)).toBe(false);
+			}
+		}, 60_000);
+
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before pushing when the tarball cannot be hashed in ${language}`, () => {
+			const clone = releaseClone();
+			// A digest left over from an earlier run in the same session must not be reused.
+			const stale = language === 'powershell' ? `$sha256 = '${'a'.repeat(64)}'\n` : `sha256=${'a'.repeat(64)}\n`;
+			const result = runBlock(language, clone, { artifact: join(clone.base, 'missing.tgz'), prelude: stale });
+			expect(result.status).not.toBe(0);
+			expect(clone.remote()).toEqual({ heads: '', tags: '' });
+			expect(hasLocalTag(clone)).toBe(false);
+		}, 60_000);
+
+		it.skipIf(!available && (language === 'powershell' || process.platform === 'win32'))(`stops before tagging when main cannot be pushed in ${language}`, () => {
+			const clone = releaseClone();
+			const unrelated = clone.git(clone.work, 'commit-tree', 'HEAD^{tree}', '-m', 'Unrelated main');
+			clone.git(clone.work, 'push', '-q', join(clone.base, 'origin.git'), unrelated + ':refs/heads/main');
+			const result = runBlock(language, clone);
+			expect(result.status).not.toBe(0);
+			expect(clone.remote()).toEqual({ heads: unrelated + '\trefs/heads/main', tags: '' });
+			expect(hasLocalTag(clone)).toBe(false);
+		}, 60_000);
+	}
 });

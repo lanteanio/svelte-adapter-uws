@@ -78,21 +78,27 @@ Release 0.5.11
 Artifact-SHA256: <64 lowercase hexadecimal characters>
 ```
 
-Run these commands in the clean main source checkout, not in the `dev`
-bookkeeping worktree. Set `$source` to the frozen main SHA and `$tarball` to the
-retained archive. Write the annotation outside the repository as UTF-8 without
-a byte order mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16
-and `Get-FileHash` returns uppercase hexadecimal, so use the commands below.
-Windows PowerShell continues after a failed native command, so each line checks
-its exit code, and the first line stops on any failed cmdlet. After verifying
-account protection and complete preflight:
+Run these commands in the clean main source checkout at the frozen SHA, not in
+the `dev` bookkeeping worktree. Install its locked dependencies first with
+`npm ci --ignore-scripts`: the local check loads the workflow checker, which
+needs `yaml`. Set `$source` to the frozen main SHA and `$tarball` to the
+retained archive. The first line refuses any other checkout. Write the
+annotation outside the repository as UTF-8 without a byte order mark; in
+Windows PowerShell 5.1, `Out-File` and `>` write UTF-16 and `Get-FileHash`
+returns uppercase hexadecimal, so use the commands below. Windows PowerShell
+continues after a failed native command, so each line checks its exit code or
+its result. Some hosts turn native stderr into errors, so the block does not
+set `$ErrorActionPreference`. After verifying account protection and complete
+preflight:
 
 ```powershell
-$ErrorActionPreference = 'Stop'
+if ((git rev-parse HEAD) -ne $source -or (git status --porcelain)) { throw 'run this in the clean main checkout at $source' }
 $tag = 'svelte-adapter-uws@0.5.11'
 $annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
-$sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($annotation, "Release 0.5.11`n`nArtifact-SHA256: $sha256`n")
+$sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball -ErrorAction Stop).Hash.ToLowerInvariant()
+if ($sha256 -notmatch '^[0-9a-f]{64}$') { throw 'hashing the retained tarball failed' }
+$text = "Release 0.5.11`n`nArtifact-SHA256: $sha256`n"
+[IO.File]::WriteAllText($annotation, $text); if ([IO.File]::ReadAllText($annotation) -cne $text) { throw 'writing the annotation failed' }
 git push origin main; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
 git fetch origin main; if ($LASTEXITCODE -ne 0) { throw 'fetching main failed' }
 git tag -a $tag $source -F $annotation; if ($LASTEXITCODE -ne 0) { throw 'tagging failed' }
@@ -103,6 +109,7 @@ The same steps in a POSIX shell, with `source` and `tarball` set:
 
 ```sh
 set -eu
+[ "$(git rev-parse HEAD)" = "$source" ] && [ -z "$(git status --porcelain)" ] || { echo "run this in the clean main checkout at $source" >&2; exit 1; }
 tag=svelte-adapter-uws@0.5.11
 annotation=$(mktemp)
 sha256=$(sha256sum < "$tarball")

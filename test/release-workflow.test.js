@@ -39,6 +39,12 @@ describe('closed stable publication', () => {
 		expect(check(source.replaceAll('\n', '\r\n'), pkg, testSource.replaceAll('\n', '\r\n'))).toEqual([]);
 	});
 
+	it('requires the trusted publisher setup in the release policy', () => {
+		for (const phrase of ['npm trusted publisher', 'release.yml', 'npm-release', 'required reviewers', 'candidate', 'no token fallback']) {
+			expect(validateReleaseWorkflow(source, pkg, policy.replaceAll(phrase, ''), testSource)).toEqual(['release policy is missing trusted-publisher setup: ' + phrase]);
+		}
+	});
+
 	it('rejects missing, duplicated, reordered, modified and injected steps in every executable job', () => {
 		for (const name of ['identity', 'verify', 'publish']) {
 			const steps = parse(source).jobs[name].steps;
