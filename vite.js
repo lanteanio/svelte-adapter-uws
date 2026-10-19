@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
 import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, runHook, runUnsubscribeHook } from './files/utils.js';
@@ -15,6 +15,42 @@ const retiredHandlers = Object.freeze({ subscribe: () => 'INTERNAL_ERROR' });
 // Vite keys module files with forward slashes on Windows. A handler import
 // that fails to resolve keeps the spelling it was given, so pass that form.
 const viteFile = file => process.platform === 'win32' ? file.replaceAll('\\', '/') : file;
+
+// On Windows one file can be spelled with any letter case and with 8.3 short
+// directory names, and the dev root, the watcher and Vite's resolver can each
+// pick a different spelling. The disk's own spelling; a deleted file keeps the
+// spelling of its directory.
+function diskSpelling(file) {
+	try { return realpathSync.native(file); } catch {}
+	try { return path.join(realpathSync.native(path.dirname(file)), path.basename(file)); } catch {}
+	return file;
+}
+
+function samePath(a, b) {
+	const left = path.resolve(a);
+	const right = path.resolve(b);
+	if (left === right) return true;
+	if (process.platform !== 'win32' || path.basename(left).toLowerCase() !== path.basename(right).toLowerCase()) return false;
+	return left.toLowerCase() === right.toLowerCase() || diskSpelling(left).toLowerCase() === diskSpelling(right).toLowerCase();
+}
+
+// The path the handler is imported with. On Windows it is the root as SvelteKit
+// spells it plus the disk's spelling below that root, so the handler's graph
+// node is the file the watcher reports and its imports resolve like the routes'.
+function handlerImport(state) {
+	if (process.platform !== 'win32' || !state.discoveryRoot) return state.path;
+	const below = path.relative(diskSpelling(state.discoveryRoot), diskSpelling(state.path));
+	return below && !path.isAbsolute(below) ? path.join(state.discoveryRoot, below) : state.path;
+}
+
+// The handler's graph nodes under every spelling it may be keyed by: the
+// configured one, the disk's and the one it is imported with.
+function handlerNodes(graph, state) {
+	const keys = process.platform === 'win32' ? [state.path, diskSpelling(state.path), handlerImport(state)] : [state.path];
+	const nodes = new Set();
+	for (const key of new Set(keys.map(viteFile))) for (const node of graph?.getModulesByFile(key) ?? []) nodes.add(node);
+	return nodes;
+}
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -810,7 +846,7 @@ export default function uws(options = {}) {
 				return;
 			}
 			state.importPending = false;
-			const loading = state.load(state.path);
+			const loading = state.load(handlerImport(state));
 			if (!useEnvironmentRunner) {
 				state.currentLoad = loading;
 				void loading.then(
@@ -888,17 +924,15 @@ export default function uws(options = {}) {
 	}
 
 	function affectsLegacyHandler(server, state, file) {
-		const changed = path.resolve(file);
-		if (path.resolve(state.path) === changed) return true;
+		if (samePath(state.path, file)) return true;
 		const graph = server.environments?.ssr?.moduleGraph ?? server.moduleGraph;
-		const modules = graph?.getModulesByFile(viteFile(state.path));
-		const pending = [...(modules ?? [])];
+		const pending = [...handlerNodes(graph, state)];
 		const visited = new Set();
 		while (pending.length > 0) {
 			const mod = pending.pop();
 			if (visited.has(mod)) continue;
 			visited.add(mod);
-			if (mod.file && path.resolve(mod.file) === changed) return true;
+			if (mod.file && samePath(mod.file, file)) return true;
 			for (const dependency of mod.ssrImportedModules ?? mod.importedModules ?? []) pending.push(dependency);
 		}
 		return false;
@@ -941,7 +975,7 @@ export default function uws(options = {}) {
 		// import then would return the cached module. Such an earlier reload
 		// leaves the file event pending.
 		const fileEventSettled = () => state.legacyFileEvent &&
-			[...(server.moduleGraph.getModulesByFile(viteFile(state.path)) ?? [])].every(node => !node.ssrModule && !node.ssrTransformResult);
+			[...handlerNodes(server.moduleGraph, state)].every(node => !node.ssrModule && !node.ssrTransformResult);
 		function sendWithReload(...args) {
 			const result = send.apply(this, args);
 			if (state.closed || (args[0]?.type !== 'full-reload' && args[0]?.type !== 'update')) return result;
@@ -1014,6 +1048,8 @@ export default function uws(options = {}) {
 
 	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
 	let ssrHandlerPath = /** @type {string | null} */ (null);
+	/** The root as SvelteKit computes it from the user config, before Vite resolves it. */
+	let configRoot = /** @type {string | null} */ (null);
 
 	return {
 		name: 'svelte-adapter-uws',
@@ -1029,6 +1065,9 @@ export default function uws(options = {}) {
 	return () => hot.off(${JSON.stringify(reloadEvent)}, callback);
 }`;
 			}
+		},
+		config(config) {
+			configRoot = config.root ? path.resolve(config.root) : process.cwd();
 		},
 		configResolved(resolved) {
 			// Capture the handler path once the resolved Vite config is
@@ -1124,7 +1163,9 @@ export default function uws(options = {}) {
 			server.httpServer.once('close', () => { void stopLifecycle(state); });
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
-			const root = server.config.root;
+			// Discover the handler under the root spelling SvelteKit uses for routes;
+			// Vite 8 resolves its own root to the disk's spelling.
+			const root = state.discoveryRoot = configRoot ?? server.config.root;
 
 			// Kit 3 serves routes through the runnable SSR environment. Its legacy
 			// ssrLoadModule graph is separate, so using it would duplicate shared state.
@@ -1724,8 +1765,8 @@ export default function uws(options = {}) {
 			if (change?.event !== 'create' && change?.event !== 'delete') return;
 			if (!state.path) {
 				if (change.event !== 'create') return;
-				const discovered = discoverHandler(viteServer.config.root);
-				if (!discovered || path.resolve(id) !== path.resolve(discovered)) return;
+				const discovered = discoverHandler(state.discoveryRoot);
+				if (!discovered || !samePath(id, discovered)) return;
 				state.path = resolvedHandlerPath = discovered;
 				if (!state.active) platformEpoch.handlers = retiredHandlers;
 				// Vite 6+ reports this creation to hotUpdate next; this reload covers it.
@@ -1733,11 +1774,11 @@ export default function uws(options = {}) {
 				void reloadHandlers(state);
 				return;
 			}
-			if (!state.vite5 || path.resolve(id) !== path.resolve(state.path)) return;
+			if (!state.vite5 || !samePath(id, state.path)) return;
 			// Vite 5 invalidates the file's graph node after this hook and then
 			// broadcasts; reload on that broadcast. With no node there is no
 			// cached module to go stale, so reload now.
-			if (viteServer.moduleGraph?.getModulesByFile(viteFile(state.path))?.size) state.legacyFileEvent = true;
+			if (handlerNodes(viteServer.moduleGraph, state).size) state.legacyFileEvent = true;
 			else void reloadHandlers(state);
 		},
 		handleHotUpdate({ file }) {
@@ -1752,7 +1793,7 @@ export default function uws(options = {}) {
 				if (this.environment.name === 'client') {
 					state.legacyUpdates++;
 					// The creation watchChange just discovered is already reloading.
-					const created = state.createdHandler && type === 'create' && path.resolve(file) === path.resolve(state.path);
+					const created = state.createdHandler && type === 'create' && samePath(file, state.path);
 					state.createdHandler = false;
 					if (state.path && !created) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
 				}
@@ -1766,8 +1807,8 @@ export default function uws(options = {}) {
 				return [];
 			}
 			if (type === 'update') return;
-			const discovered = state.path || discoverHandler(viteServer.config.root);
-			if (!discovered || path.resolve(file) !== path.resolve(discovered)) return;
+			const discovered = state.path || discoverHandler(state.discoveryRoot);
+			if (!discovered || !samePath(file, discovered)) return;
 			const firstHandler = !state.path;
 			state.path = resolvedHandlerPath = discovered;
 			if (firstHandler) {

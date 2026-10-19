@@ -909,6 +909,17 @@ describe('development handler lifecycle', () => {
 			await vi.waitFor(() => expect(second.init).toHaveBeenCalledOnce());
 			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBeNull());
 			expect(server.ssrLoadModule).toHaveBeenCalledTimes(3);
+			// A settled file event is spent, and only full-reload or update broadcasts reload.
+			await plugin.handleHotUpdate({ file: id, server });
+			server.hot.send({ type: 'error', err: { message: 'unrelated' } });
+			server.hot.send({ type: 'custom', event: 'unrelated' });
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(server.ssrLoadModule).toHaveBeenCalledTimes(3);
+			server.hot.send({ type: 'update', updates: [] });
+			await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledTimes(4));
+			server.hot.send({ type: 'update', updates: [] });
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(server.ssrLoadModule).toHaveBeenCalledTimes(4);
 		} finally {
 			errorLog.mockRestore();
 			await closeLifecycle(plugin, server);
@@ -951,6 +962,60 @@ describe('development handler lifecycle', () => {
 			errorLog.mockRestore();
 			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
+		}
+	});
+
+	it.runIf(process.platform === 'win32')('matches a Windows handler path and its imports under another spelling', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-spelling-'));
+		const file = path.join(root, 'handler.js');
+		const dependency = path.join(root, 'shared.js');
+		writeFileSync(file, 'export {};');
+		writeFileSync(dependency, 'export {};');
+		const loaded = [{ init: vi.fn() }, { init: vi.fn() }, { init: vi.fn() }];
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => loaded[0], root);
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		// Vite keyed the handler under the disk's spelling; the option spells it in capitals.
+		server.moduleGraph.getModulesByFile = vi.fn(key => key === viteId(file) ? new Set([{ file: viteId(file), ssrImportedModules: [{ file: viteId(dependency) }] }]) : undefined);
+		const plugin = uws({ handler: './HANDLER.JS' });
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(loaded[0].init).toHaveBeenCalledOnce());
+			for (const [index, changed] of [[1, file], [2, dependency.toUpperCase()]]) {
+				server.ssrLoadModule.mockResolvedValue(loaded[index]);
+				await plugin.handleHotUpdate({ file: changed.split(path.sep).join('/'), server });
+				server.hot.send({ type: 'full-reload' });
+				await vi.waitFor(() => expect(loaded[index].init).toHaveBeenCalledOnce());
+			}
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it('discovers the development handler under the root SvelteKit uses', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-config-root-'));
+		mkdirSync(path.join(root, 'src'));
+		const file = path.join(root, 'src', 'hooks.ws.js');
+		writeFileSync(file, 'export {};');
+		const handler = { init: vi.fn() };
+		const httpServer = createServer();
+		// Vite 8 resolves its own root; SvelteKit keeps the configured spelling.
+		const server = viteServer(httpServer, 2, async () => handler, path.join(root, 'resolved-elsewhere'));
+		const plugin = uws();
+		try {
+			plugin.config({ root });
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
