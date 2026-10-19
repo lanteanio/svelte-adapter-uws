@@ -2,13 +2,17 @@ import { describe, it, after } from 'node:test';
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
 const { createServer } = await import(process.env.VITE_HMR_ENTRY || 'vite');
 import uws from '../vite.js';
 
-const fixtureBase = process.env.UWS_HMR_TEST_ROOT || await mkdtemp(path.join(tmpdir(), 'uws-hmr-'));
+// Windows temp directories can carry 8.3 short names. Vite spells such a path
+// in its long form only after a startup probe, so the same file could get two
+// module ids. The fixtures model an app in a canonical project directory.
+const fixtureBase = realpathSync.native(process.env.UWS_HMR_TEST_ROOT || await mkdtemp(path.join(tmpdir(), 'uws-hmr-')));
 after(() => rm(fixtureBase, { recursive: true, force: true }));
 
 async function waitFor(check, timeout = 5000) {
