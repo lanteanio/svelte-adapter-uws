@@ -24,7 +24,8 @@ async function attemptUpgrade(url) {
 		const ws = new WebSocket(url);
 		const result = { opened: false, status: null, ws: null };
 		ws.on('open', () => { result.opened = true; result.ws = ws; resolve(result); });
-		ws.on('unexpected-response', (_req, res) => { result.status = res.statusCode; resolve(result); });
+		// ws leaves a refused request open for this listener to close.
+		ws.on('unexpected-response', (_req, res) => { result.status = res.statusCode; ws.terminate(); resolve(result); });
 		ws.on('error', () => {
 			if (result.status === null && !result.opened) resolve(result);
 		});

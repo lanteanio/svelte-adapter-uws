@@ -68,14 +68,20 @@ describeUWS('createTestServer', () => {
 
 		const { WebSocket } = await import('ws');
 		const ws = new WebSocket(server.wsUrl);
+		// With an 'unexpected-response' listener, ws leaves the refused request
+		// open for the caller. Close it, or a later reset of that connection is
+		// emitted on a socket nothing listens to.
+		ws.on('error', () => {});
 
 		const closeCode = await new Promise((resolve) => {
 			ws.on('unexpected-response', (_req, res) => {
 				resolve(res.statusCode);
+				ws.terminate();
 			});
 			ws.on('open', () => resolve('open'));
 		});
 		expect(closeCode).toBe(401);
+		expect(ws.readyState).toBe(WebSocket.CLOSED);
 	});
 
 	it('passes cookies and url to upgrade handler', async () => {
