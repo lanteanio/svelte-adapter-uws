@@ -870,6 +870,38 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
+	it('loads a created Kit 2 handler once when another file updates before the creation reaches hotUpdate', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-created-handler-'));
+		mkdirSync(path.join(root, 'src'));
+		const file = path.join(root, 'src', 'hooks.ws.js');
+		const init = vi.fn();
+		const httpServer = createServer();
+		// Each import yields new hook functions, as after Vite invalidates the module.
+		const server = viteServer(httpServer, 2, async () => ({ subscribe: () => false, init: (...args) => init(...args) }), root);
+		server.moduleGraph.getModulesByFile = () => undefined;
+		const plugin = uws();
+		const update = async (type, target) => {
+			await plugin.hotUpdate.call({ environment: server.environments.client }, { type, file: target.split(path.sep).join('/'), server });
+			await server.config.server.hotUpdateEnvironments(server, async () => {});
+		};
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			writeFileSync(file, 'export const created = true;');
+			plugin.watchChange(file.split(path.sep).join('/'), { event: 'create' });
+			await vi.waitFor(() => expect(init).toHaveBeenCalledOnce());
+			await update('update', path.join(root, 'src', 'other.js'));
+			await update('create', file);
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
+			expect(init).toHaveBeenCalledOnce();
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		['Vite 5', server => { delete server.environments; server.hot = { send: vi.fn() }; }],
 		['Vite 6+ without HMR', server => { server.config.server.hmr = false; }]

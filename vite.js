@@ -1835,9 +1835,9 @@ export default function uws(options = {}) {
 				if (this.environment.name === 'client' && environmentStates.get(this.environment) === state) {
 					state.legacyUpdates++;
 					// The creation watchChange just discovered is already reloading.
-					const created = state.createdHandler && type === 'create' && samePath(file, state.path);
-					state.createdHandler = false;
-					if (state.path && !created) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
+					const ownFile = state.createdHandler && samePath(file, state.path);
+					if (ownFile) state.createdHandler = false;
+					if (state.path && !(ownFile && type === 'create')) state.legacyDirty ||= affectsLegacyHandler(viteServer, state, file);
 				}
 				return;
 			}
