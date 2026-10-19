@@ -9,9 +9,12 @@ import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnv
 const legacyImports = new Map();
 const lifecycleTimeout = 30000;
 const legacyImportMessage = 'Waiting for an earlier Vite 5 WebSocket handler import to finish. If it never settles, fix its module-scope initialization and restart the dev process.';
-// Subscription checks deny while a handler file exists but no handler instance
-// is live, and for everything a retired instance owned.
+// Subscription checks deny once a handler file is found or configured but no
+// handler instance is live, and for everything a retired instance owned.
 const retiredHandlers = Object.freeze({ subscribe: () => 'INTERNAL_ERROR' });
+// Vite keys module files with forward slashes on Windows. A handler import
+// that fails to resolve keeps the spelling it was given, so pass that form.
+const viteFile = file => process.platform === 'win32' ? file.replaceAll('\\', '/') : file;
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -888,7 +891,7 @@ export default function uws(options = {}) {
 		const changed = path.resolve(file);
 		if (path.resolve(state.path) === changed) return true;
 		const graph = server.environments?.ssr?.moduleGraph ?? server.moduleGraph;
-		const modules = graph?.getModulesByFile(state.path.replaceAll('\\', '/'));
+		const modules = graph?.getModulesByFile(viteFile(state.path));
 		const pending = [...(modules ?? [])];
 		const visited = new Set();
 		while (pending.length > 0) {
@@ -1134,13 +1137,13 @@ export default function uws(options = {}) {
 					await (runnerReloadReady ??= connectRunnerReload(server, state));
 					return server.environments.ssr.runner.import(id);
 				}
-				return server.ssrLoadModule(id);
+				return server.ssrLoadModule(viteFile(id));
 			};
 
 			if (!useEnvironmentRunner) connectLegacyReload(server, state);
 			state.path = resolvedHandlerPath = discoverHandler(root);
-			// Without a handler file subscription checks allow, as in production
-			// without hooks; with one they deny until its instance is live.
+			// Without a handler file or option subscription checks allow, as in
+			// production without hooks; with one they deny until its instance is live.
 			platformEpoch.handlers = state.path ? retiredHandlers : {};
 
 			if (state.path) reloadHandlers(state);
@@ -1315,7 +1318,7 @@ export default function uws(options = {}) {
 					return;
 				}
 
-				// If the handler file exists but failed to load, reject the
+				// If the handler failed to load, reject the
 				// upgrade so a broken auth handler does not silently degrade
 				// to open access.
 				if (handlerFailed) {
@@ -1704,16 +1707,30 @@ export default function uws(options = {}) {
 			}
 		},
 		watchChange(id, change) {
-			// Kit 3 discovers a new handler in its SSR hotUpdate. The legacy hooks
-			// only see updates, so a handler file created after startup is
-			// discovered here.
+			// Kit 3 sees created and deleted handler files in its SSR hotUpdate.
+			// The legacy hooks never discover a handler created after startup,
+			// and Vite 5 runs handleHotUpdate only for edits.
 			const state = lifecycleState;
-			if (change?.event !== 'create' || !state || state.closed || state.path || useEnvironmentRunner || !viteServer) return;
-			const discovered = discoverHandler(viteServer.config.root);
-			if (!discovered || path.resolve(id) !== path.resolve(discovered)) return;
-			state.path = resolvedHandlerPath = discovered;
-			if (!state.active) platformEpoch.handlers = retiredHandlers;
-			void reloadHandlers(state);
+			if (!state || state.closed || useEnvironmentRunner || !viteServer) return;
+			if (change?.event !== 'create' && change?.event !== 'delete') return;
+			if (!state.path) {
+				if (change.event !== 'create') return;
+				const discovered = discoverHandler(viteServer.config.root);
+				if (!discovered || path.resolve(id) !== path.resolve(discovered)) return;
+				state.path = resolvedHandlerPath = discovered;
+				if (!state.active) platformEpoch.handlers = retiredHandlers;
+				// Vite 6+ reports the creation to hotUpdate next, which reloads
+				// after the SSR graph update. Without HMR nothing follows.
+				if (!state.vite5 && viteServer.config.server?.hmr !== false) return;
+				void reloadHandlers(state);
+				return;
+			}
+			if (!state.vite5 || path.resolve(id) !== path.resolve(state.path)) return;
+			// Vite 5 invalidates the file's graph node after this hook and then
+			// broadcasts; reload on that broadcast. Without a node it sends
+			// nothing, and there is no stale module to import.
+			if (viteServer.moduleGraph?.getModulesByFile(viteFile(state.path))?.size) state.legacyDirty = true;
+			else void reloadHandlers(state);
 		},
 		handleHotUpdate({ file }) {
 			const state = lifecycleState;

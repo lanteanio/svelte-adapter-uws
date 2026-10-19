@@ -12,7 +12,7 @@ const scenarioIndex = process.argv.indexOf('--scenario');
 const scenario = scenarioIndex < 0 ? null : process.argv[scenarioIndex + 1];
 const kit3 = existsSync(resolve(fixture, 'src/socket.js'));
 const vite5 = JSON.parse(readFileSync(resolve(fixture, 'node_modules/vite/package.json'))).version.startsWith('5.');
-const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'platform-subscription-owner', 'platform-reset-guard', 'platform-reset-generation', 'platform-reset-global', 'platform-cleanup', 'platform-persistent', 'platform-persistent-shutdown', 'platform-persistent-current', 'platform-persistent-fixed', 'platform-persistent-nonextensible', 'platform-constrained-delete', 'platform-constrained-readonly', 'platform-constrained-cleanup', 'platform-constrained-setter', 'platform-constrained-fixed-setter', 'platform-constrained-add-setter', 'platform-constrained-remove-setter', 'platform-constrained-sealed-noop', 'platform-proto-resource', 'platform-foreign', 'platform-foreign-active', 'platform-init-throw', 'platform-throw', 'platform-timeout', 'platform-init-timeout', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : ['handler-created'])];
+const scenarios = ['finite-import', 'finite-import-rejection', ...(!vite5 ? ['unresolved-import'] : []), ...(!vite5 && !kit3 ? ['unresolved-dependency'] : []), 'direct-import', 'direct-import-rejection', 'dependency-import', 'dependency-import-rejection', 'pending-recreate', 'pending-restart', ...(!kit3 ? ['pending-handler-switch'] : []), 'async-restart', 'platform-subscription-owner', 'platform-reset-guard', 'platform-reset-generation', 'platform-reset-global', 'platform-cleanup', 'platform-persistent', 'platform-persistent-shutdown', 'platform-persistent-current', 'platform-persistent-fixed', 'platform-persistent-nonextensible', 'platform-constrained-delete', 'platform-constrained-readonly', 'platform-constrained-cleanup', 'platform-constrained-setter', 'platform-constrained-fixed-setter', 'platform-constrained-add-setter', 'platform-constrained-remove-setter', 'platform-constrained-sealed-noop', 'platform-proto-resource', 'platform-foreign', 'platform-foreign-active', 'platform-init-throw', 'platform-throw', 'platform-timeout', 'platform-init-timeout', 'hung-init-save', 'hung-init-close', 'hung-init-restart', 'hung-shutdown-save', 'hung-shutdown-close', 'hung-shutdown-restart', 'handler-recreated', 'configured-handler-created', ...(kit3 ? ['dependency-syntax', 'dependency-created', 'dependency-transitive-created'] : ['handler-created'])];
 if (!scenario) {
 	for (const name of scenarios) {
 		const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--fixture', fixture, '--scenario', name], { stdio: 'inherit', timeout: name === 'platform-reset-generation' ? 100000 : 75000 });
@@ -803,6 +803,52 @@ export function authenticate() { return Response.json(snapshot()); }
 			await save(hooks, handler('first'), false);
 			await eventuallyHealthy('first');
 			assert.equal(probe.events.filter(event => event.name === 'init:end').length, 1, 'A created handler must initialize once');
+			console.log('Lifecycle recovery passed on Vite ' + version + ': ' + scenario);
+			return;
+		}
+		if (scenario === 'handler-recreated') {
+			writeFileSync(hooks, handler('first'));
+			await start();
+			const first = await eventuallyHealthy('first');
+			const synthetic = { getUserData: () => ({}) };
+			unlinkSync(hooks);
+			await until(() => probe.events.some(event => event.name === 'shutdown:end' && event.owner === first.owner), 'Deleted handler shutdown');
+			assert.equal(await globalThis.__uws_dev_platform.checkSubscribe(synthetic, 'deleted'), 'INTERNAL_ERROR', 'A deleted handler must fail closed');
+			await assert.rejects(connect(), /returned 500/);
+			await save(hooks, handler('second'), false);
+			const second = await eventuallyHealthy('second');
+			assert.notEqual(second.owner, first.owner);
+			assert.equal(probe.events.filter(event => event.name === 'init:end' && event.value === 'second').length, 1, 'A recreated handler must initialize once');
+			assert.deepEqual([...probe.active], [second.owner]);
+			console.log('Lifecycle recovery passed on Vite ' + version + ': ' + scenario);
+			return;
+		}
+		if (scenario === 'configured-handler-created') {
+			// The Kit 3 fixture configures its handler path; Kit 2 ones discover theirs.
+			let file = hooks;
+			if (kit3) unlinkSync(hooks);
+			else {
+				assert.ok(originalConfig.toString().includes('uws()'));
+				writeFileSync(config, originalConfig.toString().replace('uws()', "uws({ handler: './src/lifecycle-proof-alternate.js' })"));
+				file = alternate;
+			}
+			await start();
+			const synthetic = { getUserData: () => ({}) };
+			assert.equal(await globalThis.__uws_dev_platform.checkSubscribe(synthetic, 'missing'), 'INTERNAL_ERROR', 'A missing configured handler must fail closed');
+			await save(file, handler('first'), false);
+			await eventuallyHealthy('first');
+			await save(file, handler('second'));
+			await eventuallyHealthy('second');
+			unlinkSync(file);
+			await until(() => saw('shutdown:end', 'second') && probe.active.size === 0, 'Deleted handler shutdown');
+			assert.equal(await globalThis.__uws_dev_platform.checkSubscribe(synthetic, 'deleted'), 'INTERNAL_ERROR', 'A deleted handler must fail closed');
+			await assert.rejects(connect(), /returned 500/);
+			await save(file, handler('third'), false);
+			const third = await eventuallyHealthy('third');
+			for (const value of ['first', 'second', 'third']) {
+				assert.equal(probe.events.filter(event => event.name === 'init:end' && event.value === value).length, 1, value + ' must initialize once');
+			}
+			assert.deepEqual([...probe.active], [third.owner]);
 			console.log('Lifecycle recovery passed on Vite ' + version + ': ' + scenario);
 			return;
 		}

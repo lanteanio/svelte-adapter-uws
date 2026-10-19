@@ -28,6 +28,9 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 	};
 }
 
+// Vite's spelling of a module file: forward slashes on Windows.
+const viteId = file => process.platform === 'win32' ? file.replaceAll('\\', '/') : file;
+
 async function hotUpdate(plugin, server) {
 	await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'update', file: server.ssrLoadModule.mock.calls[0][0], server });
 	await server.config.server.hotUpdateEnvironments(server, async () => {});
@@ -77,6 +80,8 @@ describe('Vite server module loading', () => {
 		const otherLoader = kitVersion === 3 ? server.ssrLoadModule : server.environments.ssr.runner.import;
 		const handler = discovery === 'explicit' ? './custom-handler.ts' : undefined;
 		const handlerPath = path.resolve(root, handler || 'src/hooks.ws.js');
+		// The Kit 3 runner takes the path as resolved; ssrLoadModule gets Vite's spelling.
+		const loadedPath = kitVersion === 3 ? handlerPath : viteId(handlerPath);
 		const plugin = uws({ handler, allowedOrigins: '*' });
 		const init = vi.fn();
 
@@ -86,7 +91,7 @@ describe('Vite server module loading', () => {
 			expect(otherLoader).not.toHaveBeenCalled();
 
 			const url = await listen(httpServer);
-			await vi.waitFor(() => expect(expectedLoader).toHaveBeenCalledWith(handlerPath));
+			await vi.waitFor(() => expect(expectedLoader).toHaveBeenCalledWith(loadedPath));
 			const upgrade = once(httpServer, 'upgrade');
 			const client = new WebSocket(url);
 			clients.push(client);
@@ -107,7 +112,7 @@ describe('Vite server module loading', () => {
 			hotUpdate(plugin, server);
 			expect((await restarted)[0]).toBe(1012);
 			expect(expectedLoader).toHaveBeenCalledTimes(2);
-			expect(expectedLoader).toHaveBeenLastCalledWith(handlerPath);
+			expect(expectedLoader).toHaveBeenLastCalledWith(loadedPath);
 			expect(otherLoader).not.toHaveBeenCalled();
 
 			const nextClient = new WebSocket(url);
@@ -778,17 +783,125 @@ describe('development handler lifecycle', () => {
 			writeFileSync(file, 'export const created = true;');
 			plugin.watchChange(path.join(root, 'src', 'other.js'), { event: 'create' });
 			plugin.watchChange(file, { event: 'update' });
-			expect(server.ssrLoadModule).not.toHaveBeenCalled();
 			// Vite reports watched ids with forward slashes.
-			plugin.watchChange(file.split(path.sep).join('/'), { event: 'create' });
+			const id = file.split(path.sep).join('/');
+			plugin.watchChange(id, { event: 'create' });
 			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			// Vite 6+ follows with hotUpdate, which starts the only reload.
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(server.ssrLoadModule).not.toHaveBeenCalled();
+			await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'create', file: id, server });
+			await server.config.server.hotUpdateEnvironments(server, async () => {});
 			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
-			expect(server.ssrLoadModule).toHaveBeenCalledWith(file);
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
 			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
 		} finally {
 			await closeLifecycle(plugin, server);
 			await close(httpServer, []);
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		['Vite 5', server => { delete server.environments; server.hot = { send: vi.fn() }; }],
+		['Vite 6+ without HMR', server => { server.config.server.hmr = false; }]
+	])('loads a Kit 2 handler file created after startup on %s', async (_name, configure) => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-created-handler-'));
+		mkdirSync(path.join(root, 'src'));
+		const file = path.join(root, 'src', 'hooks.ws.js');
+		const handler = { subscribe: () => false, init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => handler, root);
+		configure(server);
+		const plugin = uws();
+		const synthetic = { getUserData: () => ({}) };
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			writeFileSync(file, 'export const created = true;');
+			plugin.watchChange(file.split(path.sep).join('/'), { event: 'create' });
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([true, false])('loads a configured Vite 5 handler file created after startup (graph node: %s)', async (hasNode) => {
+		const handler = { subscribe: () => false, init: vi.fn() };
+		const missing = new Error('Failed to load url ./handler.js');
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => { throw missing; });
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		// Vite 5 keeps the node its failed import created; deleting the file keeps it too.
+		server.moduleGraph.getModulesByFile = vi.fn(() => hasNode ? new Set([{}]) : undefined);
+		const plugin = uws({ handler: './handler.js' });
+		const file = path.resolve(server.config.root, 'handler.js');
+		const synthetic = { getUserData: () => ({}) };
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('Failed to load'), missing));
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
+			// The failed import leaves its graph node under the spelling it was given.
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
+			server.ssrLoadModule.mockResolvedValue(handler);
+			plugin.watchChange(file.split(path.sep).join('/'), { event: 'create' });
+			if (hasNode) {
+				// The reload waits for the broadcast Vite sends after invalidating the node.
+				await new Promise(resolve => setTimeout(resolve, 20));
+				expect(server.ssrLoadModule).toHaveBeenCalledOnce();
+				server.hot.send({ type: 'full-reload' });
+			}
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.moduleGraph.getModulesByFile).toHaveBeenCalledWith(viteId(file));
+			expect(server.ssrLoadModule).toHaveBeenCalledTimes(2);
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
+		} finally {
+			errorLog.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
+	it('fails closed after a Vite 5 handler file is deleted and loads it again when recreated', async () => {
+		const first = { subscribe: () => false, init: vi.fn(), shutdown: vi.fn() };
+		const second = { subscribe: () => {}, init: vi.fn() };
+		const missing = new Error('Failed to load url ./handler.js');
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		server.moduleGraph.getModulesByFile = vi.fn(() => new Set([{}]));
+		const plugin = uws({ handler: './handler.js' });
+		const id = path.resolve(server.config.root, 'handler.js').split(path.sep).join('/');
+		const synthetic = { getUserData: () => ({}) };
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(first.init).toHaveBeenCalledOnce());
+			expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN');
+			server.ssrLoadModule.mockRejectedValue(missing);
+			plugin.watchChange(id, { event: 'delete' });
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR'));
+			server.ssrLoadModule.mockResolvedValue(second);
+			plugin.watchChange(id, { event: 'create' });
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(second.init).toHaveBeenCalledOnce());
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBeNull());
+			expect(server.ssrLoadModule).toHaveBeenCalledTimes(3);
+		} finally {
+			errorLog.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
 		}
 	});
 
