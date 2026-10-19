@@ -26,21 +26,34 @@ function diskSpelling(file) {
 	return file;
 }
 
-function samePath(a, b) {
-	const left = path.resolve(a);
-	const right = path.resolve(b);
-	if (left === right) return true;
-	if (process.platform !== 'win32' || path.basename(left).toLowerCase() !== path.basename(right).toLowerCase()) return false;
-	return left.toLowerCase() === right.toLowerCase() || diskSpelling(left).toLowerCase() === diskSpelling(right).toLowerCase();
+// A test for paths naming `file`. The disk spellings are read only when the
+// base names already match, and the one of `file` only once.
+function pathMatcher(file) {
+	const target = path.resolve(file);
+	const base = path.basename(target).toLowerCase();
+	let disk;
+	return candidate => {
+		const other = path.resolve(candidate);
+		if (other === target) return true;
+		if (process.platform !== 'win32' || path.basename(other).toLowerCase() !== base) return false;
+		if (other.toLowerCase() === target.toLowerCase()) return true;
+		disk ??= diskSpelling(target).toLowerCase();
+		return diskSpelling(other).toLowerCase() === disk;
+	};
 }
+
+const samePath = (a, b) => pathMatcher(b)(a);
 
 // The path the handler is imported with. On Windows it is the root as SvelteKit
 // spells it plus the disk's spelling below that root, so the handler's graph
 // node is the file the watcher reports and its imports resolve like the routes'.
+// A handler outside the root keeps its configured path.
 function handlerImport(state) {
 	if (process.platform !== 'win32' || !state.discoveryRoot) return state.path;
-	const below = path.relative(diskSpelling(state.discoveryRoot), diskSpelling(state.path));
-	return below && !path.isAbsolute(below) ? path.join(state.discoveryRoot, below) : state.path;
+	state.discoveryDisk ??= diskSpelling(state.discoveryRoot);
+	const below = path.relative(state.discoveryDisk, diskSpelling(state.path));
+	if (!below || path.isAbsolute(below) || below === '..' || below.startsWith('..' + path.sep)) return state.path;
+	return path.join(state.discoveryRoot, below);
 }
 
 // The handler's graph nodes under every spelling it may be keyed by: the
@@ -924,7 +937,8 @@ export default function uws(options = {}) {
 	}
 
 	function affectsLegacyHandler(server, state, file) {
-		if (samePath(state.path, file)) return true;
+		const changed = pathMatcher(file);
+		if (changed(state.path)) return true;
 		const graph = server.environments?.ssr?.moduleGraph ?? server.moduleGraph;
 		const pending = [...handlerNodes(graph, state)];
 		const visited = new Set();
@@ -932,7 +946,7 @@ export default function uws(options = {}) {
 			const mod = pending.pop();
 			if (visited.has(mod)) continue;
 			visited.add(mod);
-			if (mod.file && samePath(mod.file, file)) return true;
+			if (mod.file && changed(mod.file)) return true;
 			for (const dependency of mod.ssrImportedModules ?? mod.importedModules ?? []) pending.push(dependency);
 		}
 		return false;
@@ -1163,9 +1177,9 @@ export default function uws(options = {}) {
 			server.httpServer.once('close', () => { void stopLifecycle(state); });
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
-			// Discover the handler under the root spelling SvelteKit uses for routes;
-			// Vite 8 resolves its own root to the disk's spelling.
-			const root = state.discoveryRoot = configRoot ?? server.config.root;
+			// On Windows discover the handler under the root spelling SvelteKit uses
+			// for routes; Vite 8 can resolve its own root to the disk's spelling.
+			const root = state.discoveryRoot = (process.platform === 'win32' && configRoot) || server.config.root;
 
 			// Kit 3 serves routes through the runnable SSR environment. Its legacy
 			// ssrLoadModule graph is separate, so using it would duplicate shared state.

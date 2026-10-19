@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { createServer, request } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, rmdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import WebSocket from 'ws';
 import uws from '../vite.js';
@@ -996,7 +996,88 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
-	it('discovers the development handler under the root SvelteKit uses', async () => {
+	it.runIf(process.platform === 'win32')('matches a Windows handler under a root reached through a junction', async () => {
+		const base = mkdtempSync(path.join(tmpdir(), 'uws-junction-'));
+		const real = path.join(base, 'real', 'deep', 'app');
+		mkdirSync(real, { recursive: true });
+		const link = path.join(base, 'link');
+		symlinkSync(real, link, 'junction');
+		const file = path.join(real, 'handler.js');
+		const dependency = path.join(real, 'shared.js');
+		writeFileSync(file, 'export {};');
+		writeFileSync(dependency, 'export {};');
+		const loaded = Array.from({ length: 4 }, () => ({ init: vi.fn(), shutdown: vi.fn() }));
+		const httpServer = createServer();
+		// SvelteKit keeps the junction; Vite resolved its root and keys the handler under the target.
+		const server = viteServer(httpServer, 2, async () => loaded[0], real);
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		server.moduleGraph.getModulesByFile = vi.fn(key => key === viteId(file) ? new Set([{ file: viteId(file), ssrImportedModules: [{ file: viteId(dependency) }] }]) : undefined);
+		const plugin = uws({ handler: './handler.js' });
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			plugin.config({ root: link });
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(loaded[0].init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledWith(viteId(path.join(link, 'handler.js')));
+			// The watcher reports the target's spelling for the handler and its imports.
+			for (const [index, changed] of [[1, file], [2, dependency]]) {
+				server.ssrLoadModule.mockResolvedValue(loaded[index]);
+				await plugin.handleHotUpdate({ file: viteId(changed), server });
+				server.hot.send({ type: 'full-reload' });
+				await vi.waitFor(() => expect(loaded[index].init).toHaveBeenCalledOnce());
+			}
+			// Keyed under the junction instead, only the disk spellings match the watcher's path.
+			const linked = name => viteId(path.join(link, name));
+			server.moduleGraph.getModulesByFile = vi.fn(key => key === linked('handler.js') ? new Set([{ file: linked('handler.js'), ssrImportedModules: [{ file: linked('shared.js') }] }]) : undefined);
+			server.ssrLoadModule.mockResolvedValue(loaded[3]);
+			await plugin.handleHotUpdate({ file: viteId(dependency), server });
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(loaded[3].init).toHaveBeenCalledOnce());
+			// A deleted handler still matches through the spelling of its directory.
+			rmSync(file);
+			server.ssrLoadModule.mockRejectedValue(new Error('Failed to load url ./handler.js'));
+			await plugin.handleHotUpdate({ file: viteId(file), server });
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(loaded[3].shutdown).toHaveBeenCalledOnce());
+		} finally {
+			errorLog.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmdirSync(link);
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it.runIf(process.platform === 'win32')('imports a Windows handler outside the root by its configured path', async () => {
+		const base = mkdtempSync(path.join(tmpdir(), 'uws-outside-'));
+		const real = path.join(base, 'real', 'deep', 'app');
+		mkdirSync(real, { recursive: true });
+		const link = path.join(base, 'link');
+		symlinkSync(real, link, 'junction');
+		const outside = path.join(base, 'real', 'shared', 'hooks.ws.js');
+		mkdirSync(path.dirname(outside), { recursive: true });
+		writeFileSync(outside, 'export {};');
+		const handler = { init: vi.fn() };
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => handler, real);
+		const plugin = uws({ handler: outside });
+		try {
+			plugin.config({ root: link });
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(outside));
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmdirSync(link);
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it.runIf(process.platform === 'win32')('discovers the development handler under the root SvelteKit uses', async () => {
 		const root = mkdtempSync(path.join(tmpdir(), 'uws-config-root-'));
 		mkdirSync(path.join(root, 'src'));
 		const file = path.join(root, 'src', 'hooks.ws.js');
