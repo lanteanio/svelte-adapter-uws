@@ -1050,6 +1050,32 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
+	it.runIf(process.platform !== 'win32')('discovers a POSIX development handler under the resolved root', async () => {
+		const base = mkdtempSync(path.join(tmpdir(), 'uws-posix-root-'));
+		const real = path.join(base, 'real');
+		mkdirSync(path.join(real, 'src'), { recursive: true });
+		const link = path.join(base, 'link');
+		symlinkSync(real, link);
+		const file = path.join(real, 'src', 'hooks.ws.js');
+		writeFileSync(file, 'export {};');
+		const handler = { init: vi.fn() };
+		const httpServer = createServer();
+		// Vite 8 resolves a symlinked root and its watcher reports the real paths.
+		const server = viteServer(httpServer, 3, async () => handler, real);
+		const plugin = uws();
+		try {
+			plugin.config({ root: link });
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(server.environments.ssr.runner.import).toHaveBeenCalledWith(file);
+		} finally {
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
 	it.runIf(process.platform === 'win32')('imports a Windows handler outside the root by its configured path', async () => {
 		const base = mkdtempSync(path.join(tmpdir(), 'uws-outside-'));
 		const real = path.join(base, 'real', 'deep', 'app');

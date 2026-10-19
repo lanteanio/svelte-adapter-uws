@@ -44,6 +44,14 @@ function pathMatcher(file) {
 
 const samePath = (a, b) => pathMatcher(b)(a);
 
+// `file` spelled as `root` plus the disk's spelling below `rootDisk`, or null
+// for a file outside that root.
+function underRoot(root, rootDisk, file) {
+	const below = path.relative(rootDisk, diskSpelling(file));
+	if (!below || path.isAbsolute(below) || below === '..' || below.startsWith('..' + path.sep)) return null;
+	return path.join(root, below);
+}
+
 // The path the handler is imported with. On Windows it is the root as SvelteKit
 // spells it plus the disk's spelling below that root, so the handler's graph
 // node is the file the watcher reports and its imports resolve like the routes'.
@@ -51,15 +59,18 @@ const samePath = (a, b) => pathMatcher(b)(a);
 function handlerImport(state) {
 	if (process.platform !== 'win32' || !state.discoveryRoot) return state.path;
 	state.discoveryDisk ??= diskSpelling(state.discoveryRoot);
-	const below = path.relative(state.discoveryDisk, diskSpelling(state.path));
-	if (!below || path.isAbsolute(below) || below === '..' || below.startsWith('..' + path.sep)) return state.path;
-	return path.join(state.discoveryRoot, below);
+	return underRoot(state.discoveryRoot, state.discoveryDisk, state.path) ?? state.path;
 }
 
 // The handler's graph nodes under every spelling it may be keyed by: the
-// configured one, the disk's and the one it is imported with.
+// configured one, the disk's, the one it is imported with, and Vite's own root
+// spelling, which keeps 8.3 short names until Vite's startup path probe ends.
 function handlerNodes(graph, state) {
-	const keys = process.platform === 'win32' ? [state.path, diskSpelling(state.path), handlerImport(state)] : [state.path];
+	const keys = [state.path];
+	if (process.platform === 'win32') {
+		state.rootDisk ??= diskSpelling(state.root);
+		keys.push(diskSpelling(state.path), handlerImport(state), underRoot(state.root, state.rootDisk, state.path) ?? state.path);
+	}
 	const nodes = new Set();
 	for (const key of new Set(keys.map(viteFile))) for (const node of graph?.getModulesByFile(key) ?? []) nodes.add(node);
 	return nodes;
