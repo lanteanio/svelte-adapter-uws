@@ -25,7 +25,7 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 		},
 		ssrLoadModule: vi.fn(loadModule),
 		moduleGraph: { invalidateAll: vi.fn() },
-		environments: { ssr: { runner: { import: vi.fn(loadModule) } } }
+		environments: { client: { name: 'client' }, ssr: { name: 'ssr', runner: { import: vi.fn(loadModule) } } }
 	};
 }
 
@@ -33,7 +33,7 @@ function viteServer(httpServer, kitVersion, loadModule, root = process.cwd()) {
 const viteId = file => process.platform === 'win32' ? file.replaceAll('\\', '/') : file;
 
 async function hotUpdate(plugin, server) {
-	await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'update', file: server.ssrLoadModule.mock.calls[0][0], server });
+	await plugin.hotUpdate.call({ environment: server.environments.client }, { type: 'update', file: server.ssrLoadModule.mock.calls[0][0], server });
 	await server.config.server.hotUpdateEnvironments(server, async () => {});
 }
 
@@ -757,6 +757,69 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
+	it('keeps reloading the handler after a reused plugin restarts while the replaced server still reports file events', async () => {
+		const plugin = uws({ handler: './handler.js' });
+		const handlers = [{ init: vi.fn() }, { init: vi.fn() }, { init: vi.fn() }];
+		const firstHttp = createServer();
+		const first = viteServer(firstHttp, 2, async () => handlers[0]);
+		const secondHttp = createServer();
+		const second = viteServer(secondHttp, 2, async () => handlers[1]);
+		try {
+			await plugin.configureServer(first);
+			await listen(firstHttp);
+			await vi.waitFor(() => expect(handlers[0].init).toHaveBeenCalledOnce());
+			// Vite creates the replacement server before it closes the old one,
+			// whose watcher still reports a file saved in between.
+			await plugin.configureServer(second);
+			await listen(secondHttp);
+			await vi.waitFor(() => expect(handlers[1].init).toHaveBeenCalledOnce());
+			await plugin.hotUpdate.call({ environment: first.environments.client }, { type: 'update', file: first.ssrLoadModule.mock.calls[0][0], server: first });
+			await closeLifecycle(plugin, first);
+			await close(firstHttp, []);
+			second.ssrLoadModule.mockResolvedValue(handlers[2]);
+			await hotUpdate(plugin, second);
+			await vi.waitFor(() => expect(handlers[2].init).toHaveBeenCalledOnce());
+		} finally {
+			await closeLifecycle(plugin, second);
+			await close(firstHttp, []);
+			await close(secondHttp, []);
+		}
+	});
+
+	it('loads a Kit 3 handler created during a reused plugin restart when only the replaced server reports it', async () => {
+		const root = mkdtempSync(path.join(tmpdir(), 'uws-restart-created-'));
+		mkdirSync(path.join(root, 'src'));
+		const file = path.join(root, 'src', 'hooks.ws.js');
+		const handler = { init: vi.fn() };
+		const plugin = uws();
+		const firstHttp = createServer();
+		const first = viteServer(firstHttp, 3, async () => handler, root);
+		const secondHttp = createServer();
+		const second = viteServer(secondHttp, 3, async () => handler, root);
+		for (const server of [first, second]) {
+			server.environments.ssr.hot = { send: vi.fn() };
+			server.environments.ssr.runner.import.mockImplementation(async id => id.startsWith('\0') ? { onReload: () => () => {} } : handler);
+		}
+		try {
+			await plugin.configureServer(first);
+			await listen(firstHttp);
+			await plugin.configureServer(second);
+			await listen(secondHttp);
+			// The new watcher's initial scan can absorb a file created in between.
+			writeFileSync(file, 'export const created = true;');
+			await plugin.hotUpdate.call({ environment: first.environments.ssr }, { type: 'create', file: viteId(file), server: first });
+			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
+			expect(second.environments.ssr.runner.import).toHaveBeenCalledWith(viteId(file));
+			expect(first.environments.ssr.runner.import).not.toHaveBeenCalledWith(viteId(file));
+		} finally {
+			await closeLifecycle(plugin, second);
+			await closeLifecycle(plugin, first);
+			await close(firstHttp, []);
+			await close(secondHttp, []);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it('allows development subscription checks when the dev WebSocket server is disabled', async () => {
 		const server = viteServer(createServer(), 2, async () => ({ subscribe: () => false }));
 		server.httpServer = null;
@@ -789,14 +852,14 @@ describe('development handler lifecycle', () => {
 			expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR');
 			await vi.waitFor(() => expect(handler.init).toHaveBeenCalledOnce());
 			// Vite 6+ then reports the same creation to hotUpdate; it must not load again.
-			await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type: 'create', file: id, server });
+			await plugin.hotUpdate.call({ environment: server.environments.client }, { type: 'create', file: id, server });
 			await server.config.server.hotUpdateEnvironments(server, async () => {});
 			await new Promise(resolve => setTimeout(resolve, 20));
 			expect(server.ssrLoadModule).toHaveBeenCalledExactlyOnceWith(viteId(file));
 			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('FORBIDDEN'));
 			// Later edits, deletions and re-creations of the handler still reload.
 			for (const [type, loads] of [['update', 2], ['delete', 3], ['create', 4]]) {
-				await plugin.hotUpdate.call({ environment: { name: 'client' } }, { type, file: id, server });
+				await plugin.hotUpdate.call({ environment: server.environments.client }, { type, file: id, server });
 				await server.config.server.hotUpdateEnvironments(server, async () => {});
 				await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledTimes(loads));
 			}

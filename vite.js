@@ -1830,7 +1830,9 @@ export default function uws(options = {}) {
 			const state = lifecycleState;
 			if (!state || state.closed) return;
 			if (!useEnvironmentRunner) {
-				if (this.environment.name === 'client') {
+				// A server being replaced reports file events until Vite closes it,
+				// but its updates never reach this state's update coordinator.
+				if (this.environment.name === 'client' && environmentStates.get(this.environment) === state) {
 					state.legacyUpdates++;
 					// The creation watchChange just discovered is already reloading.
 					const created = state.createdHandler && type === 'create' && samePath(file, state.path);
