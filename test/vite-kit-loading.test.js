@@ -1612,4 +1612,32 @@ describe('development WebSocket upgrades', () => {
 			await close(httpServer, []);
 		}
 	});
+
+	it('leaves an upgrade target that does not parse to other listeners', async () => {
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => ({}));
+		const plugin = uws({ handler: './handler.js', allowedOrigins: '*' });
+		const trap = trapUnhandled();
+		let serverSocket;
+		let client;
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			const upgraded = once(httpServer, 'upgrade');
+			client = await rawClient(httpServer);
+			client.write(upgradeRequest('//'));
+			const [req, socket] = await upgraded;
+			serverSocket = socket;
+			expect(req.url).toBe('//');
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(trap.seen).toEqual([]);
+			expect(serverSocket.destroyed).toBe(false);
+		} finally {
+			trap.release();
+			serverSocket?.destroy();
+			client?.destroy();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
 });

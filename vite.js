@@ -1384,7 +1384,14 @@ export default function uws(options = {}) {
 			});
 
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
-				const { pathname } = new URL(req.url || '', 'http://localhost');
+				// A target such as `//` does not parse, and a throw here would
+				// reject this listener's promise with nothing to catch it.
+				let pathname;
+				try {
+					({ pathname } = new URL(req.url || '', 'http://localhost'));
+				} catch {
+					return;
+				}
 				if (pathname !== wsPath) return;
 
 				// Node removes its own socket error listener when it hands over an

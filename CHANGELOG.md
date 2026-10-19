@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allow promises in the TypeScript declarations for subscription hooks and document asynchronous authorization.
 - Deny development `platform.subscribe` and `platform.checkSubscribe` calls for sockets no handler owns when they go through a retired handler's platform, connections or authentication requests, or once a handler file has been found or configured but no handler instance is live, including before the first handler loads and after the file is deleted. Explain locked platform property errors on the next reload.
 - Keep the development server running when a client resets its connection during a WebSocket upgrade, whether the upgrade is waiting for the handler or its `upgrade` hook or has just been refused.
+- Ignore a development WebSocket upgrade request whose target does not parse as a URL, such as `//`, instead of stopping the dev server.
 
 ## [0.5.10] - 2026-10-09
 
