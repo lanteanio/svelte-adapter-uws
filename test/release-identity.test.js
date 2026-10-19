@@ -18,7 +18,8 @@ const bases = [];
 const links = [];
 
 // Variables a git hook or wrapper exports would point these commands at another
-// repository or inject configuration into them.
+// repository or inject configuration into them. The worker gets them back afterwards.
+const inheritedGit = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('GIT_')));
 for (const key of Object.keys(process.env)) {
 	if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_NOSYSTEM)$/.test(key)) delete process.env[key];
 }
@@ -27,7 +28,11 @@ const gitHome = mkdtempSync(join(tmpdir(), 'uws-release-git-'));
 writeFileSync(join(gitHome, 'config'), '');
 process.env.GIT_CONFIG_GLOBAL = join(gitHome, 'config');
 process.env.GIT_CONFIG_NOSYSTEM = '1';
-afterAll(() => rmSync(gitHome, { recursive: true, force: true }));
+afterAll(() => {
+	rmSync(gitHome, { recursive: true, force: true });
+	for (const key of Object.keys(process.env)) if (key.startsWith('GIT_')) delete process.env[key];
+	Object.assign(process.env, inheritedGit);
+});
 
 afterEach(() => {
 	// Remove dependency links first so cleanup never walks into the real tree;
