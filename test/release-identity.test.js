@@ -20,7 +20,7 @@ const links = [];
 // Variables a git hook or wrapper exports would point these commands at another
 // repository or inject configuration into them.
 for (const key of Object.keys(process.env)) {
-	if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(key)) delete process.env[key];
+	if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_NOSYSTEM)$/.test(key)) delete process.env[key];
 }
 
 afterEach(() => {
@@ -327,6 +327,9 @@ function releaseClone() {
 function runBlock(shell, clone, { artifact = clone.artifact, prelude = '', temp = clone.base } = {}) {
 	// The annotation file goes to the clone, not the shared temporary directory.
 	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', TEMP: temp, TMP: temp, TMPDIR: temp };
+	// Windows PowerShell builds its own module path; one inherited from pwsh 7
+	// (the shell of windows-latest steps) would load pwsh 7 modules into it.
+	if (shell === 'powershell') for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
 	const options = { cwd: clone.work, encoding: 'utf8', windowsHide: true, env };
 	if (shell !== 'sh') {
 		const script = `${prelude}$source = '${clone.source}'\n$tarball = '${artifact}'\n` + docBlock('powershell');
@@ -353,7 +356,7 @@ describe('documented release tag commands', () => {
 		for (const language of ['powershell', 'sh']) expect(docBlock(language)).not.toMatch(/\$[A-Za-z_]\w*:/);
 	});
 
-	it('runs the PowerShell block in every installed PowerShell', () => {
+	it('finds every PowerShell the tag block runs in', () => {
 		expect(powershells.length, 'PowerShell is required for the documented tag block tests').toBeGreaterThan(0);
 		// The doc targets Windows PowerShell 5.1, which every Windows host has.
 		if (process.platform === 'win32') expect(powershells).toContain('powershell');
