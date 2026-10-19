@@ -87,8 +87,8 @@ and a missing archive, then pushes exactly `$source` to `main` and no tags.
 Write the annotation outside the repository as UTF-8 without a byte order
 mark; in Windows PowerShell 5.1, `Out-File` and `>` write UTF-16 and
 `Get-FileHash` returns uppercase hexadecimal, so use the commands below.
-Windows PowerShell continues after a failed native command, so each command
-checks its exit code. The block runs as one script block whose trap stops it
+Windows PowerShell continues after a failed native command, so the block
+checks the result of every native command. It runs as one script block whose trap stops it
 at the first error, however it is pasted. Some hosts turn native stderr into
 errors, so it does not set `$ErrorActionPreference`. After verifying account
 protection and complete preflight:
@@ -124,7 +124,7 @@ annotation=$(mktemp)
 sha256=$(sha256sum < "$tarball")
 sha256=${sha256%% *}
 printf 'Release 0.5.11\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
-git push --no-follow-tags origin "$source:refs/heads/main"
+git push --no-follow-tags origin "${source}:refs/heads/main"
 git fetch origin main
 git tag -a "$tag" "$source" -F "$annotation"
 node scripts/prepare-release.js --verify-tag "$tag" --artifact "$tarball"
@@ -137,10 +137,11 @@ a tarball whose package name, version and `gitHead` match the tagged commit,
 and a tagged commit contained in `refs/remotes/origin/main`. It also runs the
 package and workflow checks that CI applies to the tagged commit. Only CI
 repacks that commit and compares the bytes, which is why step 4 reproduces the
-archive before tagging. If it fails,
-delete the local tag with `git tag -d $tag`, correct the cause and run the
-block again. Only after it prints `local tag ... binds ...`, push the tag as a
-separate command (`git push origin svelte-adapter-uws@0.5.11` in a POSIX shell):
+archive before tagging. If it fails, delete the local tag with
+`git tag -d $tag` (`git tag -d svelte-adapter-uws@0.5.11` in a POSIX shell),
+correct the cause and run the block again. Only after it prints
+`local tag ... binds ...`, push the tag as a separate command
+(`git push origin svelte-adapter-uws@0.5.11` in a POSIX shell):
 
 ```powershell
 git push origin $tag

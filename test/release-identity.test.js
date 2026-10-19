@@ -17,8 +17,11 @@ const releaseFiles = ['package.json', '.github/workflows/release.yml', '.github/
 const bases = [];
 const links = [];
 
-// Variables a git hook or wrapper exports would point these commands at another repository.
-for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE']) delete process.env[key];
+// Variables a git hook or wrapper exports would point these commands at another
+// repository or inject configuration into them.
+for (const key of Object.keys(process.env)) {
+	if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(key)) delete process.env[key];
+}
 
 afterEach(() => {
 	// Remove dependency links first so cleanup never walks into the real tree;
@@ -175,6 +178,8 @@ describe('release identity against real tags', () => {
 		// parseInt would read a signed size; tar size fields are octal digits only.
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '+' + manifest.length.toString(8) + '\0' }])).toBeUndefined();
 		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '99999999999\0' }])).toBeUndefined();
+		// A decimal size that octal parsing would read as a shorter, plausible one.
+		expect(read([{ name: 'package/package.json', body: manifest, sizeField: '0000000' + manifest.length.toString(8) + '8\0' }])).toBeUndefined();
 	});
 
 	it('refuses a tagged package or workflow that CI would refuse', async () => {
@@ -281,7 +286,7 @@ function docBlock(language) {
 	expect(blocks).toHaveLength(1);
 	return blocks[0][2];
 }
-const powershell = ['pwsh', 'powershell'].find(bin => spawnSync(bin, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', windowsHide: true }).status === 0);
+const powershells = ['pwsh', 'powershell'].filter(bin => spawnSync(bin, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', windowsHide: true }).status === 0);
 const posixShell = spawnSync('sh', ['-c', 'exit 0'], { stdio: 'ignore', windowsHide: true }).status === 0;
 
 function releaseClone() {
@@ -319,14 +324,13 @@ function releaseClone() {
 	return { base, work, git, source, artifact, sha256, remote };
 }
 
-function runBlock(language, clone, { artifact = clone.artifact, prelude = '', temp = clone.base } = {}) {
+function runBlock(shell, clone, { artifact = clone.artifact, prelude = '', temp = clone.base } = {}) {
 	// The annotation file goes to the clone, not the shared temporary directory.
 	const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', TEMP: temp, TMP: temp, TMPDIR: temp };
 	const options = { cwd: clone.work, encoding: 'utf8', windowsHide: true, env };
-	if (language === 'powershell') {
-		expect(powershell, 'PowerShell is required for the documented tag block tests').toBeTruthy();
+	if (shell !== 'sh') {
 		const script = `${prelude}$source = '${clone.source}'\n$tarball = '${artifact}'\n` + docBlock('powershell');
-		return spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], options);
+		return spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], options);
 	}
 	const script = `${prelude}source='${clone.source}'\ntarball='${artifact.replaceAll('\\', '/')}'\n` + docBlock('sh');
 	return spawnSync('sh', ['-c', script], options);
@@ -338,18 +342,30 @@ describe('documented release tag commands', () => {
 	it('documents the version this commit releases', () => {
 		expect(docBlock('powershell')).toContain("'" + tag + "'");
 		expect(docBlock('sh')).toContain('tag=' + tag + '\n');
+		// The POSIX commands that run outside the subshell name the tag literally.
+		expect(releasingDoc).toContain('`git tag -d ' + tag + '`');
+		expect(releasingDoc).toContain('`git push origin ' + tag + '`');
 		// One script block stops at the first error even when pasted line by line;
 		// the POSIX subshell keeps set -e and exit from closing an interactive shell.
 		expect(docBlock('powershell')).toMatch(/^\. \{\ntrap \{ break \}\n[\s\S]*\n\}\n$/);
 		expect(docBlock('sh')).toMatch(/^\(\nset -eu\n[\s\S]*\n\)\n$/);
+		// zsh reads $name:x as a modifier and PowerShell as a scope; braces keep a refspec intact.
+		for (const language of ['powershell', 'sh']) expect(docBlock(language)).not.toMatch(/\$[A-Za-z_]\w*:/);
 	});
 
-	for (const language of ['powershell', 'sh']) {
+	it('runs the PowerShell block in every installed PowerShell', () => {
+		expect(powershells.length, 'PowerShell is required for the documented tag block tests').toBeGreaterThan(0);
+		// The doc targets Windows PowerShell 5.1, which every Windows host has.
+		if (process.platform === 'win32') expect(powershells).toContain('powershell');
+	});
+
+	for (const shell of [...powershells, 'sh']) {
+		const language = shell === 'sh' ? 'sh' : 'powershell';
 		// PowerShell is required everywhere; only a Windows host may lack a POSIX shell.
 		const skip = language === 'sh' && !posixShell && process.platform === 'win32';
-		it.skipIf(skip)(`tags only after the checks pass in ${language}`, () => {
+		it.skipIf(skip)(`tags only after the checks pass in ${shell}`, () => {
 			const clone = releaseClone();
-			const result = runBlock(language, clone);
+			const result = runBlock(shell, clone);
 			expect(result.status, result.stdout + result.stderr).toBe(0);
 			expect(result.stdout).toContain('local tag ' + tag + ' binds ' + clone.sha256 + ' at ' + clone.source);
 			// main is pushed, the tag is created locally and left for a separate push.
@@ -360,15 +376,15 @@ describe('documented release tag commands', () => {
 			expect(clone.git(clone.work, 'status', '--porcelain')).toBe('');
 		}, 60_000);
 
-		it.skipIf(skip)(`refuses to run outside the clean checkout at the source commit in ${language}`, () => {
+		it.skipIf(skip)(`refuses to run outside the clean checkout at the source commit in ${shell}`, () => {
 			const moved = releaseClone();
 			moved.git(moved.work, 'commit', '-q', '--allow-empty', '-m', 'Later work');
-			const elsewhere = runBlock(language, moved);
+			const elsewhere = runBlock(shell, moved);
 			expect(elsewhere.status).not.toBe(0);
 			expect(elsewhere.stderr).toContain('run this in the clean main checkout');
 			const dirty = releaseClone();
 			writeFileSync(join(dirty.work, 'stray.txt'), 'untracked');
-			const unclean = runBlock(language, dirty);
+			const unclean = runBlock(shell, dirty);
 			expect(unclean.status).not.toBe(0);
 			expect(unclean.stderr).toContain('run this in the clean main checkout');
 			for (const clone of [moved, dirty]) {
@@ -377,12 +393,12 @@ describe('documented release tag commands', () => {
 			}
 		}, 60_000);
 
-		it.skipIf(skip)(`stops before pushing when the tarball cannot be hashed in ${language}`, () => {
+		it.skipIf(skip)(`stops before pushing when the tarball cannot be hashed in ${shell}`, () => {
 			// A digest left over from an earlier run in the same session must not be reused.
 			const stale = language === 'powershell' ? `$sha256 = '${'a'.repeat(64)}'\n` : `sha256=${'a'.repeat(64)}\n`;
 			for (const artifact of [clone => join(clone.base, 'missing.tgz'), () => '', clone => clone.base]) {
 				const clone = releaseClone();
-				const result = runBlock(language, clone, { artifact: artifact(clone), prelude: stale });
+				const result = runBlock(shell, clone, { artifact: artifact(clone), prelude: stale });
 				expect(result.status).not.toBe(0);
 				expect(result.stderr).toContain('to the retained archive');
 				expect(clone.remote()).toEqual({ heads: '', tags: '' });
@@ -390,52 +406,52 @@ describe('documented release tag commands', () => {
 			}
 		}, 90_000);
 
-		it.skipIf(skip)(`refuses a tag left by an earlier run in ${language}`, () => {
+		it.skipIf(skip)(`refuses a tag left by an earlier run in ${shell}`, () => {
 			const clone = releaseClone();
 			clone.git(clone.work, 'tag', '-a', tag, clone.source, '-m', 'Unchecked');
-			const result = runBlock(language, clone);
+			const result = runBlock(shell, clone);
 			expect(result.status).not.toBe(0);
 			expect(result.stderr).toContain(tag + ' already exists locally');
 			expect(clone.remote()).toEqual({ heads: '', tags: '' });
 		}, 60_000);
 
-		it.skipIf(skip)(`pushes exactly the source commit and no tags in ${language}`, () => {
+		it.skipIf(skip)(`pushes exactly the source commit and no tags in ${shell}`, () => {
 			const clone = releaseClone();
 			clone.git(clone.work, 'config', 'push.followTags', 'true');
 			clone.git(clone.work, 'tag', '-a', 'unrelated-annotated', clone.source, '-m', 'Not for the remote');
 			clone.git(clone.work, 'commit', '-q', '--allow-empty', '-m', 'Later main commit');
 			clone.git(clone.work, 'checkout', '-q', '--detach', clone.source);
-			const result = runBlock(language, clone);
+			const result = runBlock(shell, clone);
 			expect(result.status, result.stdout + result.stderr).toBe(0);
 			expect(clone.remote()).toEqual({ heads: clone.source + '\trefs/heads/main', tags: '' });
 		}, 60_000);
 
-		it.skipIf(skip)(`stops before tagging when main cannot be pushed in ${language}`, () => {
+		it.skipIf(skip)(`stops before tagging when main cannot be pushed in ${shell}`, () => {
 			const clone = releaseClone();
 			const unrelated = clone.git(clone.work, 'commit-tree', 'HEAD^{tree}', '-m', 'Unrelated main');
 			clone.git(clone.work, 'push', '-q', join(clone.base, 'origin.git'), unrelated + ':refs/heads/main');
-			const result = runBlock(language, clone);
+			const result = runBlock(shell, clone);
 			expect(result.status).not.toBe(0);
 			expect(clone.remote()).toEqual({ heads: unrelated + '\trefs/heads/main', tags: '' });
 			expect(hasLocalTag(clone)).toBe(false);
 		}, 60_000);
 
-		it.skipIf(skip)(`stops before pushing when the annotation cannot be written in ${language}`, () => {
+		it.skipIf(skip)(`stops before pushing when the annotation cannot be written in ${shell}`, () => {
 			const clone = releaseClone();
 			// Windows PowerShell recreates a missing temporary directory, so occupy the annotation path.
 			const temp = join(clone.base, language === 'powershell' ? 'temp' : 'missing-temp');
 			if (language === 'powershell') mkdirSync(join(temp, 'svelte-adapter-uws-' + sourcePkg.version + '.tag.txt'), { recursive: true });
-			const result = runBlock(language, clone, { temp });
+			const result = runBlock(shell, clone, { temp });
 			expect(result.status, result.stdout + result.stderr).not.toBe(0);
 			expect(clone.remote()).toEqual({ heads: '', tags: '' });
 			expect(hasLocalTag(clone)).toBe(false);
 		}, 60_000);
 
-		it.skipIf(skip)(`fails and keeps the tag local when the tag check refuses in ${language}`, () => {
+		it.skipIf(skip)(`fails and keeps the tag local when the tag check refuses in ${shell}`, () => {
 			const clone = releaseClone();
 			// An archive packed from another commit passes every step before the check.
 			writeFileSync(clone.artifact, tarball([manifestEntry({ name: sourcePkg.name, version: sourcePkg.version, gitHead: 'f'.repeat(40) })]));
-			const result = runBlock(language, clone);
+			const result = runBlock(shell, clone);
 			expect(result.status).not.toBe(0);
 			expect(result.stderr).toMatch(/gitHead/);
 			if (language === 'powershell') expect(result.stderr).toContain('do not push the tag');
