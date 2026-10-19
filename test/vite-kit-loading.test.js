@@ -916,6 +916,44 @@ describe('development handler lifecycle', () => {
 		}
 	});
 
+	it('keeps a Vite 5 handler deletion pending through a reload for another file', async () => {
+		const first = { subscribe: () => false, init: vi.fn(), shutdown: vi.fn() };
+		const missing = new Error('Failed to load url ./handler.js');
+		const httpServer = createServer();
+		const server = viteServer(httpServer, 2, async () => first);
+		delete server.environments;
+		server.hot = { send: vi.fn() };
+		const dependency = path.resolve(server.config.root, 'dependency.js');
+		const node = { ssrModule: {}, ssrTransformResult: {}, ssrImportedModules: [{ file: dependency }] };
+		server.moduleGraph.getModulesByFile = vi.fn(() => new Set([node]));
+		const plugin = uws({ handler: './handler.js' });
+		const id = path.resolve(server.config.root, 'handler.js').split(path.sep).join('/');
+		const synthetic = { getUserData: () => ({}) };
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await plugin.configureServer(server);
+			await listen(httpServer);
+			await vi.waitFor(() => expect(first.init).toHaveBeenCalledOnce());
+			plugin.watchChange(id, { event: 'delete' });
+			// An edit of a dependency reloads before Vite invalidates the deleted
+			// handler, and that import still returns the cached module.
+			await plugin.handleHotUpdate({ file: dependency, server });
+			server.hot.send({ type: 'update', updates: [] });
+			await vi.waitFor(() => expect(server.ssrLoadModule).toHaveBeenCalledTimes(2));
+			await new Promise(resolve => setTimeout(resolve, 20));
+			expect(first.shutdown).not.toHaveBeenCalled();
+			Object.assign(node, { ssrModule: null, ssrTransformResult: null });
+			server.ssrLoadModule.mockRejectedValue(missing);
+			server.hot.send({ type: 'full-reload' });
+			await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
+			await vi.waitFor(async () => expect(await current().checkSubscribe(synthetic, 'room')).toBe('INTERNAL_ERROR'));
+		} finally {
+			errorLog.mockRestore();
+			await closeLifecycle(plugin, server);
+			await close(httpServer, []);
+		}
+	});
+
 	it('discards a stale Kit 2 initial import after a reload', async () => {
 		const pending = deferred();
 		const initial = { init: vi.fn(), shutdown: vi.fn() };

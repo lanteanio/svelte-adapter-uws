@@ -938,14 +938,17 @@ export default function uws(options = {}) {
 		const send = hot.send;
 		// A created or deleted handler file reloads only once Vite has invalidated
 		// its graph node: a broadcast for another file can come first, and an
-		// import then would return the cached module.
+		// import then would return the cached module. Such an earlier reload
+		// leaves the file event pending.
 		const fileEventSettled = () => state.legacyFileEvent &&
 			[...(server.moduleGraph.getModulesByFile(viteFile(state.path)) ?? [])].every(node => !node.ssrModule && !node.ssrTransformResult);
 		function sendWithReload(...args) {
 			const result = send.apply(this, args);
-			if (!state.closed && (state.legacyDirty || fileEventSettled()) && (args[0]?.type === 'full-reload' || args[0]?.type === 'update')) {
+			if (state.closed || (args[0]?.type !== 'full-reload' && args[0]?.type !== 'update')) return result;
+			const settled = fileEventSettled();
+			if (state.legacyDirty || settled) {
 				state.legacyDirty = false;
-				state.legacyFileEvent = false;
+				if (settled) state.legacyFileEvent = false;
 				void reloadHandlers(state);
 			}
 			return result;
