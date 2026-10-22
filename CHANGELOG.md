@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-10-22
+
+### Fixed
+
+- A response body that fails after the response has started, such as a proxied `fetch()` whose upstream resets mid-download, no longer stops the server. The connection is closed instead of the body being ended cleanly, so the client sees an incomplete response rather than a cut download that looks complete, and the error is logged as `SSR error:`.
+- A route that cancels `request.body` while the client is still uploading no longer stops the server when more of the body arrives.
+- A request to the WebSocket `authenticate` endpoint whose `Host` cannot form a URL no longer stops the server when `ORIGIN` is unset. It is answered `400 Bad Request`.
+- A `Host` header, or a header configured with `PROTOCOL_HEADER`, `HOST_HEADER` or `PORT_HEADER`, that does not carry a valid host and optional port is answered `400 Bad Request`. A `Host` carrying a path, such as `example.com/admin`, was put in front of the path SvelteKit routed, so a proxy rule that judges the request path could be passed by a route it would have refused. A refused proxy header logs one warning naming its setting. A `Host` that cannot form a URL is answered 400 instead of 500 on every route.
+- An anonymous request (no `Cookie` or `Authorization` header) to a Server-Sent-Events endpoint receives its events. It received nothing before, and every later anonymous request to the same URL waited behind it.
+- A large anonymous download is no longer read into memory whole before any of it is sent. The server holds at most 512 KB of an anonymous response.
+- A streamed response sends its headers and first chunk as soon as that chunk exists, so a page that streams a `load` promise shows its shell before the promise settles.
+- When the client goes away, the response body is cancelled and its source's `cancel()` runs, including a body the endpoint returned after the client left and one still waiting for its next chunk.
+- A client that stops sending a request body no longer leaves `request.formData()`, `request.json()` or a similar read pending forever, on routes and in the `authenticate` hook. The read rejects with `Error: Request aborted`, and graceful shutdown no longer waits for such a request.
+- HEAD responses carry no body. On a keep-alive connection the client read it as the start of the next response. This covers SvelteKit 2 pages and endpoints and the server's own 400, 405 and 500 answers. A HEAD reports the `Content-Length` the response declares, or none, and is never compressed, so its length can differ from the compressed GET's.
+- A `Response` that carries its own `Transfer-Encoding` or `Date` header, as a proxied `fetch()` Response does, no longer has it sent beside the server's own. An anonymous one went out with both `Transfer-Encoding: chunked` and `Content-Length`. The same applies to a Response returned from `authenticate`.
+- A 204 response carries no `Content-Length`, including the default 204 from `authenticate`. A bodyless 304 reports a length only when the app declares one. Any other bodyless response reports `Content-Length: 0`, even when it declared a length the client would have waited for.
+- A network-error `Response` (`Response.error()`, status 0) is answered `500 Internal Server Error` instead of an invalid `HTTP/1.1 0` status line.
+
+### Changed
+
+- A HEAD request no longer reads the response body: the body is cancelled unread, as when the client goes away early. A `ReadableStream` source must stop enqueueing once its `cancel()` runs; one that keeps enqueueing from a timer throws there and stops the process. See [Streamed response bodies](./README.md#streamed-response-bodies).
+- Request deduplication covers anonymous GET requests only. Concurrent HEAD requests each render.
+- An anonymous GET response is shared between concurrent requests only when its whole body is ready at once and is at most 512 KB. A body that waits on I/O (a page streaming a `load` promise, a file stream, a proxied `fetch()` body), an event stream, or a larger body streams to the request that rendered it, and the requests that waited render their own. These bodies go out chunked and without dynamic compression, where 0.5.11 buffered them whole and sent them compressed with a `Content-Length`.
+
 ## [0.5.11] - 2026-10-19
 
 ### Added

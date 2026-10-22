@@ -47,7 +47,7 @@ or lane must update its pin in the same reviewed change.
    separator. A shell uses `npm`:
 
    ```powershell
-   npm.cmd run --ignore-scripts --silent pack:release -- --destination ../release-artifacts/0.5.11
+   npm.cmd run --ignore-scripts --silent pack:release -- --destination ../release-artifacts/0.5.12
    ```
 
    Use a new directory per candidate. Retain its JSON output and tarball. The
@@ -73,7 +73,7 @@ Only the owner pushes, creates the tag and authorizes publication. The
 annotation holds exactly one digest field:
 
 ```text
-Release 0.5.11
+Release 0.5.12
 
 Artifact-SHA256: <64 lowercase hexadecimal characters>
 ```
@@ -97,12 +97,12 @@ protection and complete preflight:
 . {
 trap { break }
 if ((git rev-parse HEAD) -ne $source -or (git status --porcelain)) { throw 'run this in the clean main checkout at the source commit' }
-$tag = 'svelte-adapter-uws@0.5.11'
+$tag = 'svelte-adapter-uws@0.5.12'
 git rev-parse -q --verify "refs/tags/$tag" | Out-Null; if ($LASTEXITCODE -eq 0) { throw "$tag already exists locally; check it, then delete it with git tag -d $tag" }
 if (-not $tarball -or -not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'set $tarball to the retained archive' }
-$annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.11.tag.txt'
+$annotation = Join-Path ([IO.Path]::GetTempPath()) 'svelte-adapter-uws-0.5.12.tag.txt'
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball -ErrorAction Stop).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($annotation, "Release 0.5.11`n`nArtifact-SHA256: $sha256`n")
+[IO.File]::WriteAllText($annotation, "Release 0.5.12`n`nArtifact-SHA256: $sha256`n")
 git push --no-follow-tags origin "${source}:refs/heads/main"; if ($LASTEXITCODE -ne 0) { throw 'pushing main failed' }
 git fetch origin main; if ($LASTEXITCODE -ne 0) { throw 'fetching main failed' }
 git tag -a $tag $source -F $annotation; if ($LASTEXITCODE -ne 0) { throw 'tagging failed' }
@@ -117,13 +117,13 @@ keeps a failure from closing an interactive shell:
 (
 set -eu
 [ "$(git rev-parse HEAD)" = "$source" ] && [ -z "$(git status --porcelain)" ] || { echo 'run this in the clean main checkout at the source commit' >&2; exit 1; }
-tag=svelte-adapter-uws@0.5.11
+tag=svelte-adapter-uws@0.5.12
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "$tag already exists locally; check it, then delete it with git tag -d $tag" >&2; exit 1; fi
 [ -f "$tarball" ] || { echo 'set tarball to the retained archive' >&2; exit 1; }
 annotation=$(mktemp)
 sha256=$(sha256sum < "$tarball")
 sha256=${sha256%% *}
-printf 'Release 0.5.11\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
+printf 'Release 0.5.12\n\nArtifact-SHA256: %s\n' "$sha256" > "$annotation"
 git push --no-follow-tags origin "${source}:refs/heads/main"
 git fetch origin main
 git tag -a "$tag" "$source" -F "$annotation"
@@ -138,10 +138,10 @@ and a tagged commit contained in `refs/remotes/origin/main`. It also runs the
 package and workflow checks that CI applies to the tagged commit. Only CI
 repacks that commit and compares the bytes, which is why step 4 reproduces the
 archive before tagging. If it fails, delete the local tag with
-`git tag -d $tag` (`git tag -d svelte-adapter-uws@0.5.11` in a POSIX shell),
+`git tag -d $tag` (`git tag -d svelte-adapter-uws@0.5.12` in a POSIX shell),
 correct the cause and run the block again. Only after it prints
 `local tag ... binds ...`, push the tag as a separate command
-(`git push origin svelte-adapter-uws@0.5.11` in a POSIX shell):
+(`git push origin svelte-adapter-uws@0.5.12` in a POSIX shell):
 
 ```powershell
 git push origin $tag
@@ -160,7 +160,7 @@ closed.
 After publication query the immutable version and the current pointer map:
 
 ```powershell
-npm view svelte-adapter-uws@0.5.11 gitHead dist.integrity dist.shasum --json
+npm view svelte-adapter-uws@0.5.12 gitHead dist.integrity dist.shasum --json
 npm view svelte-adapter-uws time --json
 npm view svelte-adapter-uws dist-tags --json
 ```
@@ -176,7 +176,7 @@ Install the exact registry version with qualified siblings and rerun the
 consumer smoke/type gates. Only after success may the owner move `latest`:
 
 ```powershell
-npm dist-tag add svelte-adapter-uws@0.5.11 latest
+npm dist-tag add svelte-adapter-uws@0.5.12 latest
 npm view svelte-adapter-uws dist-tags --json
 ```
 

@@ -16,7 +16,7 @@ This guide is organized by **tier**. Most apps only need to read the first two s
 - **[Recommended new patterns](#recommended-new-patterns)** - not required, but better.
 - **[Cosmetic](#cosmetic)** - type-only, internal refactors, niche edge cases.
 
-If you are upgrading via `npm install svelte-adapter-uws@latest`, the registry will pull whatever the current `latest` dist-tag points to. To pin this stable release, use `svelte-adapter-uws@0.5.11`. The `next` dist-tag selects the 0.6 prerelease line.
+If you are upgrading via `npm install svelte-adapter-uws@latest`, the registry will pull whatever the current `latest` dist-tag points to. To pin this stable release, use `svelte-adapter-uws@0.5.12`. The `next` dist-tag selects the 0.6 prerelease line.
 
 If you have a small app and want the 5-minute version, see the [docs site upgrade quickstart](https://svelte-realtime.dev/docs/upgrade-quickstart).
 
