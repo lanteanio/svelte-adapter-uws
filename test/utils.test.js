@@ -2169,6 +2169,12 @@ describe('isOriginAllowed', () => {
 				expect(isOriginAllowed('https://example.com', { host: 'example.com:4433' }, ctx)).toBe(false);
 			});
 
+			it('does not eat a group beginning with the default port inside an IPv6 literal', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				expect(isOriginAllowed('http://[2001:db8::80]', { host: '[2001:db8::80]' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://[2001:db8::80]:3000', { host: '[2001:db8::80]:3000' }, ctx)).toBe(true);
+			});
+
 			it('still strips an exact trailing default port', () => {
 				const httpCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
 				const httpsCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
