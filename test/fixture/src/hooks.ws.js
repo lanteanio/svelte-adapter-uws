@@ -1,4 +1,5 @@
 import { upgradeResponse } from 'svelte-adapter-uws/upgrade-response';
+import { record } from './lib/probe.js';
 
 export function upgrade({ headers, cookies, url }) {
 	const token = cookies?.token;
@@ -65,4 +66,28 @@ export function message(ws, { data, platform }) {
 export function close(ws, { code, platform }) {
 	if (ws.getUserData().boom === 'close') throw new Error('close boom');
 	platform.publish('test-topic', 'disconnected', { code });
+}
+
+// Registers the authenticate endpoint. `x-auth-response: framing` returns a
+// Response carrying its own framing and Date headers, `empty` a bodyless 204;
+// a request carrying `x-probe-id` reads its whole body first and records how
+// that read ended: `rejected`, or `resolved:<bytes>`.
+export async function authenticate({ request, headers }) {
+	const shape = headers['x-auth-response'];
+	if (shape === 'framing') {
+		return new Response('authenticated', {
+			headers: { 'transfer-encoding': 'chunked', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }
+		});
+	}
+	if (shape === 'empty') return new Response(null, { status: 204 });
+	const id = headers['x-probe-id'];
+	if (!id) return;
+	record(id, 'entered');
+	try {
+		const body = await request.arrayBuffer();
+		record(id, `resolved:${body.byteLength}`);
+	} catch (error) {
+		record(id, 'rejected');
+		throw error;
+	}
 }

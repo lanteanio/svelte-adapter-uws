@@ -13,7 +13,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import { wsModule } from './ws-handler-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX, runHook, runUnsubscribeHook } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, responseChunkBytes, readReady, isDedupBufferable, declaresBodyPastCap, readBodyUpTo, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, originFromHeaders, OriginHeaderError, refusedHeaderSetting, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX, runHook, runUnsubscribeHook } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -46,12 +46,69 @@ const ALLOW_HEADER = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
 
 // - Error response helpers ---------------------------------------------------
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
-function send400(res) {
+/**
+ * End a response with a short text body. A HEAD carries the same headers
+ * and no payload: a client stops reading a HEAD response at the header
+ * terminator (RFC 9112 6.3), so payload bytes written after it would be
+ * parsed as the start of the next response on a keep-alive connection.
+ * Content-Length still names the entity size, as it does for the GET.
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {string} text ASCII, so its length is its byte length
+ * @param {boolean} headOnly
+ */
+function endText(res, text, headOnly) {
+	if (headOnly) res.endWithoutBody(text.length);
+	else res.end(text);
+}
+
+/**
+ * Finish a response that carries no content, choosing what to say about its
+ * length. A 204 never reports one: RFC 9110 8.6 forbids Content-Length there.
+ * A 304 reports one only when the app declared it, because the header is
+ * permitted on a 304 only when it names the length of the 200's content. A
+ * HEAD is the same case: the header may only name the GET's content length,
+ * so a HEAD reports the declared length or none. Every other bodyless
+ * response names zero, whatever it declared: a length with no bytes behind
+ * it would leave the client waiting for them. With no length reported uWS
+ * emits neither Content-Length nor Transfer-Encoding.
+ *
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {number} status
+ * @param {string | null | undefined} declaredLength the response's own
+ *   Content-Length header, when it carries one
+ * @param {boolean} headOnly the request was a HEAD
+ */
+function endBodyless(res, status, declaredLength, headOnly) {
+	if (status === 204) res.endWithoutBody();
+	else if (status === 304 || headOnly) {
+		const length = declaredLength ? parseInt(declaredLength, 10) : NaN;
+		if (Number.isSafeInteger(length) && length >= 0) res.endWithoutBody(length);
+		else res.endWithoutBody();
+	} else res.endWithoutBody(0);
+}
+
+/**
+ * A network-error Response has status 0, which cannot be written as an HTTP
+ * final response. Validate before any application headers or cookies escape.
+ *
+ * @param {number} status
+ */
+function assertResponseStatus(status) {
+	if (!(Number.isInteger(status) && status >= 200 && status <= 999)) {
+		throw new RangeError('Response has no valid final HTTP status: ' + status);
+	}
+}
+
+/**
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {boolean} [headOnly]
+ */
+function send400(res, headOnly = false) {
 	res.cork(() => {
 		res.writeStatus('400 Bad Request');
 		res.writeHeader('content-type', 'text/plain');
-		res.end('Bad Request');
+		endText(res, 'Bad Request', headOnly);
 	});
 }
 
@@ -74,31 +131,51 @@ function send413(res) {
 	});
 }
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
-function send500(res) {
+/**
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {boolean} [headOnly]
+ */
+function send500(res, headOnly = false) {
 	res.cork(() => {
 		res.writeStatus('500 Internal Server Error');
 		res.writeHeader('content-type', 'text/plain');
-		res.end('Internal Server Error');
+		endText(res, 'Internal Server Error', headOnly);
 	});
 }
 
 // - State object pool --------------------------------------------------------
-// Avoids allocating { aborted: false } per SSR request. Objects survive to
-// V8's old generation quickly and stay there, eliminating young-gen GC churn.
+// Avoids allocating the per-request state object for every SSR request.
+// Objects survive to V8's old generation quickly and stay there, eliminating
+// young-gen GC churn.
+//
+// `responseStarted` flips once any byte of the response reaches the wire, which
+// tells the failure path an error response can no longer be sent.
+// `closedByServer` marks an abort the response teardown inflicted on itself, so
+// the failure path can tell it from a client abort. `failBody` ends a pending
+// request-body read and `cancelResponse` a pending response-body read when the
+// client goes away.
 
-/** @type {{ aborted: boolean }[]} */
+/**
+ * @typedef {{ aborted: boolean, responseStarted: boolean, closedByServer: boolean, failBody: (() => void) | null, cancelResponse: (() => void) | null }} RequestState
+ */
+
+/** @type {RequestState[]} */
 const statePool = [];
 const STATE_POOL_MAX = 256;
 
+/** @returns {RequestState} */
 function acquireState() {
 	const s = statePool.pop();
-	if (s) { s.aborted = false; return s; }
-	return { aborted: false };
+	if (s) { s.aborted = false; s.responseStarted = false; s.closedByServer = false; return s; }
+	return { aborted: false, responseStarted: false, closedByServer: false, failBody: null, cancelResponse: null };
 }
 
-/** @param {{ aborted: boolean }} s */
+/** @param {RequestState} s */
 function releaseState(s) {
+	// The body streams belong to the request that just finished; a pooled
+	// state must not keep either reachable.
+	s.failBody = null;
+	s.cancelResponse = null;
 	if (statePool.length < STATE_POOL_MAX) statePool.push(s);
 }
 
@@ -1698,8 +1775,21 @@ const platform = {
 
 // - Origin construction -----------------------------------------------------
 
+// The listener's scheme ('https' for SSLApp) and the configured proxy headers
+// the origin is built from when ORIGIN is unset.
+/** @type {import('./utils.js').OriginSource} */
+const ORIGIN_SOURCE = {
+	isTls: is_tls,
+	protocolHeader: protocol_header,
+	hostHeader: host_header,
+	portHeader: port_header
+};
+
+let warnedRefusedProxyHeader = false;
+
 /**
- * Construct the origin from request headers.
+ * Construct the origin from request headers. Throws an OriginHeaderError for
+ * a value that cannot be part of an origin; callers answer that 400.
  *
  * WARNING: PROTOCOL_HEADER / HOST_HEADER / PORT_HEADER are trusted as-is.
  * Only use these behind a trusted reverse proxy that overwrites the headers.
@@ -1709,42 +1799,30 @@ const platform = {
  * @returns {string}
  */
 function get_origin(headers) {
-	// Default protocol matches the app type: 'https' for SSLApp, 'http' for App.
-	const default_protocol = is_tls ? 'https' : 'http';
-	const protocol = protocol_header
-		? decodeURIComponent(headers[protocol_header] || default_protocol)
-		: default_protocol;
-
-	if (protocol !== 'http' && protocol !== 'https') {
-		throw new Error(
-			`The ${protocol_header} header specified '${protocol}' which is not a valid protocol. Only 'http' and 'https' are supported.`
-		);
+	try {
+		return originFromHeaders(headers, ORIGIN_SOURCE);
+	} catch (err) {
+		// A refused CONFIGURED header is most often the proxy writing it
+		// wrong, and then every request is answered 400 - say so once, with
+		// the setting that names it. A refused Host header is only the client's.
+		if (!warnedRefusedProxyHeader && err instanceof OriginHeaderError) {
+			const setting = refusedHeaderSetting(err.header, ORIGIN_SOURCE, ENV_PREFIX);
+			if (setting !== null) {
+				warnedRefusedProxyHeader = true;
+				console.warn(`[adapter-uws] Answered a request 400 Bad Request: ${err.message} ` +
+					`${setting} names it; if every request is refused, check what the proxy in front writes into it.`);
+			}
+		}
+		throw err;
 	}
-
-	const host = (host_header && headers[host_header]) || headers['host'];
-	if (!host) {
-		throw new Error('Could not determine host. The request must have a host header.');
-	}
-
-	const port = port_header ? headers[port_header] : undefined;
-	if (port && isNaN(+port)) {
-		throw new Error(
-			`The ${port_header} header specified ${port} which is an invalid port.`
-		);
-	}
-
-	// Strip existing port from host before appending PORT_HEADER value
-	// (the Host header often includes the port, e.g. "example.com:3000")
-	const hostWithoutPort = port ? host.replace(/:\d+$/, '') : host;
-
-	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
 }
 
 // - SSR request deduplication -----------------------------------------------
-// When multiple concurrent anonymous GET/HEAD requests arrive for the same URL,
+// When multiple concurrent anonymous GET requests arrive for the same URL,
 // only one is dispatched to SvelteKit. The rest await the result and reconstruct
-// their own Response from the shared buffer. This eliminates redundant SSR work
-// during traffic spikes on public (non-personalized) pages.
+// their own Response from the shared buffer when the body is small and ready at
+// once. This eliminates redundant SSR work during traffic spikes on public
+// (non-personalized) pages.
 
 // Maximum number of in-flight dedup keys tracked simultaneously.
 const MAX_SSR_DEDUP = 500;
@@ -1794,7 +1872,8 @@ const COMPRESSIBLE_TYPES = new Set([
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {number} limit
- * @param {{ aborted: boolean }} state - Shared abort flag from request handler
+ * @param {RequestState} state - Shared abort flag from request handler; `failBody`
+ *   is what the abort calls to end a read in progress
  * @param {number} [contentLength] - Known Content-Length (NaN if unknown)
  * @returns {ReadableStream<Uint8Array>}
  */
@@ -1805,21 +1884,32 @@ function readBody(res, limit, state, contentLength) {
 		(limit === Infinity || contentLength <= limit);
 
 	let initialized = false;
+	let done = false;
 	return new ReadableStream({
 		start(controller) {
 			if (state.aborted) {
+				done = true;
 				controller.error(new Error('Request aborted'));
 				return;
 			}
+			// A client that goes away mid-body sends no last chunk, so a read in
+			// progress would wait forever - and the request with it. The abort
+			// ends the read instead.
+			state.failBody = () => {
+				done = true;
+				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
+			};
 		},
 		pull(controller) {
+			if (done) return;
 			if (state.aborted) {
 				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
 				return;
 			}
-			// Lazy: only register res.onData() when SvelteKit actually reads
-			// the body. For redirects / actions that ignore the body, this
-			// avoids the onData registration + per-chunk copy entirely.
+			// The default highWaterMark (1) schedules this first pull after start,
+			// even before SvelteKit reads the body. Register onData eagerly: uWS
+			// does not retain chunks that arrive without a callback, so waiting
+			// for a reader would lose bytes while an async route is suspended.
 			if (initialized) return;
 			initialized = true;
 
@@ -1828,7 +1918,6 @@ function readBody(res, limit, state, contentLength) {
 				// leaking via the trailing bytes when offset < contentLength.
 				const buf = Buffer.alloc(contentLength);
 				let offset = 0;
-				let done = false;
 				res.onData((chunk, isLast) => {
 					if (done || state.aborted) return;
 					const view = new Uint8Array(chunk);
@@ -1851,7 +1940,6 @@ function readBody(res, limit, state, contentLength) {
 			}
 
 			let size = 0;
-			let done = false;
 			res.onData((chunk, isLast) => {
 				if (done || state.aborted) return;
 				// MUST copy - uWS reuses the ArrayBuffer after callback returns
@@ -1868,6 +1956,11 @@ function readBody(res, limit, state, contentLength) {
 					controller.close();
 				}
 			});
+		},
+		cancel() {
+			// Native chunks can arrive after the consumer cancels its stream.
+			// Drain them without copying or touching its closed controller.
+			done = true;
 		}
 	});
 }
@@ -2057,7 +2150,7 @@ function decodePath(pathname) {
 function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '') {
 	const decoded = decodePath(pathname);
 	if (decoded === null) {
-		send400(res);
+		send400(res, headOnly);
 		return true;
 	}
 
@@ -2112,11 +2205,21 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
  * @param {string} url
  * @param {Record<string, string>} headers
  * @param {string} remoteAddress - Client IP address
- * @param {{ aborted: boolean }} state
+ * @param {RequestState} state
  */
 async function handleSSR(res, method, url, headers, remoteAddress, state) {
+	const headOnly = method === 'HEAD';
 	try {
-		const base_origin = origin || get_origin(headers);
+		// A request whose Host (or configured proxy header) cannot be part of an
+		// origin is the client's fault, and refused before any body is read, as
+		// the authenticate endpoint refuses it.
+		let base_origin;
+		try {
+			base_origin = origin || get_origin(headers);
+		} catch {
+			send400(res, headOnly);
+			return;
+		}
 
 		// Parse Content-Length once for both the 413 check and the small-body
 		// pre-allocation hint. Keep NaN when the header is absent or non-numeric.
@@ -2137,13 +2240,22 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 				? undefined
 				: readBody(res, body_size_limit, state, contentLengthHint);
 
-		const request = new Request(base_origin + url, {
-			method,
-			headers,
-			body,
-			// @ts-expect-error
-			duplex: 'half'
-		});
+		// An origin that passed the checks above can still name a host the URL
+		// parser refuses - a port past 65535, a malformed `xn--` label - and the
+		// client sent that too.
+		let request;
+		try {
+			request = new Request(base_origin + url, {
+				method,
+				headers,
+				body,
+				// @ts-expect-error
+				duplex: 'half'
+			});
+		} catch {
+			send400(res, headOnly);
+			return;
+		}
 
 		// Branch at definition time on the module-level constant address_header.
 		// In the common case (no proxy), the closure captures only remoteAddress
@@ -2187,14 +2299,14 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		const requestPlatform = Object.create(platform);
 		requestPlatform.requestId = requestId;
 
-		// Dedup: for anonymous GET/HEAD requests that arrive concurrently for the
+		// Dedup: for anonymous GET requests that arrive concurrently for the
 		// same URL, only the first (the leader) calls server.respond(). Subsequent
 		// requests (waiters) await the leader's promise and reconstruct a Response
 		// from the shared buffer. This prevents redundant SSR work during traffic
 		// spikes on public pages.
 		//
 		// Dedup is skipped for:
-		//   - Non-GET/HEAD methods (mutations must not be coalesced)
+		//   - Methods other than GET (mutations must not be coalesced)
 		//   - Authenticated requests (cookie or authorization header present)
 		//   - When the dedup map is at capacity (safety valve)
 		//
@@ -2204,9 +2316,13 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		// the only legitimate caller of an opt-out (debug tooling) can
 		// always send a Cookie / Authorization header to skip dedup
 		// naturally, the header is no longer consulted.
+		//
+		// HEAD is not deduplicated: concurrent HEADs each render. The writer
+		// never reads a HEAD's body, and sharing one would mean reading a
+		// whole render only to drop it.
 		const isCredentialedRequest = !!(headers.cookie || headers.authorization);
 		const canDedup =
-			(method === 'GET' || method === 'HEAD') &&
+			method === 'GET' &&
 			!isCredentialedRequest &&
 			ssrInflight.size < MAX_SSR_DEDUP;
 		// BREACH defense: suppress the accept-encoding signal for credentialed
@@ -2256,7 +2372,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 
 				try {
 					const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
-					if (state.aborted) { resolveShared(null); return; }
+					if (state.aborted) { resolveShared(null); response.body?.cancel().catch(() => {}); return; }
 
 					// Responses with Set-Cookie must not be shared (they're personalized).
 					// Responses that declare Vary on anything other than Accept-Encoding
@@ -2280,25 +2396,61 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 						}
 					}
 
-					// Buffer the body. Responses above the size cap are not shared.
-					const ab = await response.arrayBuffer();
-					if (state.aborted) { resolveShared(null); return; }
+					// An SSE stream is never shared: its first event may be a long
+					// time coming, and the leader would hold its headers - and every
+					// concurrent waiter on the same promise - until then.
+					// writeResponse streams it instead.
+					if (!isDedupBufferable(response)) {
+						resolveShared(null);
+						await writeResponse(res, response, state, respAcceptEncoding);
+						return;
+					}
 
-					const shared = ab.byteLength <= MAX_SSR_DEDUP_BODY
-						? /** @type {SharedResponse} */ ({
-							status: response.status,
-							statusText: response.statusText,
-							headers: /** @type {[string, string][]} */ ([...response.headers]),
-							body: new Uint8Array(ab)
-						})
-						: null;
+					// Sharing is decided BEFORE the body is materialised. A declared
+					// length past the cap streams at once; otherwise the body is
+					// read only up to the cap and only while its chunks are ready,
+					// and a body that passes the cap or has to wait for I/O is not
+					// shared and streams on from where the read stopped. Reading
+					// the whole body first and asking afterwards would hold every
+					// large uncredentialed response in memory in full, per request,
+					// and hold back the first byte of every streamed one.
+					if (declaresBodyPastCap(response, MAX_SSR_DEDUP_BODY)) {
+						resolveShared(null);
+						await writeResponse(res, response, state, respAcceptEncoding);
+						return;
+					}
+					const read = await readBodyUpTo(response.body, MAX_SSR_DEDUP_BODY, state);
+					if (state.aborted) {
+						resolveShared(null);
+						if (!read.complete) read.stream.cancel().catch(() => {});
+						return;
+					}
+					if (!read.complete) {
+						resolveShared(null);
+						await writeResponse(
+							res,
+							new Response(read.stream, {
+								status: response.status,
+								statusText: response.statusText,
+								headers: response.headers
+							}),
+							state,
+							respAcceptEncoding
+						);
+						return;
+					}
 
-					resolveShared(shared);
+					resolveShared(/** @type {SharedResponse} */ ({
+						status: response.status,
+						statusText: response.statusText,
+						headers: /** @type {[string, string][]} */ ([...response.headers]),
+						body: read.bytes
+					}));
 
 					// Serve the leader's own response from the same buffer
 					await writeResponse(
 						res,
-						new Response(ab, {
+						new Response(read.bytes, {
 							status: response.status,
 							statusText: response.statusText,
 							headers: response.headers
@@ -2316,16 +2468,23 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 
 		// Normal (non-dedup) path
 		const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
-		if (state.aborted) return;
-		await writeResponse(res, response, state, respAcceptEncoding);
+		if (state.aborted) { response.body?.cancel().catch(() => {}); return; }
+		await writeResponse(res, response, state, respAcceptEncoding, headOnly);
 	} catch (err) {
-		if (state.aborted) return;
+		if (state.aborted && !state.closedByServer) return;
 		if (err instanceof PayloadTooLargeError) {
-			send413(res);
+			// The limit can also trip mid-stream, through a route that pipes the
+			// request body into its response: a 413 written then would be a
+			// second response into a closed exchange - same rule as the 500.
+			if (!state.aborted && !state.responseStarted) send413(res);
 			return;
 		}
 		console.error('SSR error:', err);
-		if (!state.aborted) send500(res);
+		// Once any byte of the real response has reached the wire, no error
+		// response can be delivered: the streaming path has either ended or
+		// abruptly closed the exchange, and writing a 500 into it would be a
+		// second response. The log line above is the failure's record.
+		if (!state.aborted && !state.responseStarted) send500(res, headOnly);
 	}
 }
 
@@ -2348,6 +2507,12 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
  * embeds; Referrer-Policy choices vary by app. Those are app-level
  * decisions and the right tier is `hooks.server.js`.
  *
+ * The response's own Content-Length, Transfer-Encoding and Date are never
+ * copied: uWS writes the framing the body actually goes out with, and its own
+ * Date. A proxied `fetch()` Response carries its upstream's: a second framing
+ * header beside uWS's would frame the body two ways at once, and a second
+ * Date would contradict the first.
+ *
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
  */
@@ -2355,7 +2520,7 @@ function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
 	let hasContentTypeOptions = false;
 	for (const [key, value] of response.headers) {
-		if (key === 'set-cookie' || key === 'content-length') continue;
+		if (key === 'set-cookie' || key === 'content-length' || key === 'transfer-encoding' || key === 'date') continue;
 		if (key === 'x-content-type-options') hasContentTypeOptions = true;
 		res.writeHeader(key, value);
 	}
@@ -2370,53 +2535,85 @@ function writeHeaders(res, response) {
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
- * @param {{ aborted: boolean }} state
+ * @param {RequestState} state - Shared with the request handler;
+ *   `responseStarted` flips once any byte reaches the wire, and
+ *   `closedByServer` marks an abort this teardown inflicted on itself.
  * @param {string} [acceptEncoding]
+ * @param {boolean} [headOnly] the request was a HEAD: headers go out, the
+ *   body never does
  */
-async function writeResponse(res, response, state, acceptEncoding) {
-	// No body - write headers + end in a single cork (one syscall).
-	// For HEAD responses SvelteKit sets Content-Length to the full body size;
-	// pass it to endWithoutBody() so the client knows the entity size.
+async function writeResponse(res, response, state, acceptEncoding, headOnly = false) {
+	assertResponseStatus(response.status);
+	// No body - write headers + end in a single cork (one syscall). What the
+	// response may say about its length is endBodyless's rule.
 	if (!response.body) {
 		if (state.aborted) return;
 		const cl = response.headers.get('content-length');
+		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
-			if (cl) res.endWithoutBody(parseInt(cl, 10));
-			else res.endWithoutBody(0);
+			endBodyless(res, response.status, cl, headOnly);
 		});
 		return;
 	}
 
 	if (response.body.locked) {
 		if (state.aborted) return;
+		state.responseStarted = true;
 		res.cork(() => {
 			res.writeStatus('500 Internal Server Error');
 			res.writeHeader('content-type', 'text/plain');
-			res.end(
+			endText(res,
 				'Fatal error: Response body is locked. ' +
-					"This can happen when the response was already read (for example through 'response.json()' or 'response.text()')."
-			);
+					"This can happen when the response was already read (for example through 'response.json()' or 'response.text()').",
+				headOnly);
 		});
 		return;
 	}
 
+	// HEAD: SvelteKit 2 renders it as the GET - pages render in full and the
+	// endpoint lane hands back the GET handler's Response - and leaves dropping
+	// the body to the server (adapter-node gets that from node:http, which uWS
+	// does not replicate). SvelteKit 3 drops it itself, and that Response takes
+	// the bodyless branch above. The body is never read; endBodyless reports a
+	// declared Content-Length or none.
+	if (headOnly) {
+		if (state.aborted) return;
+		const cl = response.headers.get('content-length');
+		state.responseStarted = true;
+		res.cork(() => {
+			writeHeaders(res, response);
+			endBodyless(res, response.status, cl, true);
+		});
+		response.body.cancel().catch(() => {});
+		return;
+	}
+
 	const reader = response.body.getReader();
+	const cancel = () => { reader.cancel().catch(() => {}); };
+	state.cancelResponse = cancel;
 	let streaming = false;
-	let streamTimedOut = false;
+	let streamDone = false;
 	try {
 		// Read first chunk - if it's also the last, write headers + body in one cork
 		const first = await reader.read();
 		if (first.done || state.aborted) {
-			if (!state.aborted) res.cork(() => { writeHeaders(res, response); res.end(); });
+			if (!state.aborted) {
+				state.responseStarted = true;
+				res.cork(() => { writeHeaders(res, response); res.end(); });
+			}
 			return;
 		}
 
-		const second = await reader.read();
+		// The second read decides between one corked end and a stream. Only a
+		// ready chunk is waited for: a body whose next chunk needs I/O (a page
+		// streaming a load promise) sends its first chunk now.
+		const firstBytes = responseChunkBytes(first.value);
+		const second = await readReady(reader);
 		if (second.done || state.aborted) {
 			// Single-chunk response (common for SSR) - one cork, one syscall
 			if (!state.aborted) {
-				let body = first.value;
+				let body = firstBytes;
 				let encoding = '';
 				if (acceptEncoding && body.byteLength >= COMPRESS_MIN_SIZE &&
 					!response.headers.has('content-encoding')) {
@@ -2437,6 +2634,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 						}
 					}
 				}
+				state.responseStarted = true;
 				res.cork(() => {
 					writeHeaders(res, response);
 					if (encoding) {
@@ -2449,42 +2647,56 @@ async function writeResponse(res, response, state, acceptEncoding) {
 			return;
 		}
 
-		// Multi-chunk streaming response. Headers + first two chunks share one
-		// cork so they flush as a single syscall. Subsequent chunks are each
+		// Streaming response. Headers + ready prefix share one cork so a
+		// pending second chunk cannot hold the first. Later chunks are each
 		// written inside their own cork via writeChunkWithBackpressure, which
 		// also captures the drain signal from res.write() without tripping the
 		// uWS "writes must be made from within a corked callback" warning.
 		if (state.aborted) return;
+		const secondBytes = second.pending ? null : responseChunkBytes(second.value);
 		streaming = true;
+		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
-			res.write(first.value);
-			res.write(second.value);
+			res.write(firstBytes);
+			if (secondBytes) res.write(secondBytes);
 		});
 
+		let pending = second.pending;
 		for (;;) {
-			const { done, value } = await reader.read();
-			if (done || state.aborted) break;
+			const next = pending || reader.read();
+			pending = null;
+			const { done, value } = await next;
+			if (done) { streamDone = true; break; }
+			if (state.aborted) break;
 
-			const result = writeChunkWithBackpressure(res, value);
+			const result = writeChunkWithBackpressure(res, responseChunkBytes(value));
 			if (result !== true) {
 				const drained = await result;
-				if (!drained) { streamTimedOut = true; break; }
+				if (!drained) break;
 				if (state.aborted) break;
 			}
 		}
 	} finally {
+		if (state.cancelResponse === cancel) state.cancelResponse = null;
 		if (streaming && !state.aborted) {
-			if (streamTimedOut) {
-				// Backpressure drained past the 30s deadline. Abruptly close the
-				// connection rather than sending a clean EOF on a partial body,
-				// which would look like a successful but truncated response.
-				res.cork(() => res.close());
-			} else {
+			if (streamDone) {
 				res.cork(() => res.end());
+			} else {
+				// Backpressure drained past the 30s deadline, or the source
+				// failed mid-body (a rejecting read exits the loop without
+				// setting streamDone). Abruptly close the connection rather
+				// than sending a clean EOF on a partial body, which would look
+				// like a successful but truncated response. close() fires the
+				// abort callback, so mark the close as ours: the failure path
+				// must still report a source fault it is about to rethrow,
+				// where a client-initiated abort stays silent.
+				state.closedByServer = true;
+				res.cork(() => res.close());
 			}
 		}
 		reader.cancel().catch(() => {});
+		reader.releaseLock();
 	}
 }
 
@@ -2519,7 +2731,7 @@ function handleRequest(res, req) {
 
 	// Windows: reject paths with : (Alternate Data Streams) or ~ (8.3 short names)
 	if (process.platform === 'win32' && (pathname.includes(':') || pathname.includes('~'))) {
-		return send400(res);
+		return send400(res, method === 'head');
 	}
 
 	// Build full URL only for SSR - static files never reach here
@@ -2554,10 +2766,14 @@ function handleRequest(res, req) {
 	// No AbortController here - readBody uses the state flag directly,
 	// avoiding 4-5 object allocations (controller + signal + event target)
 	// on every request. GET/HEAD requests (majority of traffic) never
-	// need an AbortController at all.
+	// need an AbortController at all. The abort also ends whatever read is
+	// pending: a request body the client stopped sending, or a response body
+	// whose next chunk would otherwise be awaited for a socket that is gone.
 	const state = acquireState();
 	res.onAborted(() => {
 		state.aborted = true;
+		state.failBody?.();
+		state.cancelResponse?.();
 	});
 
 	// === ASYNC PHASE: SSR ===
@@ -2767,8 +2983,25 @@ if (WS_ENABLED) {
 				return;
 			}
 
+			// The base origin comes from the request's Host (or the configured
+			// proxy headers) when ORIGIN is unset, and nothing that wraps this
+			// route answers in its place: a throw here escapes the uWS callback
+			// as an uncaught exception and takes the process down. get_origin()
+			// throws on a Host or proxy header value that cannot be part of an
+			// origin, and the Request constructor on a host the URL parser
+			// refuses. Both are the client's fault and answered 400, the origin
+			// before the state object and the body reader exist so refusing
+			// costs nothing.
+			let base_origin;
+			try {
+				base_origin = origin || get_origin(authHeaders);
+			} catch {
+				send400(res);
+				return;
+			}
+
 			const state = acquireState();
-			res.onAborted(() => { state.aborted = true; });
+			res.onAborted(() => { state.aborted = true; state.failBody?.(); });
 
 			const contentLength = parseInt(authHeaders['content-length'], 10);
 			if (!isNaN(contentLength) && contentLength > AUTH_BODY_LIMIT) {
@@ -2779,14 +3012,23 @@ if (WS_ENABLED) {
 
 			const body = readBody(res, AUTH_BODY_LIMIT, state, isNaN(contentLength) ? -1 : contentLength);
 
-			const base_origin = origin || get_origin(authHeaders);
-			const request = new Request(base_origin + url, {
-				method,
-				headers: authHeaders,
-				body,
-				// @ts-expect-error
-				duplex: 'half'
-			});
+			// The response is ended before the pooled state is handed back, so
+			// uWS will not call onAborted against a state object that now
+			// belongs to another request.
+			let request;
+			try {
+				request = new Request(base_origin + url, {
+					method,
+					headers: authHeaders,
+					body,
+					// @ts-expect-error
+					duplex: 'half'
+				});
+			} catch {
+				send400(res);
+				releaseState(state);
+				return;
+			}
 
 			const cookies = createCookies(authHeaders['cookie']);
 
@@ -2819,6 +3061,7 @@ if (WS_ENABLED) {
 					}
 
 					if (result instanceof Response) {
+						assertResponseStatus(result.status);
 						// User returned a full Response - honour it, but merge any
 						// cookies set via cookies.set() so both APIs work together.
 						const buf = result.body ? Buffer.from(await result.arrayBuffer()) : null;
@@ -2826,22 +3069,26 @@ if (WS_ENABLED) {
 						res.cork(() => {
 							res.writeStatus(String(result.status));
 							for (const [hk, hv] of result.headers) {
-								if (hk === 'set-cookie' || hk === 'content-length') continue;
+								if (hk === 'set-cookie' || hk === 'content-length' || hk === 'transfer-encoding' || hk === 'date') continue;
 								res.writeHeader(hk, hv);
 							}
 							for (const c of result.headers.getSetCookie()) res.writeHeader('set-cookie', c);
 							for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
 							if (buf) res.end(buf);
-							else res.end();
+							// Bodyless: what a 204 or 304 may say about its length is
+							// endBodyless's rule; `end()` would write a zero.
+							else endBodyless(res, result.status, result.headers.get('content-length'), false);
 						});
 						return;
 					}
 
-					// Implicit success: 204 No Content with any Set-Cookie headers
+					// Implicit success: 204 No Content with any Set-Cookie headers.
+					// No length reported: RFC 9110 8.6 forbids Content-Length on a
+					// 204, and uWS then writes neither framing header.
 					res.cork(() => {
 						res.writeStatus('204 No Content');
 						for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
-						res.endWithoutBody(0);
+						res.endWithoutBody();
 					});
 				})
 				.catch((err) => {
@@ -2858,12 +3105,13 @@ if (WS_ENABLED) {
 
 		// Reject non-POST verbs on the auth path so GET/HEAD do not fall through
 		// to the SSR catch-all (which would try to render a SvelteKit route).
-		app.any(authPath, (res) => {
+		app.any(authPath, (res, req) => {
+			const headOnly = req.getMethod() === 'head';
 			res.cork(() => {
 				res.writeStatus('405 Method Not Allowed');
 				res.writeHeader('allow', 'POST');
 				res.writeHeader('content-type', 'text/plain');
-				res.end('Method Not Allowed');
+				endText(res, 'Method Not Allowed', headOnly);
 			});
 		});
 

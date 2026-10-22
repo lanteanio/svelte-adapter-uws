@@ -553,7 +553,7 @@ Every internal `Map` / `Set` that grows with client behaviour or topic cardinali
 | `envelopePrefixCache` | 256 | FIFO half-evict | not exposed |
 | `decodeCache` | 256 | FIFO half-evict | not exposed |
 | SSR dedup in-flight | 500 | new request bypasses dedup | not exposed |
-| SSR dedup body buffer per request | 512 KB | response replays without dedup | not exposed |
+| SSR dedup body buffer per request | 512 KB | response streams without dedup, as does a body whose next chunk is not ready | not exposed |
 | Upgrade rate-limit IP map | 10,000 | LRU on 60s sweep | not exposed |
 | Aggregate live connections | unbounded by default | reject upgrade with 503 once `maxConcurrent` set | `upgradeAdmission.maxConcurrent` |
 | Outbound buffer per connection | 1 MB | uWS drops the frame for that subscriber only | `wsOptions.maxBackpressure` |
@@ -3591,25 +3591,48 @@ The adapter applies several allocation and caching strategies to stay off the GC
 - **Request state pooling** - SSR requests need a `{ aborted: false }` state object. Instead of allocating one per request (which promotes to V8's old generation and stays there), the adapter maintains a pool of up to 256 reusable state objects. Eliminates young-gen GC churn under sustained load.
 - **Envelope prefix cache** - `platform.publish()` and `platform.send()` wrap data in a `{"topic":"...","event":"...","data":...}` envelope. The prefix up to `"data":` is cached in a 256-entry LRU map keyed by topic+event. Repeated publishes to the same topic/event (the common case) skip 4 string concatenations and the character validation scan. The cache is trimmed every 60 seconds to reclaim stale entries from shifted traffic patterns.
 
+### Streamed response bodies
+
+A response whose body is a `ReadableStream` goes out as its chunks arrive: the headers and first chunk are sent as soon as that chunk exists, with backpressure on every later one. A body that fails after the response started closes the connection, so the client sees an incomplete response, never a cut body that looks complete.
+
+The adapter cancels the body when the client goes away before it has been sent, and for every HEAD request, whose body is never read. Cancelling runs the stream's `cancel()`, and after that the stream accepts no more chunks: a source that keeps calling `controller.enqueue()`, for example from a timer, throws inside that timer and stops the process. Clear timers and unsubscribe in `cancel()`:
+
+```js
+export function GET() {
+	let timer;
+	return new Response(new ReadableStream({
+		start(controller) {
+			timer = setInterval(() => controller.enqueue(new TextEncoder().encode('data: tick\n\n')), 1000);
+		},
+		cancel() {
+			clearInterval(timer);
+		}
+	}), { headers: { 'content-type': 'text/event-stream' } });
+}
+```
+
 ### SSR request deduplication
 
-When multiple concurrent requests arrive for the same anonymous (no cookie/auth) GET or HEAD URL, only one is dispatched to SvelteKit. The others wait for the result and reconstruct their own response from the shared buffer. This prevents redundant rendering work during traffic spikes, a common pattern when a post goes viral or a cron job hits a popular page at the same time as real users.
+When multiple concurrent requests arrive for the same anonymous (no cookie/auth) GET URL, only one is dispatched to SvelteKit. The others wait for the result and reconstruct their own response from the shared buffer. This prevents redundant rendering work during traffic spikes, a common pattern when a post goes viral or a cron job hits a popular page at the same time as real users.
+
+A response is shared only when its whole body is ready at once and is at most 512 KB. Any other body streams to the request that rendered it, and the requests that waited render their own:
+- A body with a chunk that is not ready yet: a page that streams a `load` promise, a file stream, a proxied `fetch()` body
+- A `text/event-stream` response
+- A body larger than 512 KB, or one that declares a larger `Content-Length`
 
 Dedup is automatically skipped for:
 - Any request with a `Cookie` or `Authorization` header (personalized responses must not be shared)
-- POST, PUT, PATCH, DELETE (mutations must always execute)
+- Methods other than GET, HEAD included (mutations must always execute; concurrent HEADs each render)
 - Responses with a `Set-Cookie` header (personalized)
-- Response bodies larger than 512 KB (too large to buffer and share)
-- Requests with an `X-No-Dedup: 1` header (opt-out escape hatch)
 
 No configuration is needed. The dedup map holds at most 500 in-flight keys simultaneously as a safety valve against memory pressure from unique URLs.
 
 **Vary and personalization contract:** The adapter deduplicates by method + URL only. It cannot inspect every possible input that might affect your response (user-agent quirks, custom headers, etc.). The contract is:
 
-- If your route handler produces different output based on a request header or other input, emit a `Vary` header listing those headers. The adapter checks the `Vary` header after rendering and discards the dedup entry if `Vary` is present, preventing that response from being shared.
-- If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), add `X-No-Dedup: 1` to opt out entirely.
+- If your route handler produces different output based on a request header or other input, emit a `Vary` header listing those headers. The adapter checks the `Vary` header after rendering and does not share a response whose `Vary` names anything other than `Accept-Encoding`.
+- If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), emit `Vary` with any request header the route reads, or set a cookie: either keeps the response from being shared.
 
-Anonymous GET/HEAD routes that produce the same output for all users (landing pages, docs, prerendered pages) benefit most from dedup and require no action.
+Anonymous GET routes that produce the same output for all users (landing pages, docs, prerendered pages) benefit most from dedup and require no action.
 
 **Measured benefit:** 200 concurrent requests to the same anonymous URL with a 5ms render delay: without dedup, 200 render calls; with dedup, 1 render call. 200x reduction in CPU and memory pressure.
 

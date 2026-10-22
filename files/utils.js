@@ -1,3 +1,5 @@
+import { isArrayBuffer, isUint8Array } from 'node:util/types';
+
 // - MIME types ------------------------------------------------------------------
 
 export const mimes = {
@@ -149,6 +151,198 @@ export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
 		}
 	});
 	return ok ? true : /** @type {Promise<boolean>} */ (drainPromise);
+}
+
+// - Response body reading ----------------------------------------------------
+
+const chunkEncoder = new TextEncoder();
+
+/**
+ * Convert an application stream chunk to its exact wire bytes.
+ * @param {unknown} value
+ * @returns {Uint8Array}
+ */
+export function responseChunkBytes(value) {
+	if (isUint8Array(value)) return value;
+	if (typeof value === 'string') return chunkEncoder.encode(value);
+	if (isArrayBuffer(value)) return new Uint8Array(value);
+	if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+	throw new TypeError('Response body chunks must be strings, ArrayBuffers or ArrayBuffer views');
+}
+
+/**
+ * @typedef {{ spent: boolean, turn?: Promise<void>, timer?: any }} ReadAllowance
+ */
+
+/**
+ * Stop the one check-phase deadline when its buffered prefix is released.
+ * @param {ReadAllowance} allowance
+ */
+export function releaseReadAllowance(allowance) {
+	if (allowance.timer !== undefined) clearImmediate(allowance.timer);
+	allowance.timer = undefined;
+	allowance.turn = undefined;
+	allowance.spent = true;
+}
+
+/**
+ * Read the next chunk if it is ready, without holding output on a later I/O
+ * read. An already-fulfilled read settles in the microtask fast path. A read
+ * that settles later races one check-phase deadline shared by the whole
+ * buffered prefix, so a chain of ready transforms can finish in this turn
+ * without renewing it. A read still pending at the deadline comes back as
+ * `{ pending }`, handed to the streaming owner exactly once.
+ *
+ * @param {ReadableStreamDefaultReader<unknown>} reader
+ * @param {ReadAllowance} [allowance]
+ * @returns {Promise<ReadableStreamReadResult<unknown> | { pending: Promise<ReadableStreamReadResult<unknown>> }>}
+ */
+export async function readReady(reader, allowance) {
+	let settled = false;
+	let failed = false;
+	let result;
+	let failure;
+	let owned = false;
+	const pending = reader.read();
+	pending.then(value => { result = value; settled = true; }, error => { failure = error; failed = true; settled = true; });
+	try {
+		await Promise.resolve();
+		if (!settled && !allowance?.spent) {
+			if (!allowance) { allowance = { spent: false }; owned = true; }
+			const budget = allowance;
+			budget.turn ??= new Promise(resolve => {
+				budget.timer = setImmediate(() => {
+					budget.timer = undefined;
+					budget.spent = true;
+					resolve();
+				});
+			});
+			await Promise.race([pending, budget.turn]);
+		}
+		if (failed) throw failure;
+		return settled ? result : { pending };
+	} finally {
+		if (owned) releaseReadAllowance(allowance);
+	}
+}
+
+/**
+ * Whether an SSR response may be buffered for cross-waiter dedup. A
+ * Server-Sent-Events stream never is: its first event may be a long time
+ * coming, and the leader would hold its headers - and every concurrent
+ * anonymous waiter on the same in-flight promise - until then. Those always
+ * stream.
+ *
+ * @param {Response} response
+ * @returns {boolean}
+ */
+export function isDedupBufferable(response) {
+	const contentType = (response.headers.get('content-type') || '').toLowerCase();
+	return !contentType.startsWith('text/event-stream');
+}
+
+/**
+ * Whether a response's declared length already rules sharing out, so the
+ * leader can stream without reading a byte. False means the length is
+ * unknown or within the cap and the body has to be read to decide.
+ *
+ * @param {Response} response
+ * @param {number} cap
+ * @returns {boolean}
+ */
+export function declaresBodyPastCap(response, cap) {
+	const declared = response.headers.get('content-length');
+	if (declared === null) return false;
+	const length = Number(declared);
+	return Number.isFinite(length) && length > cap;
+}
+
+/**
+ * Read a body until it ends, passes `cap`, or a later read needs I/O.
+ *
+ * The cap bounds what is HELD: a leader that read the whole body before
+ * asking whether it was small enough would already have spent the memory
+ * the cap exists to bound, once per concurrent request. So the read stops
+ * the moment the bytes read pass the cap, or the moment the next chunk is
+ * not ready, and what was read comes back as a stream that replays those
+ * chunks and then continues from the reader, so the leader streams the body
+ * it decided not to share without re-rendering or losing a byte.
+ *
+ * @param {ReadableStream<unknown>} body
+ * @param {number} cap
+ * @param {{ cancelResponse?: (() => void) | null }} [state]
+ * @returns {Promise<{ complete: true, bytes: Uint8Array } | { complete: false, stream: ReadableStream<Uint8Array> }>}
+ */
+export async function readBodyUpTo(body, cap, state) {
+	const reader = body.getReader();
+	/** @type {ReadAllowance} */
+	const allowance = { spent: false };
+	const cancel = () => { releaseReadAllowance(allowance); reader.cancel().catch(() => {}); };
+	if (state) state.cancelResponse = cancel;
+	/** @type {Uint8Array[]} */
+	const chunks = [];
+	let total = 0;
+	let pending;
+	try {
+		for (;;) {
+			const next = chunks.length ? await readReady(reader, allowance) : await reader.read();
+			if (next.pending) { pending = next.pending; break; }
+			const { done, value } = next;
+			if (done) {
+				reader.releaseLock();
+				const bytes = new Uint8Array(total);
+				let offset = 0;
+				for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+				return { complete: true, bytes };
+			}
+			const bytes = responseChunkBytes(value);
+			chunks.push(bytes);
+			total += bytes.byteLength;
+			if (total > cap) break;
+		}
+	} catch (error) {
+		reader.cancel(error).catch(() => {});
+		reader.releaseLock();
+		throw error;
+	} finally {
+		releaseReadAllowance(allowance);
+		if (state?.cancelResponse === cancel) state.cancelResponse = null;
+	}
+	// Replay the held prefix, then consume the exact read that was pending
+	// when buffering stopped. The wrapper's owner now owns cancellation too.
+	let replay = 0;
+	let released = false;
+	const release = () => { if (!released) { released = true; reader.releaseLock(); } };
+	const stream = new ReadableStream({
+		async pull(controller) {
+			if (replay < chunks.length) {
+				const chunk = chunks[replay];
+				chunks[replay++] = /** @type {any} */ (null);
+				controller.enqueue(chunk);
+				return;
+			}
+			try {
+				const next = pending || reader.read();
+				pending = null;
+				const { done, value } = await next;
+				if (released) return;
+				if (done) { release(); controller.close(); }
+				else controller.enqueue(responseChunkBytes(value));
+			} catch (error) {
+				if (released) return;
+				reader.cancel(error).catch(() => {});
+				release();
+				throw error;
+			}
+		},
+		cancel(reason) {
+			chunks.length = 0;
+			const cancelled = reader.cancel(reason);
+			release();
+			return cancelled;
+		}
+	});
+	return { complete: false, stream };
 }
 
 /**
@@ -812,6 +1006,121 @@ export function parse_origin(value) {
 		);
 	}
 	return url.origin;
+}
+
+/**
+ * @typedef {object} OriginSource
+ * @property {boolean} isTls          - true when running under SSLApp
+ * @property {string} protocolHeader  - lowercased PROTOCOL_HEADER name, '' when unset
+ * @property {string} hostHeader      - lowercased HOST_HEADER name, '' when unset
+ * @property {string} portHeader      - lowercased PORT_HEADER name, '' when unset
+ */
+
+/** A port as RFC 3986 spells one. */
+const PORT = /^[0-9]+$/;
+
+// The authority a request names, as RFC 9110 7.2 has the Host field carry it:
+// `uri-host [":" port]` (RFC 3986 3.2.2), with no userinfo. The host is a
+// bracketed IPv6 literal, or a non-empty run of unreserved and sub-delims
+// characters and percent escapes, which spells a reg-name and an IPv4 address
+// alike. Empty is refused too, because an http URI may not name an empty host
+// (RFC 9110 4.2.1).
+//
+// Checked where a lane turns the value into a request URL, because a `/`, `?`,
+// `#`, `\` or `@` in it moves the boundary between the authority and what
+// follows: `http://` + `a/admin/x?` + `/` resolves to the path `/admin/x`
+// whatever the target said, and every check on the target was made against
+// the target. An IPvFuture literal and an IPv6 zone identifier are refused
+// with the rest: no HTTP client sends one, and the URL parser behind this
+// cannot read either.
+const HOST = /^(?:\[[0-9A-Fa-f:.]+\]|(?:[A-Za-z0-9\-._~!$&'()*+,;=]|%[0-9A-Fa-f]{2})+)(?::[0-9]*)?$/;
+
+/**
+ * Whether a Host value, or the proxy header standing in for it, must be
+ * refused.
+ *
+ * @param {string | undefined} value
+ */
+export function invalidHost(value) {
+	return value === undefined || !HOST.test(value);
+}
+
+/**
+ * A header value that cannot be part of the request's origin. Names the
+ * header and what it must carry, never the value: the value is the client's,
+ * or a proxy's the operator needs to fix.
+ */
+export class OriginHeaderError extends Error {
+	/** @param {string} header @param {string} expected */
+	constructor(header, expected) {
+		super(`The ${header} header must carry ${expected}.`);
+		this.name = 'OriginHeaderError';
+		this.header = header;
+	}
+}
+
+/**
+ * The origin a request URL is built on when no ORIGIN is configured: the
+ * listener's scheme or PROTOCOL_HEADER's, and the authority of the Host header
+ * or of HOST_HEADER and PORT_HEADER.
+ *
+ * Throws an {@link OriginHeaderError} for a value that cannot be part of an
+ * origin, and callers answer that 400. The host is held to the authority
+ * grammar and the port to digits because the result is concatenated with the
+ * request target: anything else in either could end the authority early and
+ * put its own path, query or fragment in front of the one that was routed.
+ *
+ * @param {Record<string, string>} headers
+ * @param {OriginSource} source
+ * @returns {string}
+ */
+export function originFromHeaders(headers, source) {
+	const defaultProtocol = source.isTls ? 'https' : 'http';
+	let protocol = defaultProtocol;
+	if (source.protocolHeader) {
+		const claimed = headers[source.protocolHeader];
+		if (claimed) {
+			try {
+				protocol = decodeURIComponent(claimed);
+			} catch {
+				throw new OriginHeaderError(source.protocolHeader, "'http' or 'https'");
+			}
+		}
+	}
+	if (protocol !== 'http' && protocol !== 'https') {
+		throw new OriginHeaderError(source.protocolHeader, "'http' or 'https'");
+	}
+
+	const hostName = source.hostHeader && headers[source.hostHeader] ? source.hostHeader : 'host';
+	const host = headers[hostName];
+	if (!host || invalidHost(host)) {
+		throw new OriginHeaderError(hostName, 'a host and an optional port');
+	}
+
+	const port = source.portHeader ? headers[source.portHeader] : undefined;
+	if (!port) return `${protocol}://${host}`;
+	if (!PORT.test(port)) throw new OriginHeaderError(source.portHeader, 'a port number');
+	// The Host header often carries a port, e.g. "example.com:3000", and an
+	// empty one ("example.com:") is replaced too.
+	return `${protocol}://${host.replace(/:[0-9]*$/, '')}:${port}`;
+}
+
+/**
+ * The setting that configured a refused header, spelled as the operator sets
+ * it, or null when there is no proxy to blame: the Host header itself is the
+ * client's, even where HOST_HEADER names it.
+ *
+ * @param {string} header - `OriginHeaderError.header`
+ * @param {OriginSource} source
+ * @param {string} envPrefix - the adapter's `envPrefix`, '' when unset
+ * @returns {string | null}
+ */
+export function refusedHeaderSetting(header, source, envPrefix) {
+	if (header === 'host') return null;
+	if (header === source.protocolHeader) return envPrefix + 'PROTOCOL_HEADER';
+	if (header === source.hostHeader) return envPrefix + 'HOST_HEADER';
+	if (header === source.portHeader) return envPrefix + 'PORT_HEADER';
+	return null;
 }
 
 // - Chaos / fault-injection state ------------------------------------------
