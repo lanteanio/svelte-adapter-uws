@@ -2118,6 +2118,24 @@ describe('isOriginAllowed', () => {
 			expect(isOriginAllowed('http://example.com', { host: 'example.com' }, ctx)).toBe(true);
 		});
 
+		it('merges PORT_HEADER into the host as the request origin does', () => {
+			// With PORT_HEADER set, the Origin check and the origin the request
+			// URL is built on merge the port alike, the Host header's own empty
+			// port included.
+			const ctx = {
+				...baseCtx,
+				allowedOrigins: 'same-origin',
+				portHeader: 'x-forwarded-port',
+				isTls: true
+			};
+			for (const host of ['example.com', 'example.com:', 'example.com:3000']) {
+				const headers = { host, 'x-forwarded-port': '8443' };
+				const origin = originFromHeaders(headers, { isTls: true, protocolHeader: '', hostHeader: '', portHeader: 'x-forwarded-port' });
+				expect(origin, host).toBe('https://example.com:8443');
+				expect(isOriginAllowed(origin, headers, ctx), host).toBe(true);
+			}
+		});
+
 		it('accepts a matching origin (https)', () => {
 			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
 			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(true);

@@ -238,6 +238,8 @@ PROTOCOL_HEADER=x-forwarded-proto HOST_HEADER=x-forwarded-host node build
 
 > **Important:** `PROTOCOL_HEADER`, `HOST_HEADER`, `PORT_HEADER`, and `ADDRESS_HEADER` are trusted verbatim. Only set these when running behind a reverse proxy that overwrites the corresponding headers on every request. If the server is directly internet-facing, clients can spoof these values. When in doubt, use a fixed `ORIGIN` instead.
 
+Without `ORIGIN`, the URL your app and your `authenticate` hook see is built from the `Host` header, or from the `HOST_HEADER`, `PORT_HEADER` and `PROTOCOL_HEADER` values that stand in for it. Each must be what it names: a host name, IPv4 address or bracketed IPv6 address with an optional port, a port number, and `http` or `https`. Anything else is answered `400 Bad Request` before your code runs - `Host: a/admin?` would otherwise put its own path in front of the one in the request line. A refused configured header prints one warning naming it, because a proxy that writes it wrong turns every request into a 400.
+
 ---
 
 ## Quick start: WebSocket

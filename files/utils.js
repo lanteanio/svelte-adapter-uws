@@ -868,11 +868,12 @@ export function isOriginAllowed(reqOrigin, headers, ctx) {
 				? (headers[ctx.protocolHeader] || (ctx.isTls ? 'https' : 'http'))
 				: (ctx.isTls ? 'https' : 'http');
 			// Merge PORT_HEADER into the host the same way get_origin() does,
-			// so proxies that split host/port across headers still match.
+			// the Host header's own empty port included, so proxies that split
+			// host/port across headers still match.
 			const requestPort = ctx.portHeader ? headers[ctx.portHeader] : undefined;
 			let expectedHost = requestHost;
 			if (requestPort) {
-				expectedHost = requestHost.replace(/:\d+$/, '') + ':' + requestPort;
+				expectedHost = requestHost.replace(/:[0-9]*$/, '') + ':' + requestPort;
 			}
 			// Strip the default port so "example.com" matches "example.com:443"
 			// (URL.host omits the port when it is the default for the scheme).

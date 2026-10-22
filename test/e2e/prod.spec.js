@@ -452,7 +452,7 @@ test.describe('SSR response and abort paths (production)', () => {
 		expect(reply.split('\r\n')[0]).toMatch(/^HTTP\/1\.1 200/);
 		for (let i = 0; i < 10 && !closed; i++) sock.write(chunk(65536));
 		await within(gone, 'the cut');
-		expect(reply).not.toContain('413');
+		expect(reply).not.toMatch(/HTTP\/1\.1 413/);
 		expect(reply.endsWith('0\r\n\r\n'), 'no clean end of the chunked body').toBe(false);
 		await expectServing();
 	});
@@ -503,7 +503,8 @@ test.describe('SSR response and abort paths (production)', () => {
 			['HEAD /response/locked HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\n', 500],
 			['HEAD /__ws/auth HTTP/1.1\r\nHost: localhost\r\n', 405],
 			['HEAD /%E0%A4%A HTTP/1.1\r\nHost: localhost\r\n', 400],
-			['HEAD / HTTP/1.1\r\nHost: localhost/response\r\n', 400]
+			['HEAD / HTTP/1.1\r\nHost: localhost/response\r\n', 400],
+			['HEAD / HTTP/1.1\r\nHost: localhost:99999\r\n', 400]
 		];
 		if (process.platform === 'win32') own.push(['HEAD /a:b HTTP/1.1\r\nHost: localhost\r\n', 400]);
 		for (const [request, status] of own) {
@@ -527,6 +528,10 @@ test.describe('SSR response and abort paths (production)', () => {
 	test('a network-error Response is answered 500', async () => {
 		const res = parse(await rawExchange('GET /response/network-error HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nConnection: close\r\n\r\n'));
 		expect(res.status).toMatch(/^HTTP\/1\.1 500/);
+		const auth = parse(await rawExchange(
+			'POST /__ws/auth HTTP/1.1\r\nHost: localhost\r\nX-Requested-With: XMLHttpRequest\r\nX-Auth-Response: network-error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+		));
+		expect(auth.status, 'authenticate').toMatch(/^HTTP\/1\.1 500/);
 		await expectServing();
 	});
 

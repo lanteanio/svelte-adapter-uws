@@ -69,7 +69,8 @@ export function close(ws, { code, platform }) {
 }
 
 // Registers the authenticate endpoint. `x-auth-response: framing` returns a
-// Response carrying its own framing and Date headers, `empty` a bodyless 204;
+// Response carrying its own framing and Date headers, `empty` a bodyless 204,
+// `network-error` a Response.error();
 // a request carrying `x-probe-id` reads its whole body first and records how
 // that read ended: `rejected`, or `resolved:<bytes>`.
 export async function authenticate({ request, headers }) {
@@ -80,6 +81,7 @@ export async function authenticate({ request, headers }) {
 		});
 	}
 	if (shape === 'empty') return new Response(null, { status: 204 });
+	if (shape === 'network-error') return Response.error();
 	const id = headers['x-probe-id'];
 	if (!id) return;
 	record(id, 'entered');
