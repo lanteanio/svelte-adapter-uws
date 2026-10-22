@@ -2136,6 +2136,47 @@ describe('isOriginAllowed', () => {
 			}
 		});
 
+		it('refuses a Host that is not an authority, however the port merge would tidy it', () => {
+			const ctx = {
+				...baseCtx,
+				allowedOrigins: 'same-origin',
+				portHeader: 'x-forwarded-port',
+				isTls: true
+			};
+			// The merge and the default-port strip turn `a:80:` into `a:80`, and
+			// `a:443:` over plain http into `a:443`.
+			expect(isOriginAllowed('https://a:80', { host: 'a:80:', 'x-forwarded-port': '443' }, ctx)).toBe(false);
+			expect(isOriginAllowed('http://a:443', { host: 'a:443:', 'x-forwarded-port': '80' }, { ...ctx, isTls: false })).toBe(false);
+			expect(isOriginAllowed('https://a', { host: 'a:', 'x-forwarded-port': '443' }, ctx), 'an empty port is an authority').toBe(true);
+		});
+
+		describe('default-port stripping is anchored to the end of the host', () => {
+			it('does not eat the :80 inside :8080', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				expect(isOriginAllowed('http://example.com:8080', { host: 'example.com:8080' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:8080' }, ctx)).toBe(false);
+			});
+
+			it('does not eat the :80 inside :8000', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				expect(isOriginAllowed('http://example.com:8000', { host: 'example.com:8000' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:8000' }, ctx)).toBe(false);
+			});
+
+			it('does not eat the :443 inside :4433 (https)', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+				expect(isOriginAllowed('https://example.com:4433', { host: 'example.com:4433' }, ctx)).toBe(true);
+				expect(isOriginAllowed('https://example.com', { host: 'example.com:4433' }, ctx)).toBe(false);
+			});
+
+			it('still strips an exact trailing default port', () => {
+				const httpCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				const httpsCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:80' }, httpCtx)).toBe(true);
+				expect(isOriginAllowed('https://example.com', { host: 'example.com:443' }, httpsCtx)).toBe(true);
+			});
+		});
+
 		it('accepts a matching origin (https)', () => {
 			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
 			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(true);

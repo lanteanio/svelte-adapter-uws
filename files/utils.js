@@ -863,7 +863,10 @@ export function isOriginAllowed(reqOrigin, headers, ctx) {
 		try {
 			const parsed = new URL(reqOrigin);
 			const requestHost = (ctx.hostHeader && headers[ctx.hostHeader]) || headers['host'];
-			if (!requestHost) return false;
+			// A value that is not an authority names no host to be the same
+			// origin as, and the port merge below would otherwise tidy some of
+			// them (`a:80:`) into one.
+			if (!requestHost || invalidHost(requestHost)) return false;
 			const requestScheme = ctx.protocolHeader
 				? (headers[ctx.protocolHeader] || (ctx.isTls ? 'https' : 'http'))
 				: (ctx.isTls ? 'https' : 'http');
@@ -877,8 +880,10 @@ export function isOriginAllowed(reqOrigin, headers, ctx) {
 			}
 			// Strip the default port so "example.com" matches "example.com:443"
 			// (URL.host omits the port when it is the default for the scheme).
+			// Anchored to the end: an unanchored strip would eat the ':80' inside
+			// 'example.com:8080'.
 			const defaultPort = requestScheme === 'https' ? '443' : '80';
-			expectedHost = expectedHost.replace(':' + defaultPort, '');
+			expectedHost = expectedHost.replace(new RegExp(':' + defaultPort + '$'), '');
 			return parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
 		} catch {
 			return false;
